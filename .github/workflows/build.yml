@@ -93,6 +93,36 @@ jobs:
       shell: msys2 {0}
       run: make -C libretro -f Makefile -j4 platform=win
 
+  # Reads the same disc image as ISO, CSO (two frame sizes), CHD (every codec and two hunk sizes)
+  # and zipped (stored and deflated) through the core's own block devices and compares every
+  # block, boots each one, and checks the deflate, zstd, PNG and zip code against vectors made by
+  # Python's zlib, zstandard and Pillow.
+  test-libretro-images:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update -y -qq
+        sudo apt-get install -y libgl1-mesa-dev mame-tools genisoimage zip python3-pil python3-zstandard
+
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
+      with:
+        key: test-libretro-images
+
+    - name: Build the core and the checks
+      run: |
+        export PATH="/usr/lib/ccache:$PATH"
+        make -C libretro -f Makefile -j4 test-tools
+
+    - name: Run the checks
+      run: libretro/test/run.sh
+
   build:
     name: build (${{ matrix.id }})
     strategy:

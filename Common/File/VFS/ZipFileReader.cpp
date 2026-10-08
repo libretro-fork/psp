@@ -3,12 +3,11 @@
 #include <algorithm>  // for sort
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
-#ifdef SHARED_LIBZIP
-#include <zip.h>
-#else
-#include "ext/libzip/zip.h"
-#endif
+#include <encodings/crc32.h>
+#include <encodings/deflate.h>
+#include <zip/rzip_archive.h>
 
 #include "Common/Common.h"
 #include "Common/Log.h"
@@ -19,13 +18,55 @@
 // malicious zip can't drive an implausible (or, near UINT64_MAX, wrapping) allocation.
 static constexpr uint64_t MAX_ZIP_ENTRY_SIZE = 1ULL << 32;  // 4GB, generous for any real asset.
 
-ZipContainer::ZipContainer() noexcept : sourceData_(nullptr), zip_(nullptr) {}
-
-ZipContainer::ZipContainer(const Path &path) : sourceData_(new SourceData {path, nullptr}), zip_(nullptr) {
-	zip_source_t *source = zip_source_function_create(SourceCallback, sourceData_, nullptr);
-	if (source != nullptr && (zip_ = zip_open_from_source(source, ZIP_RDONLY, nullptr)) == nullptr) {
-		zip_source_free(source);
+static std::string AsciiLower(std::string_view s) {
+	std::string out(s);
+	for (char &c : out) {
+		if (c >= 'A' && c <= 'Z')
+			c += 'a' - 'A';
 	}
+	return out;
+}
+
+// Heap-allocated so the context rzip holds survives moves of the container.
+struct ZipFileSource {
+	FILE *file;
+};
+
+ZipContainer::ZipContainer(const Path &path) {
+	FILE *file = File::OpenCFile(path, "rb");
+	if (!file)
+		return;
+	const int64_t size = File::GetFileSize(file);
+	source_ = new ZipFileSource{ file };
+	read_ = &FileRead;
+	userdata_ = source_;
+	if (size > 0)
+		Open((uint64_t)size);
+	if (!zip_)
+		close();
+}
+
+ZipContainer::ZipContainer(ReadFunc read, void *userdata, uint64_t size) : read_(read), userdata_(userdata) {
+	Open(size);
+}
+
+void ZipContainer::Open(uint64_t size) {
+	rzip_archive_t *zip = nullptr;
+	if (rzip_archive_open(&zip, nullptr, size, read_, userdata_) != RZIP_OK)
+		return;
+	zip_ = zip;
+	// One pass to make name lookups cheap. First of any duplicates wins, like libzip.
+	const uint32_t count = rzip_archive_num_entries(zip_);
+	lowerIndex_.reserve(count);
+	for (uint32_t i = 0; i < count; i++)
+		lowerIndex_.emplace(AsciiLower(rzip_archive_entry(zip_, i)->name), (int)i);
+}
+
+int64_t ZipContainer::FileRead(void *userdata, uint64_t off, void *dst, size_t len) {
+	FILE *file = ((ZipFileSource *)userdata)->file;
+	if (File::Fseek(file, (int64_t)off, SEEK_SET) != 0)
+		return -1;
+	return (int64_t)fread(dst, 1, len, file);
 }
 
 ZipContainer::ZipContainer(ZipContainer &&other) noexcept {
@@ -33,10 +74,14 @@ ZipContainer::ZipContainer(ZipContainer &&other) noexcept {
 }
 
 ZipContainer &ZipContainer::operator=(ZipContainer &&other) noexcept {
-	sourceData_ = other.sourceData_;
-	zip_ = other.zip_;
-	other.sourceData_ = nullptr;
-	other.zip_ = nullptr;
+	if (this == &other)
+		return *this;
+	close();
+	std::swap(zip_, other.zip_);
+	std::swap(source_, other.source_);
+	std::swap(read_, other.read_);
+	std::swap(userdata_, other.userdata_);
+	lowerIndex_ = std::move(other.lowerIndex_);
 	return *this;
 }
 
@@ -45,109 +90,132 @@ ZipContainer::~ZipContainer() {
 }
 
 void ZipContainer::close() noexcept {
-	if (zip_ != nullptr) {
-		zip_close(zip_);
+	if (zip_) {
+		rzip_archive_close(zip_);
 		zip_ = nullptr;
 	}
-	delete sourceData_;
-	sourceData_ = nullptr;
-}
-
-ZipContainer::operator zip_t *() const noexcept {
-	return zip_;
-}
-
-zip_int64_t ZipContainer::SourceCallback(void *userdata, void *data, zip_uint64_t len, zip_source_cmd_t cmd) {
-	SourceData &sourceData = *(SourceData *)userdata;
-
-	switch (cmd) {
-		case ZIP_SOURCE_SUPPORTS:
-			return zip_source_make_command_bitmap(
-				ZIP_SOURCE_SUPPORTS,
-				ZIP_SOURCE_OPEN,
-				ZIP_SOURCE_READ,
-				ZIP_SOURCE_CLOSE,
-				ZIP_SOURCE_STAT,
-				ZIP_SOURCE_ERROR,
-				ZIP_SOURCE_SEEK,
-				ZIP_SOURCE_TELL,
-				-1);
-
-		case ZIP_SOURCE_OPEN:
-			{
-				FILE *newFile = File::OpenCFile(sourceData.path, "rb");
-				if (newFile == nullptr) {
-					return -1;
-				}
-				sourceData.file = newFile;
-				return 0;
-			}
-
-		case ZIP_SOURCE_READ:
-			{
-				size_t n = fread(data, 1, len, sourceData.file);
-				return ferror(sourceData.file) ? -1 : n;
-			}
-
-		case ZIP_SOURCE_CLOSE:
-			fclose(sourceData.file);
-			sourceData.file = nullptr;
-			return 0;
-
-		case ZIP_SOURCE_STAT:
-			if (sourceData.file == nullptr) {
-				zip_stat_t *stat = (zip_stat_t *)data;
-				zip_stat_init(stat);
-				stat->valid = 0;
-			} else {
-				int64_t pos = File::Ftell(sourceData.file);
-				if (pos == -1) {
-					return -1;
-				}
-				if (File::Fseek(sourceData.file, 0, SEEK_END) != 0) {
-					return -1;
-				}
-				int64_t size = File::Ftell(sourceData.file);
-				if (size != pos && File::Fseek(sourceData.file, pos, SEEK_SET) != 0) {
-					return -1;
-				}
-				zip_stat_t *stat = (zip_stat_t *)data;
-				zip_stat_init(stat);
-				stat->valid = ZIP_STAT_SIZE;
-				stat->size = size;
-			}
-			return 0;
-
-		case ZIP_SOURCE_ERROR:
-			return ZIP_ER_INTERNAL;
-
-		case ZIP_SOURCE_SEEK:
-			{
-				zip_source_args_seek_t *args = (zip_source_args_seek_t *)data;
-				if (args == nullptr) {
-					return -1;
-				}
-				return File::Fseek(sourceData.file, args->offset, args->whence) ? -1 : 0;
-			}
-
-		case ZIP_SOURCE_TELL:
-			return File::Ftell(sourceData.file);
-
-		default:
-			return -1;
+	if (source_) {
+		fclose(source_->file);
+		delete source_;
+		source_ = nullptr;
 	}
+	read_ = nullptr;
+	userdata_ = nullptr;
+	lowerIndex_.clear();
+}
+
+int ZipContainer::NumEntries() const {
+	return zip_ ? (int)rzip_archive_num_entries(zip_) : 0;
+}
+
+const char *ZipContainer::Name(int index) const {
+	const rzip_entry_t *e = zip_ ? rzip_archive_entry(zip_, (uint32_t)index) : nullptr;
+	return e ? e->name : nullptr;
+}
+
+uint64_t ZipContainer::Size(int index) const {
+	const rzip_entry_t *e = zip_ ? rzip_archive_entry(zip_, (uint32_t)index) : nullptr;
+	return e ? e->size : 0;
+}
+
+bool ZipContainer::IsDirectory(int index) const {
+	const rzip_entry_t *e = zip_ ? rzip_archive_entry(zip_, (uint32_t)index) : nullptr;
+	return e && e->is_dir;
+}
+
+int ZipContainer::Find(std::string_view name, bool nocase) const {
+	if (!zip_)
+		return -1;
+	auto it = lowerIndex_.find(AsciiLower(name));
+	if (it == lowerIndex_.end())
+		return -1;
+	if (!nocase && name != Name(it->second))
+		return rzip_archive_find(zip_, std::string(name).c_str());
+	return it->second;
+}
+
+bool ZipContainer::ExtractInto(int index, uint8_t *dst, size_t dstSize) const {
+	if (!zip_)
+		return false;
+	size_t len = 0;
+	return rzip_archive_extract_into(zip_, (uint32_t)index, dst, dstSize, &len) == RZIP_OK && len == Size(index);
+}
+
+bool ZipContainer::ExtractTo(int index, const std::function<bool(const uint8_t *, size_t)> &sink) const {
+	const rzip_entry_t *e = zip_ ? rzip_archive_entry(zip_, (uint32_t)index) : nullptr;
+	if (!e || (e->method != RZIP_METHOD_STORED && e->method != RZIP_METHOD_DEFLATE))
+		return false;
+	const size_t CHUNK = 256 * 1024;
+	std::vector<uint8_t> in(CHUNK);
+	uint32_t crc = 0;
+	uint64_t total = 0;
+	uint64_t inPos = 0;
+	if (e->method == RZIP_METHOD_STORED) {
+		while (inPos < e->csize) {
+			const size_t n = (size_t)std::min<uint64_t>(CHUNK, e->csize - inPos);
+			if (read_(userdata_, e->data_off + inPos, in.data(), n) != (int64_t)n)
+				return false;
+			inPos += n;
+			crc = encoding_crc32(crc, in.data(), n);
+			total += n;
+			if (!sink(in.data(), n))
+				return false;
+		}
+		return total == e->size && crc == e->crc;
+	}
+
+	void *inf = rinflate_new(-15);
+	if (!inf)
+		return false;
+	std::vector<uint8_t> out(CHUNK);
+	bool done = false, ok = true;
+	while (ok && !done && inPos < e->csize) {
+		const size_t n = (size_t)std::min<uint64_t>(CHUNK, e->csize - inPos);
+		if (read_(userdata_, e->data_off + inPos, in.data(), n) != (int64_t)n) {
+			ok = false;
+			break;
+		}
+		inPos += n;
+		rinflate_set_in(inf, in.data(), n);
+		for (;;) {
+			rinflate_set_out(inf, out.data(), CHUNK);
+			size_t rd = 0, wr = 0;
+			const int status = rinflate_process(inf, &rd, &wr);
+			if (wr) {
+				crc = encoding_crc32(crc, out.data(), wr);
+				total += wr;
+				if (!sink(out.data(), wr)) {
+					ok = false;
+					break;
+				}
+			}
+			if (status == RDEFLATE_PROCESS_END) {
+				done = true;
+				break;
+			}
+			if (status != RDEFLATE_PROCESS_NEXT) {
+				ok = false;
+				break;
+			}
+			// Room left over means this piece of input is used up.
+			if (wr < CHUNK)
+				break;
+		}
+	}
+	rinflate_free(inf);
+	return ok && done && total == e->size && crc == e->crc;
 }
 
 ZipFileReader *ZipFileReader::Create(const Path &zipFile, std::string_view inZipPath, bool logErrors) {
 	// The inZipPath is supposed to be a folder, and internally in this class, we suffix
-	// folder paths with '/', matching how the zip library works.
+	// folder paths with '/', matching how zip files name things.
 	std::string path(inZipPath);
 	if (!path.empty() && path.back() != '/') {
 		path.push_back('/');
 	}
 
 	ZipContainer zip(zipFile);
-	if (zip == nullptr) {
+	if (!zip) {
 		if (logErrors) {
 			ERROR_LOG(Log::IO, "Failed to open %s as a zip file", zipFile.c_str());
 		}
@@ -165,32 +233,30 @@ ZipFileReader::~ZipFileReader() {
 uint8_t *ZipFileReader::ReadFile(std::string_view path, size_t *size) {
 	std::string temp_path = join(inZipPath_, path);
 
-	std::lock_guard<std::mutex> guard(lock_);
-	// Figure out the file size first. TODO: Can this part be done without locking the mutex?
-	struct zip_stat zstat;
-	int retval = zip_stat(zip_file_, temp_path.c_str(), ZIP_FL_NOCASE | ZIP_FL_UNCHANGED, &zstat);
-	if (retval != 0) {
+	const int index = zip_file_.Find(temp_path);
+	if (index < 0) {
 		ERROR_LOG(Log::IO, "Error opening %s from ZIP", temp_path.c_str());
 		return 0;
 	}
-	// Sanity check the declared size before trusting it for an allocation - a corrupt
-	// or malicious zip could claim a huge (even ~UINT64_MAX, which would wrap the +1
-	// below to 0) size here.
-	if (zstat.size > MAX_ZIP_ENTRY_SIZE) {
-		ERROR_LOG(Log::IO, "Zip entry %s claims an implausible size (%llu), refusing to read", temp_path.c_str(), (unsigned long long)zstat.size);
+	const uint64_t entrySize = zip_file_.Size(index);
+	// Sanity check the declared size before trusting it for an allocation.
+	if (entrySize > MAX_ZIP_ENTRY_SIZE) {
+		ERROR_LOG(Log::IO, "Zip entry %s claims an implausible size (%llu), refusing to read", temp_path.c_str(), (unsigned long long)entrySize);
 		return 0;
 	}
-	zip_file *file = zip_fopen_index(zip_file_, zstat.index, ZIP_FL_NOCASE | ZIP_FL_UNCHANGED);
-	if (!file) {
-		ERROR_LOG(Log::IO, "Error opening %s from ZIP", temp_path.c_str());
+	uint8_t *contents = new uint8_t[entrySize + 1];
+	bool ok;
+	{
+		std::lock_guard<std::mutex> guard(lock_);
+		ok = zip_file_.ExtractInto(index, contents, (size_t)entrySize);
+	}
+	if (!ok) {
+		ERROR_LOG(Log::IO, "Error reading %s from ZIP", temp_path.c_str());
+		delete[] contents;
 		return 0;
 	}
-	uint8_t *contents = new uint8_t[zstat.size + 1];
-	zip_fread(file, contents, zstat.size);
-	zip_fclose(file);
-	contents[zstat.size] = 0;
-
-	*size = zstat.size;
+	contents[entrySize] = 0;
+	*size = (size_t)entrySize;
 	return contents;
 }
 
@@ -228,8 +294,6 @@ bool ZipFileReader::GetFileListing(std::string_view orig_path, std::vector<File:
 
 	listing->clear();
 
-	// INFO_LOG(Log::IO, "Zip: Listing '%s'", orig_path);
-
 	const std::string relativePath = path.substr(inZipPath_.size());
 
 	listing->reserve(directories.size() + files.size());
@@ -242,7 +306,6 @@ bool ZipFileReader::GetFileListing(std::string_view orig_path, std::vector<File:
 		info.exists = true;
 		info.isWritable = false;
 		info.isDirectory = true;
-		// INFO_LOG(Log::IO, "Found file: %s (%s)", info.name.c_str(), info.fullName.c_str());
 		listing->push_back(info);
 	}
 
@@ -259,7 +322,6 @@ bool ZipFileReader::GetFileListing(std::string_view orig_path, std::vector<File:
 				continue;
 			}
 		}
-		// INFO_LOG(Log::IO, "Found dir: %s (%s)", info.name.c_str(), info.fullName.c_str());
 		listing->push_back(info);
 	}
 
@@ -271,11 +333,11 @@ bool ZipFileReader::GetFileListing(std::string_view orig_path, std::vector<File:
 bool ZipFileReader::GetZipListings(const std::string &path, std::set<std::string> &files, std::set<std::string> &directories) {
 	_dbg_assert_(path.empty() || path.back() == '/');
 
-	std::lock_guard<std::mutex> guard(lock_);
-	int numFiles = zip_get_num_files(zip_file_);
+	// The directory is parsed at open and never changes, so this needs no lock.
+	const int numFiles = zip_file_.NumEntries();
 	bool anyPrefixMatched = false;
 	for (int i = 0; i < numFiles; i++) {
-		const char* name = zip_get_name(zip_file_, i, 0);
+		const char *name = zip_file_.Name(i);
 		if (!name)
 			continue;  // shouldn't happen, I think
 		if (startsWith(name, path)) {
@@ -303,7 +365,6 @@ bool ZipFileReader::GetZipListings(const std::string &path, std::set<std::string
 }
 
 bool ZipFileReader::GetFileInfo(std::string_view path, File::FileInfo *info) {
-	struct zip_stat zstat;
 	std::string temp_path = join(inZipPath_, path);
 
 	// Clear some things to start.
@@ -311,24 +372,17 @@ bool ZipFileReader::GetFileInfo(std::string_view path, File::FileInfo *info) {
 	info->isWritable = false;
 	info->size = 0;
 
-	{
-		std::lock_guard<std::mutex> guard(lock_);
-		if (0 != zip_stat(zip_file_, temp_path.c_str(), ZIP_FL_NOCASE | ZIP_FL_UNCHANGED, &zstat)) {
-			// ZIP files do not have real directories, so we'll end up here if we
-			// try to stat one. For now that's fine.
-			info->exists = false;
-			return false;
-		}
+	const int index = zip_file_.Find(temp_path);
+	if (index < 0) {
+		// ZIP files do not have real directories, so we'll end up here if we
+		// try to stat one. For now that's fine.
+		info->exists = false;
+		return false;
 	}
 
 	// Zips usually don't contain directory entries, but they may.
-	if ((zstat.valid & ZIP_STAT_NAME) != 0 && zstat.name && zstat.name[0] != '\0') {
-		info->isDirectory = zstat.name[strlen(zstat.name) - 1] == '/';
-	}
-	if ((zstat.valid & ZIP_STAT_SIZE) != 0) {
-		info->size = zstat.size;
-	}
-
+	info->isDirectory = zip_file_.IsDirectory(index);
+	info->size = zip_file_.Size(index);
 	info->fullName = Path(path);
 	info->exists = true;
 	return true;
@@ -339,19 +393,19 @@ public:
 	int zi;
 };
 
+// Members are decoded whole: straight into the caller's buffer when the first
+// read asks for all of it, which is how files are read here, else into data.
 class ZipFileReaderOpenFile : public VFSOpenFile {
 public:
-	~ZipFileReaderOpenFile() {
-		// Needs to be closed properly and unlocked.
-		_dbg_assert_(zf == nullptr);
-	}
 	ZipFileReaderFileReference *reference;
-	zip_file_t *zf = nullptr;
+	size_t size = 0;
+	size_t pos = 0;
+	bool decoded = false;
+	std::vector<uint8_t> data;
 };
 
 VFSFileReference *ZipFileReader::GetFile(std::string_view path) {
-	std::string p(path);
-	int zi = zip_name_locate(zip_file_, p.c_str(), ZIP_FL_NOCASE);  // this is EXPENSIVE
+	int zi = zip_file_.Find(path);
 	if (zi < 0) {
 		// Not found.
 		return nullptr;
@@ -363,16 +417,9 @@ VFSFileReference *ZipFileReader::GetFile(std::string_view path) {
 
 bool ZipFileReader::GetFileInfo(VFSFileReference *vfsReference, File::FileInfo *fileInfo) {
 	ZipFileReaderFileReference *reference = (ZipFileReaderFileReference *)vfsReference;
-	// If you crash here, you called this while having the lock held by having the file open.
-	// Don't do that, check the info before you open the file.
-	zip_stat_t zstat;
-	if (zip_stat_index(zip_file_, reference->zi, 0, &zstat) != 0)
-		return false;
 	*fileInfo = File::FileInfo{};
-	fileInfo->size = 0;
-	if (zstat.valid & ZIP_STAT_SIZE)
-		fileInfo->size = zstat.size;
-	return zstat.size;
+	fileInfo->size = zip_file_.Size(reference->zi);
+	return fileInfo->size != 0;
 }
 
 void ZipFileReader::ReleaseFile(VFSFileReference *vfsReference) {
@@ -383,93 +430,83 @@ void ZipFileReader::ReleaseFile(VFSFileReference *vfsReference) {
 
 VFSOpenFile *ZipFileReader::OpenFileForRead(VFSFileReference *vfsReference, size_t *size) {
 	ZipFileReaderFileReference *reference = (ZipFileReaderFileReference *)vfsReference;
+	*size = 0;
+	const uint64_t entrySize = zip_file_.Size(reference->zi);
+	if (entrySize > MAX_ZIP_ENTRY_SIZE) {
+		WARN_LOG(Log::G3D, "File with index %d in zip has an implausible size", reference->zi);
+		return nullptr;
+	}
 	ZipFileReaderOpenFile *openFile = new ZipFileReaderOpenFile();
 	openFile->reference = reference;
-	*size = 0;
-	// We only allow one file to be open for read concurrently. It's possible that this can be improved,
-	// especially if we only access by index like this.
-	lock_.lock();
-	zip_stat_t zstat;
-	if (zip_stat_index(zip_file_, reference->zi, 0, &zstat) != 0) {
-		lock_.unlock();
-		delete openFile;
-		return nullptr;
-	}
-
-	openFile->zf = zip_fopen_index(zip_file_, reference->zi, 0);
-	if (!openFile->zf) {
-		WARN_LOG(Log::G3D, "File with index %d not found in zip", reference->zi);
-		lock_.unlock();
-		delete openFile;
-		return nullptr;
-	}
-
-	*size = zstat.size;
-	// Intentionally leaving the mutex locked, will be closed in CloseFile.
+	openFile->size = (size_t)entrySize;
+	*size = openFile->size;
 	return openFile;
 }
 
 void ZipFileReader::Rewind(VFSOpenFile *vfsOpenFile) {
 	ZipFileReaderOpenFile *file = (ZipFileReaderOpenFile *)vfsOpenFile;
 	_assert_(file);
-	// Unless the zip file is compressed, can't seek directly, so we re-open.
-	// This version of libzip doesn't even have zip_file_is_seekable(), should probably upgrade.
-	zip_fclose(file->zf);
-	file->zf = zip_fopen_index(zip_file_, file->reference->zi, 0);
-	_dbg_assert_(file->zf != nullptr);
+	file->pos = 0;
 }
 
 size_t ZipFileReader::Read(VFSOpenFile *vfsOpenFile, void *buffer, size_t length) {
 	ZipFileReaderOpenFile *file = (ZipFileReaderOpenFile *)vfsOpenFile;
 	_assert_(file);
-	_dbg_assert_(file->zf != nullptr);
-	return zip_fread(file->zf, buffer, length);
+	if (file->pos >= file->size)
+		return 0;
+	if (!file->decoded && file->pos == 0 && length >= file->size) {
+		// The whole member in one read: decode it where it's going.
+		std::lock_guard<std::mutex> guard(lock_);
+		if (!zip_file_.ExtractInto(file->reference->zi, (uint8_t *)buffer, file->size))
+			return 0;
+		file->pos = file->size;
+		return file->size;
+	}
+	if (!file->decoded) {
+		file->data.resize(file->size);
+		std::lock_guard<std::mutex> guard(lock_);
+		if (!zip_file_.ExtractInto(file->reference->zi, file->data.data(), file->size))
+			return 0;
+		file->decoded = true;
+	}
+	const size_t n = std::min(length, file->size - file->pos);
+	memcpy(buffer, file->data.data() + file->pos, n);
+	file->pos += n;
+	return n;
 }
 
 void ZipFileReader::CloseFile(VFSOpenFile *vfsOpenFile) {
 	ZipFileReaderOpenFile *file = (ZipFileReaderOpenFile *)vfsOpenFile;
 	_assert_(file);
-	_dbg_assert_(file->zf != nullptr);
-	zip_fclose(file->zf);
-	file->zf = nullptr;
-	vfsOpenFile = nullptr;
-	lock_.unlock();
 	delete file;
 }
 
 bool ReadSingleFileFromZip(Path zipFile, const char *path, std::string *data, std::mutex *mutex) {
 	ZipContainer zip(zipFile);
-	if (zip == nullptr) {
+	if (!zip) {
 		return false;
 	}
 
-	struct zip_stat zstat;
-	if (zip_stat(zip, path, ZIP_FL_NOCASE | ZIP_FL_UNCHANGED, &zstat) != 0) {
+	const int index = zip.Find(path);
+	if (index < 0) {
 		return false;
 	}
-	if (zstat.size > MAX_ZIP_ENTRY_SIZE) {
-		ERROR_LOG(Log::IO, "Zip entry %s claims an implausible size (%llu), refusing to read", path, (unsigned long long)zstat.size);
+	const uint64_t size = zip.Size(index);
+	if (size > MAX_ZIP_ENTRY_SIZE) {
+		ERROR_LOG(Log::IO, "Zip entry %s claims an implausible size (%llu), refusing to read", path, (unsigned long long)size);
 		return false;
 	}
-	zip_file *file = zip_fopen_index(zip, zstat.index, ZIP_FL_UNCHANGED);
-	if (!file) {
+	std::string contents;
+	contents.resize((size_t)size);
+	if (!zip.ExtractInto(index, (uint8_t *)&contents[0], contents.size())) {
 		return false;
 	}
 	if (mutex) {
 		mutex->lock();
 	}
-	data->resize(zstat.size);
-	if (zip_fread(file, data->data(), zstat.size) != zstat.size) {
-		if (mutex) {
-			mutex->unlock();
-		}
-		data->resize(0);
-		zip_fclose(file);
-		return false;
-	}
+	data->swap(contents);
 	if (mutex) {
 		mutex->unlock();
 	}
-	zip_fclose(file);
 	return true;
 }

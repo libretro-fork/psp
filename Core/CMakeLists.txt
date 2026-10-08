@@ -721,10 +721,6 @@ if((MACOSX OR IOS) AND NOT LIBRETRO)
 		PROPERTIES COMPILE_FLAGS -fobjc-arc)
 endif()
 
-if(LIBRETRO)
-	target_include_directories(Core PRIVATE ${CMAKE_SOURCE_DIR}/libretro/libretro-common/include)
-endif()
-
 set(CoreExtraLibs)
 if(ANDROID)
 	list(APPEND CoreExtraLibs android)
@@ -735,7 +731,7 @@ endif()
 
 list(APPEND CoreExtraLibs armips)
 
-target_link_libraries(Core GPU Common chdr kirk cityhash sfmt19937 xbrz xxhash rcheevos at3_standalone lua
+target_link_libraries(Core GPU Common libretro-common kirk cityhash sfmt19937 xbrz xxhash rcheevos at3_standalone lua
 	aemu_postoffice_client ${CoreExtraLibs} ${CMAKE_DL_LIBS})
 
 # Winsock
@@ -762,7 +758,6 @@ if(FFmpeg_FOUND)
 		FFmpeg::avutil
 		FFmpeg::swresample
 		FFmpeg::swscale
-		${ZLIB_LIBRARY}
 	)
 elseif(BUILD_BUNDLED_FFMPEG)
 	target_compile_definitions(Core PRIVATE USE_FFMPEG=1)
@@ -773,7 +768,6 @@ elseif(BUILD_BUNDLED_FFMPEG)
 		avutil
 		swresample
 		swscale
-		${ZLIB_LIBRARY}
 	)
 endif()
 

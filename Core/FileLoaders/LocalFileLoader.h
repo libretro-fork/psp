@@ -46,6 +46,7 @@ public:
 private:
 #ifdef HAVE_LIBRETRO_VFS
 	FILE *file_ = nullptr;
+	s64 filePos_ = -1;  // where file_ is; -1 when unknown
 #elif !defined(_WIN32)
 	void DetectSizeFd();
 	int fd_ = -1;

@@ -199,12 +199,7 @@ option(USE_SYSTEM_SNAPPY "Dynamically link against system snappy" ${USE_SYSTEM_S
 option(USE_SYSTEM_FFMPEG "Dynamically link against system FFMPEG" ${USE_SYSTEM_FFMPEG})
 option(BUILD_BUNDLED_FFMPEG "Build bundled ffmpeg module" ${BUILD_BUNDLED_FFMPEG})
 option(USE_SYSTEM_FREETYPE "Dynamically link against system freetype" ${USE_SYSTEM_FREETYPE})
-option(USE_SYSTEM_LIBCHDR "Dynamically link against system libchdr" ${USE_SYSTEM_LIBCHDR})
-option(USE_SYSTEM_LIBZIP "Dynamically link against system libzip" ${USE_SYSTEM_LIBZIP})
-
-option(USE_SYSTEM_LIBPNG "Dynamically link against system libpng" ON)
 option(USE_SYSTEM_RAPIDJSON "Build using system rapidjson" ${USE_SYSTEM_RAPIDJSON})
-option(USE_SYSTEM_ZSTD "Dynamically link against system zstd" ${USE_SYSTEM_ZSTD})
 option(USE_SYSTEM_MINIUPNPC "Dynamically link against system miniUPnPc" ${USE_SYSTEM_MINIUPNPC})
 option(USE_ASAN "Use address sanitizer" OFF)
 option(USE_UBSAN "Use undefined behaviour sanitizer" OFF)
@@ -228,7 +223,6 @@ endif()
 if(WEBOS)
 	set(USING_X11_VULKAN OFF)
 	set(USING_GLES2 ON)
-	set(USE_SYSTEM_ZSTD OFF)
 	if(CMAKE_CXX_COMPILER MATCHES "arm")
         set(ARMV7 ON)
 	endif()
@@ -430,9 +424,6 @@ if(ARM64)
 endif()
 
 if(NOT MSVC)
-	# NEON optimizations in libpng17 seem to cause PNG load errors, see #14485.
-	add_compile_definitions(PNG_ARM_NEON_OPT=0)
-
 	add_compile_options(-Wall -Werror=return-type -Wno-unused-function -Wno-sign-compare -Wno-unused-but-set-variable "$<$<COMPILE_LANGUAGE:CXX>:-Wno-reorder>" -Wno-unknown-pragmas -Wno-unused-value -Wno-unused-variable -Wno-error=incompatible-pointer-types)
 	if(NOT CLANG)
 		# This one is very useful but has many false positives.
@@ -573,6 +564,48 @@ macro(setup_target_project TargetName ProjectDir)
 	endforeach()
 endmacro()
 
+# libretro-common, as one library everything links: the VFS, threading and codecs.
+# The headless test tools link it as well as the core.
+add_library(libretro-common STATIC
+	libretro/libretro-common/compat/compat_posix_string.c
+	libretro/libretro-common/compat/fopen_utf8.c
+	libretro/libretro-common/compat/compat_strl.c
+	libretro/libretro-common/encodings/encoding_crc32.c
+	libretro/libretro-common/encodings/encoding_deflate.c
+	libretro/libretro-common/encodings/encoding_huffman.c
+	libretro/libretro-common/encodings/encoding_rzstd.c
+	libretro/libretro-common/encodings/encoding_utf.c
+	libretro/libretro-common/features/features_cpu.c
+	libretro/libretro-common/file/file_path.c
+	libretro/libretro-common/file/file_path_io.c
+	libretro/libretro-common/formats/7z/r7z_lzma.c
+	libretro/libretro-common/formats/chd/rchd.c
+	libretro/libretro-common/formats/flac/rflac.c
+	libretro/libretro-common/formats/png/rpng.c
+	libretro/libretro-common/formats/png/rpng_encode.c
+	libretro/libretro-common/formats/zip/rzip_archive.c
+	libretro/libretro-common/queues/retro_spsc.c
+	libretro/libretro-common/queues/retro_waitable_spsc.c
+	libretro/libretro-common/rthreads/retro_asym_eventcount.c
+	libretro/libretro-common/rthreads/retro_eventcount.c
+	libretro/libretro-common/rthreads/retro_procbarrier.c
+	libretro/libretro-common/rthreads/rthreads.c
+	libretro/libretro-common/rthreads/tpool.c
+	libretro/libretro-common/streams/file_stream.c
+	libretro/libretro-common/streams/file_stream_transforms.c
+	libretro/libretro-common/streams/interface_stream.c
+	libretro/libretro-common/streams/memory_stream.c
+	libretro/libretro-common/streams/trans_stream.c
+	libretro/libretro-common/streams/trans_stream_deflate.c
+	libretro/libretro-common/streams/trans_stream_pipe.c
+	libretro/libretro-common/string/rstrtod.c
+	libretro/libretro-common/time/rtime.c
+	libretro/libretro-common/vfs/vfs_implementation.c)
+target_include_directories(libretro-common PUBLIC libretro/libretro-common/include)
+target_compile_definitions(libretro-common PUBLIC HAVE_RZSTD HAVE_RFLAC
+	HAVE_RCHD_DEFLATE HAVE_RCHD_LZMA HAVE_RCHD_FLAC HAVE_RCHD_ZSTD)
+target_link_libraries(libretro-common Threads::Threads)
+
 add_subdirectory(ext)
 
 include_directories(ext/OpenXR-SDK/include)
@@ -667,249 +700,6 @@ if(USE_FFMPEG)
 		set(CMAKE_REQUIRED_FLAGS "-pedantic -Wall -Werror -Wno-unused-variable")
 	endif()
 endif(USE_FFMPEG)
-
-find_package(ZLIB)
-if(ZLIB_FOUND AND NOT ANDROID)
-	include_directories(${ZLIB_INCLUDE_DIR})
-	add_compile_definitions(SHARED_ZLIB)
-else()
-	add_library(zlib STATIC
-		ext/zlib/adler32.c
-		ext/zlib/compress.c
-		ext/zlib/crc32.c
-		ext/zlib/crc32.h
-		ext/zlib/deflate.c
-		ext/zlib/deflate.h
-		ext/zlib/gzclose.c
-		ext/zlib/gzguts.h
-		ext/zlib/gzlib.c
-		ext/zlib/gzread.c
-		ext/zlib/gzwrite.c
-		ext/zlib/infback.c
-		ext/zlib/inffast.c
-		ext/zlib/inffast.h
-		ext/zlib/inffixed.h
-		ext/zlib/inflate.c
-		ext/zlib/inflate.h
-		ext/zlib/inftrees.c
-		ext/zlib/inftrees.h
-		ext/zlib/trees.c
-		ext/zlib/trees.h
-		ext/zlib/uncompr.c
-		ext/zlib/zconf.h
-		ext/zlib/zlib.h
-		ext/zlib/zutil.c
-		ext/zlib/zutil.h
-	)
-	include_directories(ext/zlib)
-	set(ZLIB_LIBRARY zlib)
-endif()
-
-if(NOT MSVC)
-	# These can be fast even for debug.
-	target_compile_options(udis86 PRIVATE "-O2")
-	target_compile_options(cityhash PRIVATE "-O2")
-	if(NOT ZLIB_FOUND)
-		target_compile_options(zlib PRIVATE "-O2")
-	endif()
-endif()
-
-
-find_package(LIBZIP)
-if(LIBZIP_FOUND AND USE_SYSTEM_LIBZIP)
-	include_directories(${LIBZIP_INCLUDE_DIRS})
-	add_compile_definitions(SHARED_LIBZIP)
-else()
-	add_library(libzip STATIC
-		ext/libzip/zip_add.c
-		ext/libzip/zip_add_dir.c
-		ext/libzip/zip_add_entry.c
-		ext/libzip/zip_algorithm_deflate.c
-		ext/libzip/zip_buffer.c
-		ext/libzip/zip_close.c
-		ext/libzip/zip_delete.c
-		ext/libzip/zip_dir_add.c
-		ext/libzip/zip_dirent.c
-		ext/libzip/zip_discard.c
-		ext/libzip/zip_entry.c
-		ext/libzip/zip_error.c
-		ext/libzip/zip_error_clear.c
-		ext/libzip/zip_error_get.c
-		ext/libzip/zip_error_get_sys_type.c
-		ext/libzip/zip_error_strerror.c
-		ext/libzip/zip_error_to_str.c
-		ext/libzip/zip_extra_field.c
-		ext/libzip/zip_extra_field_api.c
-		ext/libzip/zip_fclose.c
-		ext/libzip/zip_fdopen.c
-		ext/libzip/zip_file_add.c
-		ext/libzip/zip_file_error_clear.c
-		ext/libzip/zip_file_error_get.c
-		ext/libzip/zip_file_get_comment.c
-		ext/libzip/zip_file_get_external_attributes.c
-		ext/libzip/zip_file_get_offset.c
-		ext/libzip/zip_file_rename.c
-		ext/libzip/zip_file_replace.c
-		ext/libzip/zip_file_set_comment.c
-		ext/libzip/zip_file_set_encryption.c
-		ext/libzip/zip_file_set_external_attributes.c
-		ext/libzip/zip_file_set_mtime.c
-		ext/libzip/zip_file_strerror.c
-		ext/libzip/zip_fopen.c
-		ext/libzip/zip_fopen_encrypted.c
-		ext/libzip/zip_fopen_index.c
-		ext/libzip/zip_fopen_index_encrypted.c
-		ext/libzip/zip_fread.c
-		ext/libzip/zip_fseek.c
-		ext/libzip/zip_ftell.c
-		ext/libzip/zip_get_archive_comment.c
-		ext/libzip/zip_get_archive_flag.c
-		ext/libzip/zip_get_encryption_implementation.c
-		ext/libzip/zip_get_file_comment.c
-		ext/libzip/zip_get_name.c
-		ext/libzip/zip_get_num_entries.c
-		ext/libzip/zip_get_num_files.c
-		ext/libzip/zip_hash.c
-		ext/libzip/zip_io_util.c
-		ext/libzip/zip_libzip_version.c
-		ext/libzip/zip_memdup.c
-		ext/libzip/zip_name_locate.c
-		ext/libzip/zip_new.c
-		ext/libzip/zip_open.c
-		ext/libzip/zip_pkware.c
-		ext/libzip/zip_progress.c
-		ext/libzip/zip_rename.c
-		ext/libzip/zip_replace.c
-		ext/libzip/zip_set_archive_comment.c
-		ext/libzip/zip_set_archive_flag.c
-		ext/libzip/zip_set_default_password.c
-		ext/libzip/zip_set_file_comment.c
-		ext/libzip/zip_set_file_compression.c
-		ext/libzip/zip_set_name.c
-		ext/libzip/zip_source_accept_empty.c
-		ext/libzip/zip_source_begin_write.c
-		ext/libzip/zip_source_begin_write_cloning.c
-		ext/libzip/zip_source_buffer.c
-		ext/libzip/zip_source_call.c
-		ext/libzip/zip_source_close.c
-		ext/libzip/zip_source_commit_write.c
-		ext/libzip/zip_source_compress.c
-		ext/libzip/zip_source_crc.c
-		ext/libzip/zip_source_error.c
-		ext/libzip/zip_source_file_common.c
-		ext/libzip/zip_source_file_stdio.c
-		ext/libzip/zip_source_free.c
-		ext/libzip/zip_source_function.c
-		ext/libzip/zip_source_get_file_attributes.c
-		ext/libzip/zip_source_is_deleted.c
-		ext/libzip/zip_source_layered.c
-		ext/libzip/zip_source_open.c
-		ext/libzip/zip_source_pkware_decode.c
-		ext/libzip/zip_source_pkware_encode.c
-		ext/libzip/zip_source_read.c
-		ext/libzip/zip_source_remove.c
-		ext/libzip/zip_source_rollback_write.c
-		ext/libzip/zip_source_seek.c
-		ext/libzip/zip_source_seek_write.c
-		ext/libzip/zip_source_stat.c
-		ext/libzip/zip_source_supports.c
-		ext/libzip/zip_source_tell.c
-		ext/libzip/zip_source_tell_write.c
-		ext/libzip/zip_source_window.c
-		ext/libzip/zip_source_write.c
-		ext/libzip/zip_source_zip.c
-		ext/libzip/zip_source_zip_new.c
-		ext/libzip/zip_stat.c
-		ext/libzip/zip_stat_index.c
-		ext/libzip/zip_stat_init.c
-		ext/libzip/zip_strerror.c
-		ext/libzip/zip_string.c
-		ext/libzip/zip_unchange.c
-		ext/libzip/zip_unchange_all.c
-		ext/libzip/zip_unchange_archive.c
-		ext/libzip/zip_unchange_data.c
-		ext/libzip/zip_utf-8.c
-		ext/libzip/zip_err_str.c
-	)
-	if(WIN32)
-		target_compile_options(libzip PRIVATE $<$<C_COMPILER_ID:Clang>:-Wno-incompatible-function-pointer-types> $<$<C_COMPILER_ID:GNU>:-Wno-incompatible-pointer-types>)
-		target_sources(libzip PRIVATE
-			ext/libzip/zip_source_file_win32.c
-			ext/libzip/zip_source_file_win32_named.c
-			ext/libzip/zip_source_file_win32_utf16.c
-			ext/libzip/zip_source_file_win32_utf8.c
-		)
-		if(CMAKE_SYSTEM_NAME MATCHES WindowsPhone OR CMAKE_SYSTEM_NAME MATCHES WindowsStore)
-			target_sources(libzip PRIVATE ext/libzip/zip_random_uwp.c)
-		else()
-			target_sources(libzip PRIVATE ext/libzip/zip_source_file_win32_ansi.c ext/libzip/zip_random_win32.c)
-		endif()
-	else()
-		target_sources(libzip PRIVATE
-			ext/libzip/zip_mkstempm.c
-			ext/libzip/zip_source_file_stdio_named.c
-			ext/libzip/zip_random_unix.c
-		)
-	endif()
-	target_compile_definitions(libzip PRIVATE HAVE_STDBOOL_H)
-	include_directories(ext/libzip)
-	set(LIBZIP_LIBRARY libzip)
-endif()
-
-# Android and iOS require at least libpng17.
-if(ANDROID OR IOS)
-	set(PNG_REQUIRED_VERSION 1.7)
-else()
-	set(PNG_REQUIRED_VERSION 1.6)
-endif()
-
-if(USE_SYSTEM_LIBPNG)
-	find_package(PNG ${PNG_REQUIRED_VERSION})
-endif()
-if(PNG_FOUND)
-	include_directories(${PNG_INCLUDE_DIRS})
-else()
-	if(ARM)
-		set(PNG_ARM_INCLUDES
-			ext/libpng17/arm/arm_init.c
-			ext/libpng17/arm/filter_neon.S
-			ext/libpng17/arm/filter_neon_intrinsics.c
-		)
-	elseif(ARM64)
-		set(PNG_ARM_INCLUDES
-			ext/libpng17/arm/arm_init.c
-			ext/libpng17/arm/filter_neon_intrinsics.c
-		)
-	endif()
-	add_library(png17 STATIC
-		ext/libpng17/pngconf.h
-		ext/libpng17/pngdebug.h
-		ext/libpng17/png.c
-		ext/libpng17/png.h
-		ext/libpng17/pngerror.c
-		ext/libpng17/pngget.c
-		ext/libpng17/pnginfo.h
-		ext/libpng17/pnglibconf.h
-		ext/libpng17/pngmem.c
-		ext/libpng17/pngpread.c
-		ext/libpng17/pngpriv.h
-		ext/libpng17/pngread.c
-		ext/libpng17/pngrio.c
-		ext/libpng17/pngrtran.c
-		ext/libpng17/pngrutil.c
-		ext/libpng17/pngset.c
-		ext/libpng17/pngstruct.h
-		ext/libpng17/pngtrans.c
-		ext/libpng17/pngwio.c
-		ext/libpng17/pngwrite.c
-		ext/libpng17/pngwtran.c
-		ext/libpng17/pngwutil.c
-		${PNG_ARM_INCLUDES}
-	)
-	set(PNG_LIBRARIES png17)
-	include_directories(ext/libpng17)
-endif()
-
 
 set(targetExtra)
 set(targetExtraLibs)
@@ -1114,22 +904,6 @@ if(WIN32)
 endif()
 
 add_subdirectory(Common)
-
-if(USE_SYSTEM_ZSTD)
-	find_package(ZSTD REQUIRED)
-else()
-	add_subdirectory(ext/zstd-build)
-	include_directories(ext/zstd/lib)
-endif()
-
-if(USE_SYSTEM_LIBCHDR)
-	find_package(PkgConfig)
-	if(PkgConfig_FOUND)
-		pkg_check_modules(libchdr_PKGCONFIG IMPORTED_TARGET libchdr)
-	endif()
-else()
-	include_directories(ext/libchdr/include)
-endif()
 
 add_subdirectory(GPU)
 add_subdirectory(Core)

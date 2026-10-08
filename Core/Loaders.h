@@ -206,5 +206,5 @@ struct ZipFileInfo {
 ZipContainer ZipOpenPath(const Path &fileName);
 void ZipClose(ZipContainer &z);
 
-void DetectZipFileContents(zip_t *z, ZipFileInfo *info);
+void DetectZipFileContents(const ZipContainer &z, ZipFileInfo *info);
 bool DetectArchiveContents(VFSInterface *vfs, ZipFileInfo *info);

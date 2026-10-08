@@ -19,7 +19,6 @@
 
 #include <cstring>
 #include <memory>
-#include <png.h>
 
 #include "ext/basis_universal/basisu_transcoder.h"
 #include "ext/xxhash.h"

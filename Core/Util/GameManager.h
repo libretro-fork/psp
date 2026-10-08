@@ -42,7 +42,7 @@ struct ZipFileTask {
 	bool deleteAfter;
 };
 
-struct zip;
+class ZipContainer;
 class FileLoader;
 class Path;
 struct ZipFileInfo;
@@ -94,19 +94,19 @@ public:
 
 	// Extracts the contents of an open zip archive into dest. Exposed for testing.
 	// maxTotalSize limits the total decompressed size (zip bomb protection).
-	bool ExtractZipContents(struct zip *z, const Path &dest, const ZipFileInfo &info, bool allowRoot, int64_t maxTotalSize = 0x100000000ULL);
+	bool ExtractZipContents(const ZipContainer &z, const Path &dest, const ZipFileInfo &info, bool allowRoot, int64_t maxTotalSize = 0x100000000ULL);
 
 private:
 	void InstallZipContents(ZipFileTask task);
 	void InstallPkgContents(Path pkgPath, bool deleteAfter);
 	bool InstallMemstickZip(const Path &zipFile, const Path &dest, const ZipFileInfo &info);
-	bool InstallZippedISO(struct zip *z, int isoFileIndex, const Path &destDir);
+	bool InstallZippedISO(const ZipContainer &z, int isoFileIndex, const Path &destDir);
 	void UninstallGame(const std::string &name);
 
 	void InstallDone();
 
-	bool ExtractFile(struct zip *z, int file_index, const Path &outFilename, int64_t *bytesCopied, int64_t allBytes, int64_t maxTotalSize = 0x100000000ULL);
-	bool DetectTexturePackDest(struct zip *z, int iniIndex, Path &dest);
+	bool ExtractFile(const ZipContainer &z, int file_index, const Path &outFilename, int64_t *bytesCopied, int64_t allBytes, int64_t maxTotalSize = 0x100000000ULL);
+	bool DetectTexturePackDest(const ZipContainer &z, int iniIndex, Path &dest);
 	void SetInstallError(std::string_view err);
 
 	bool InstallInProgress() const { return installThread_.joinable(); }
@@ -126,4 +126,4 @@ private:
 
 extern GameManager g_GameManager;
 
-bool ZipCanExtractWithoutOverwrite(struct zip *z, const Path &destination, int stripChars, int maxOkFiles);
+bool ZipCanExtractWithoutOverwrite(const ZipContainer &z, const Path &destination, int stripChars, int maxOkFiles);

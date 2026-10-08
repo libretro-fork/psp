@@ -353,10 +353,6 @@ add_library(Common STATIC
 	${CMAKE_SOURCE_DIR}/ext/jpge/jpge.h
 )
 
-if(LIBRETRO)
-	target_include_directories(Common PRIVATE ${CMAKE_SOURCE_DIR}/libretro/libretro-common/include)
-endif()
-
 setup_target_project(Common Common)
 
 if(IOS)
@@ -389,15 +385,7 @@ if(WIN32)
 	target_link_libraries(Common winmm dsound dxguid d2d1 dwrite d3d11 Version dbghelp)
 endif()
 
-target_link_libraries(Common ${LIBZIP_LIBRARY} 7zip ${PNG_LIBRARIES} basis_universal ${ZLIB_LIBRARY} pugixml vma gason udis86 ${RT_LIB} ${ATOMIC_LIB})
-
-# ZIMLoad.cpp/ZIMSave.cpp, Serializer.cpp, and Render/TextureAtlas.cpp call directly into zstd.
-if(USE_SYSTEM_ZSTD)
-	target_include_directories(Common PRIVATE ${ZSTD_INCLUDE_DIR})
-	target_link_libraries(Common ${ZSTD_LIBRARY})
-else()
-	target_link_libraries(Common libzstd_static)
-endif()
+target_link_libraries(Common 7zip basis_universal pugixml vma gason udis86 libretro-common ${RT_LIB} ${ATOMIC_LIB})
 
 # Common/GPU/ShaderTranslation.cpp and Common/GPU/Vulkan/VulkanContext.cpp call directly into
 # glslang/spirv-cross, so Common needs to declare this dependency itself rather than relying on

@@ -25,7 +25,7 @@
 #include <vector>
 #include <thread>
 #include <snappy-c.h>
-#include <zstd.h>
+#include <encodings/rzstd.h>
 
 #include "Common/Profiler/Profiler.h"
 #include "Common/CommonTypes.h"
@@ -1082,8 +1082,8 @@ static bool ReadCompressed(u32 fp, void *dest, size_t sz, uint32_t version) {
 	size_t real_size = sz;
 	if (version < 5)
 		snappy_uncompress((const char *)compressed, compressed_size, (char *)dest, &real_size);
-	else
-		real_size = ZSTD_decompress(dest, real_size, compressed, compressed_size);
+	else if (rzstd_decode((uint8_t *)dest, sz, compressed, compressed_size, &real_size) != RZSTD_PROCESS_END)
+		real_size = 0;
 	delete[] compressed;
 
 	return real_size == sz;

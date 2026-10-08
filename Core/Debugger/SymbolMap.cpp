@@ -34,7 +34,7 @@
 #include <string_view>
 #include <unordered_map>
 
-#include "zlib.h"
+#include "Common/Data/Encoding/Compression.h"
 
 #include "ext/armips/Core/Assembler.h"
 
@@ -82,31 +82,32 @@ void SymbolMap::Clear() {
 bool SymbolMap::LoadSymbolMap(const Path &filename) {
 	Clear();
 
-	// TODO(scoped): Use gzdopen instead.
-
-#if defined(_WIN32) && defined(UNICODE)
-	gzFile f = gzopen_w(filename.ToWString().c_str(), "r");
-#else
-	gzFile f = gzopen(filename.c_str(), "r");
-#endif
-
-	if (f == Z_NULL)
+	// The map may be gzipped (bCompressSymbols) or plain text.
+	std::string contents;
+	if (!File::ReadBinaryFileToString(filename, &contents))
 		return false;
-
-	//char temp[256];
-	//fgets(temp,255,f); //.text section layout
-	//fgets(temp,255,f); //  Starting        Virtual
-	//fgets(temp,255,f); //  address  Size   address
-	//fgets(temp,255,f); //  -----------------------
+	if (contents.size() >= 2 && (u8)contents[0] == 0x1f && (u8)contents[1] == 0x8b) {
+		std::string plain;
+		if (!decompress_string(contents, &plain))
+			return false;
+		contents.swap(plain);
+	}
+	size_t pos = 0;
 
 	bool started = false;
 	bool hasModules = false;
 
-	while (!gzeof(f)) {
+	while (pos < contents.size()) {
 		char line[512], temp[256] = {0};
-		char *p = gzgets(f, line, 512);
-		if (p == NULL)
-			break;
+		size_t end = contents.find('\n', pos);
+		if (end == std::string::npos)
+			end = contents.size();
+		const size_t len = std::min(end - pos, sizeof(line) - 1);
+		memcpy(line, contents.data() + pos, len);
+		line[len] = '\0';
+		pos = end + 1;
+		if (len == 0)
+			continue;
 
 		// Chop any newlines off.
 		for (size_t i = strlen(line) - 1; i > 0; i--) {
@@ -205,7 +206,6 @@ bool SymbolMap::LoadSymbolMap(const Path &filename) {
 			}
 		}
 	}
-	gzclose(f);
 	activeNeedUpdate_ = true;
 	SortSymbols();
 	return started;
@@ -233,81 +233,13 @@ bool SymbolMap::SaveSymbolMap(const Path &filename) const {
 
 	std::string data;
 	buf.TakeAll(&data);
-	FILE *file = File::OpenCFile(filename, "wb");
-	if (file == nullptr) {
-		return false;
-	}
 	if (g_Config.bCompressSymbols) {
-		uInt out_size = 4096;
-		Bytef *out_data = (Bytef *)std::malloc(out_size);
-		if (out_data == nullptr) {
-			fclose(file);
+		std::string compressed;
+		if (!compress_string(data, &compressed, 9, 31))
 			return false;
-		}
-		z_stream strm;
-		strm.zalloc = nullptr;
-		strm.zfree = nullptr;
-		strm.opaque = nullptr;
-		if (deflateInit2(&strm, Z_BEST_COMPRESSION, Z_DEFLATED, MAX_WBITS + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-			std::free(out_data);
-			fclose(file);
-			return false;
-		}
-		strm.next_in = (Bytef *)data.data();
-		strm.avail_in = (u32)data.size();
-		strm.next_out = out_data;
-		strm.avail_out = out_size;
-		int flush = Z_NO_FLUSH;
-		for (;;) {
-			int status = deflate(&strm, flush);
-			switch (status) {
-				case Z_OK:
-				case Z_STREAM_END:
-					if (strm.avail_out != out_size) {
-						fwrite(out_data, 1, out_size - strm.avail_out, file);
-					}
-					break;
-				case Z_BUF_ERROR:
-					{
-						std::free(out_data);
-						uInt new_out_size = 2 * out_size;
-						if (new_out_size < out_size) {
-							deflateEnd(&strm);
-							fclose(file);
-							return false;
-						}
-						out_size = new_out_size;
-						out_data = (Bytef *)std::malloc(out_size);
-						if (out_data == nullptr) {
-							deflateEnd(&strm);
-							fclose(file);
-							return false;
-						}
-					}
-					break;
-				default:
-					deflateEnd(&strm);
-					std::free(out_data);
-					fclose(file);
-					return false;
-			}
-			if (status == Z_STREAM_END) {
-				break;
-			}
-			if (strm.avail_in == 0) {
-				flush = Z_FINISH;
-			}
-			strm.next_out = out_data;
-			strm.avail_out = out_size;
-		}
-		deflateEnd(&strm);
-		std::free(out_data);
-	} else {
-		// Just plain write it.
-		fwrite(data.data(), 1, data.size(), file);
+		data.swap(compressed);
 	}
-	fclose(file);
-	return true;
+	return File::WriteDataToFile(false, data.data(), data.size(), filename);
 }
 
 bool SymbolMap::LoadNocashSym(const Path &filename) {

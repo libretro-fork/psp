@@ -19,7 +19,6 @@
 
 #include "ppsspp_config.h"
 
-#include <png.h>
 
 #include "ext/basis_universal/basisu_transcoder.h"
 #include "ext/basis_universal/basisu_file_headers.h"
@@ -725,48 +724,32 @@ ReplacedTexture::LoadLevelResult ReplacedTexture::LoadLevelData(VFSFileReference
 		return LoadLevelResult::CONTINUE;
 
 	} else if (imageType == ReplacedImageType::PNG) {
-		png_image png = {};
-		png.version = PNG_IMAGE_VERSION;
-
 		std::string pngdata;
 		pngdata.resize(fileSize);
 		pngdata.resize(vfs_->Read(openFile, &pngdata[0], fileSize));
 		vfs_->CloseFile(openFile);
-		if (!png_image_begin_read_from_memory(&png, &pngdata[0], pngdata.size())) {
-			ERROR_LOG(Log::TexReplacement, "Could not load texture replacement info: %s - %s (zip)", filename.c_str(), png.message);
-			return LoadLevelResult::LOAD_ERROR;
-		}
-		if (png.width > (uint32_t)level.w || png.height > (uint32_t)level.h) {
-			ERROR_LOG(Log::TexReplacement, "Texture replacement changed since header read: %s", filename.c_str());
-			png_image_free(&png);
-			return LoadLevelResult::LOAD_ERROR;
-		}
 
-		bool checkedAlpha = false;
-		if ((png.format & PNG_FORMAT_FLAG_ALPHA) == 0) {
-			// Well, we know for sure it doesn't have alpha.
-			if (mipLevel == 0) {
-				alphaStatus_ = TextureAlpha::Solid;
-			}
-			checkedAlpha = true;
+		int w = 0, h = 0;
+		unsigned char *image = nullptr;
+		if (!pngLoadPtr((const unsigned char *)pngdata.data(), pngdata.size(), &w, &h, &image, level.w, level.h)) {
+			ERROR_LOG(Log::TexReplacement, "Could not load texture replacement: %s", filename.c_str());
+			return LoadLevelResult::LOAD_ERROR;
 		}
-		png.format = PNG_FORMAT_RGBA;
 
 		std::vector<uint8_t> &out = data_[mipLevel];
 		out.resize(level.w * level.h * 4);
-		if (!png_image_finish_read(&png, nullptr, &out[0], level.w * 4, nullptr)) {
-			ERROR_LOG(Log::TexReplacement, "Could not load texture replacement: %s - %s", filename.c_str(), png.message);
-			out.resize(0);
-			return LoadLevelResult::LOAD_ERROR;
+		if (w == level.w) {
+			memcpy(&out[0], image, (size_t)w * 4 * h);
+		} else {
+			for (int y = 0; y < h; ++y)
+				memcpy(&out[(size_t)level.w * 4 * y], image + (size_t)w * 4 * y, (size_t)w * 4);
 		}
-		png_image_free(&png);
+		free(image);
 
-		if (!checkedAlpha) {
-			// This will only check the hashed bits.
-			const TextureAlpha res = CheckAlpha32Rect((u32 *)&out[0], level.w, png.width, png.height, 0xFF000000);
-			if (res == TextureAlpha::Any || mipLevel == 0) {
-				alphaStatus_ = res;
-			}
+		// This will only check the hashed bits.
+		const TextureAlpha res = CheckAlpha32Rect((u32 *)&out[0], level.w, w, h, 0xFF000000);
+		if (res == TextureAlpha::Any || mipLevel == 0) {
+			alphaStatus_ = res;
 		}
 
 		levels_.push_back(level);

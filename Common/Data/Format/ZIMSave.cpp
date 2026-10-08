@@ -1,9 +1,11 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
-#include <zstd.h>
+#include <string>
 
-#include "zlib.h"
+#include <encodings/rzstd.h>
+
+#include "Common/Data/Encoding/Compression.h"
 
 #include "Common/Log.h"
 #include "Common/Data/Format/ZIMLoad.h"
@@ -24,48 +26,6 @@ static unsigned int log2i(unsigned int val) {
 }
 
 
-int ezcompress(unsigned char* pDest, long* pnDestLen, const unsigned char* pSrc, long nSrcLen, int compressLevel) {
-	z_stream stream;
-	int err;
-
-	int nExtraChunks;
-	uInt destlen;
-
-	stream.next_in = (Bytef*)pSrc;
-	stream.avail_in = (uInt)nSrcLen;
-#ifdef MAXSEG_64K
-	/* Check for source > 64K on 16-bit machine: */
-	if ((uLong)stream.avail_in != nSrcLen) return Z_BUF_ERROR;
-#endif
-	destlen = (uInt)*pnDestLen;
-	if ((uLong)destlen != (uLong)*pnDestLen) return Z_BUF_ERROR;
-	stream.zalloc = (alloc_func)0;
-	stream.zfree = (free_func)0;
-	stream.opaque = (voidpf)0;
-
-	err = deflateInit(&stream, compressLevel);
-	if (err != Z_OK) return err;
-	nExtraChunks = 0;
-	do {
-		stream.next_out = pDest;
-		stream.avail_out = destlen;
-		err = deflate(&stream, Z_FINISH);
-		if (err == Z_STREAM_END )
-			break;
-		if (err != Z_OK) {
-			deflateEnd(&stream);
-			return err;
-		}
-		nExtraChunks += 1;
-	} while (stream.avail_out == 0);
-
-	*pnDestLen = stream.total_out;
-
-	err = deflateEnd(&stream);
-	if (err != Z_OK) return err;
-
-	return nExtraChunks ? Z_BUF_ERROR : Z_OK;
-}
 
 inline int clamp16(int x) { if (x < 0) return 0; if (x > 15) return 15; return x; }
 inline int clamp32(int x) { if (x < 0) return 0; if (x > 31) return 31; return x; }
@@ -194,19 +154,16 @@ void SaveZIM(FILE *f, int width, int height, int pitch, int flags, const uint8_t
 		int data_size;
 		Convert(image_data, width, height, pitch, flags, &data, &data_size);
 		if (flags & ZIM_ZLIB_COMPRESSED) {
-			long dest_len = data_size * 2;
-			uint8_t *dest = new uint8_t[dest_len];
-			if (Z_OK == ezcompress(dest, &dest_len, data, data_size, compressLevel == 0 ? Z_DEFAULT_COMPRESSION : compressLevel)) {
-				fwrite(dest, 1, dest_len, f);
+			std::string dest;
+			if (compress_string(std::string((const char *)data, data_size), &dest, compressLevel == 0 ? 6 : compressLevel)) {
+				fwrite(dest.data(), 1, dest.size(), f);
 			} else {
 				ERROR_LOG(Log::IO, "Zlib compression failed.\n");
 			}
-			delete [] dest;
 		} else if (flags & ZIM_ZSTD_COMPRESSED) {
-			size_t dest_len = ZSTD_compressBound(data_size);
+			size_t dest_len = rzstd_compress_bound(data_size);
 			uint8_t *dest = new uint8_t[dest_len];
-			dest_len = ZSTD_compress(dest, dest_len, data, data_size, compressLevel == 0 ? 22 : compressLevel);
-			if (!ZSTD_isError(dest_len)) {
+			if (rzstd_encode(dest, dest_len, data, data_size, compressLevel == 0 ? 9 : compressLevel, &dest_len) == RZSTD_PROCESS_END) {
 				fwrite(dest, 1, dest_len, f);
 			} else {
 				ERROR_LOG(Log::IO, "Zlib compression failed.\n");

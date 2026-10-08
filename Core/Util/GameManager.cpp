@@ -24,11 +24,6 @@
 #include <set>
 #include <sstream>
 #include <thread>
-#ifdef SHARED_LIBZIP
-#include <zip.h>
-#else
-#include "ext/libzip/zip.h"
-#endif
 #ifdef _WIN32
 
 #include "Common/CommonWindows.h"
@@ -177,16 +172,15 @@ void GameManager::Update() {
 	}
 }
 
-bool ZipCanExtractWithoutOverwrite(struct zip *z, const Path &destination, int stripChars, int maxOkFiles) {
-	int numFiles = zip_get_num_files(z);
+bool ZipCanExtractWithoutOverwrite(const ZipContainer &z, const Path &destination, int stripChars, int maxOkFiles) {
+	int numFiles = z.NumEntries();
 	if (numFiles > maxOkFiles && maxOkFiles >= 0) {
 		// Ignore the check, just assume we can't.
 		return false;
 	}
 	for (int i = 0; i < numFiles; i++) {
-		const char *fn = zip_get_name(z, i, 0);
+		const char *fn = z.Name(i);
 		if (!fn) {
-			// zip_get_name() returns NULL on a corrupted central directory entry.
 			continue;
 		}
 		if (endsWith(fn, "/")) {
@@ -202,23 +196,12 @@ bool ZipCanExtractWithoutOverwrite(struct zip *z, const Path &destination, int s
 	return true;
 }
 
-static std::string ZipReadFileByIndex(struct zip *z, int file_index) {
-	struct zip_stat zstat;
-	zip_stat_init(&zstat);
-	if (zip_stat_index(z, file_index, 0, &zstat) != 0) {
-		return {};
-	}
+static std::string ZipReadFileByIndex(const ZipContainer &z, int file_index) {
 	std::string buffer;
-	buffer.resize(zstat.size);
-	zip_file *zf = zip_fopen_index(z, file_index, 0);
-	if (!zf) {
+	buffer.resize((size_t)z.Size(file_index));
+	if (buffer.empty() || !z.ExtractInto(file_index, (uint8_t *)&buffer[0], buffer.size())) {
 		return {};
 	}
-	if (zip_fread(zf, &buffer[0], buffer.size()) != (zip_int64_t)zstat.size) {
-		zip_fclose(zf);
-		return {};
-	}
-	zip_fclose(zf);
 	return buffer;
 }
 
@@ -454,17 +437,15 @@ void GameManager::InstallZipContents(ZipFileTask task) {
 	}
 }
 
-bool GameManager::DetectTexturePackDest(struct zip *z, int iniIndex, Path &dest) {
+bool GameManager::DetectTexturePackDest(const ZipContainer &z, int iniIndex, Path &dest) {
 	auto iz = GetI18NCategory(I18NCat::INSTALLZIP);
 
-	struct zip_stat zstat;
-	zip_stat_init(&zstat);
-	if (zip_stat_index(z, iniIndex, 0, &zstat) != 0) {
+	if (iniIndex < 0 || iniIndex >= z.NumEntries()) {
 		SetInstallError(iz->T("Zip archive corrupt"));
 		return false;
 	}
 
-	if (zstat.size >= 32 * 1024 * 1024) {
+	if (z.Size(iniIndex) >= 32 * 1024 * 1024) {
 		SetInstallError(iz->T("Texture pack doesn't support install"));
 		return false;
 	}
@@ -590,84 +571,47 @@ std::string GameManager::GetISOGameID(FileLoader *loader) const {
 	return sfo.GetValueString("DISC_ID");
 }
 
-bool GameManager::ExtractFile(struct zip *z, int file_index, const Path &outFilename, int64_t *bytesCopied, int64_t allBytes, int64_t maxTotalSize) {
-	struct zip_stat zstat;
-	zip_stat_init(&zstat);
-	if (zip_stat_index(z, file_index, 0, &zstat) != 0) {
-		ERROR_LOG(Log::HLE, "Failed to stat file by index (%d) (%s)", file_index, outFilename.c_str());
-		return false;
-	}
-	size_t size = zstat.size;
-	zip_file *zf = zip_fopen_index(z, file_index, 0);
-	if (!zf) {
-		ERROR_LOG(Log::HLE, "Failed to open file by index (%d) (%s)", file_index, outFilename.c_str());
-		return false;
-	}
-
+bool GameManager::ExtractFile(const ZipContainer &z, int file_index, const Path &outFilename, int64_t *bytesCopied, int64_t allBytes, int64_t maxTotalSize) {
+	const size_t size = (size_t)z.Size(file_index);
 	FILE *f = File::OpenCFile(outFilename, "wb");
-	if (f) {
-		// Don't spam the log.
-		if (file_index < 10) {
-			INFO_LOG(Log::HLE, "Writing %d bytes to '%s'", (int)size, outFilename.c_str());
-		}
-		size_t pos = 0;
-		const size_t blockSize = 1024 * 128;
-		u8 *buffer = new u8[blockSize];
-		while (pos < size) {
-			size_t readSize = std::min(blockSize, size - pos);
-			// Stop before the total would exceed the limit (zip bomb), even
-			// if the declared sizes in the archive were inaccurate.
-			if (*bytesCopied > maxTotalSize || readSize > maxTotalSize - *bytesCopied) {
-				ERROR_LOG(Log::HLE, "Bailing: zip contents too large, limit %d", (int)maxTotalSize);
-				delete[] buffer;
-				fclose(f);
-				zip_fclose(zf);
-				File::Delete(outFilename);
-				return false;
-			}
-			zip_int64_t retval = zip_fread(zf, buffer, readSize);
-			if (retval < 0 || (size_t)retval < readSize) {
-				ERROR_LOG(Log::HLE, "Failed to read %d bytes from zip (%d) - archive corrupt?", (int)readSize, (int)retval);
-				delete[] buffer;
-				fclose(f);
-				zip_fclose(zf);
-				File::Delete(outFilename);
-				return false;
-			}
-			size_t written = fwrite(buffer, 1, readSize, f);
-			if (written != readSize) {
-				ERROR_LOG(Log::HLE, "Wrote %d bytes out of %d - Disk full?", (int)written, (int)readSize);
-				delete[] buffer;
-				fclose(f);
-				zip_fclose(zf);
-				File::Delete(outFilename);
-				return false;
-			}
-			pos += readSize;
-
-			*bytesCopied += readSize;
-			installProgress_ = (float)*bytesCopied / (float)allBytes;
-		}
-
-		zip_fclose(zf);
-		fclose(f);
-
-		// Copy the mtime, too. May not be possible on Android?
-		if (zstat.mtime) {
-			File::ChangeMTime(outFilename, zstat.mtime);
-		}
-		delete[] buffer;
-		return true;
-	} else {
+	if (!f) {
 		auto iz = GetI18NCategory(I18NCat::INSTALLZIP);
 		g_OSD.Show(OSDType::MESSAGE_ERROR, iz->T("Installation failed"), outFilename.ToVisualString());
 		ERROR_LOG(Log::HLE, "Failed to open file for writing: %s", outFilename.c_str());
 		return false;
 	}
+	// Don't spam the log.
+	if (file_index < 10) {
+		INFO_LOG(Log::HLE, "Writing %d bytes to '%s'", (int)size, outFilename.c_str());
+	}
+	// Each decoded piece goes straight to the file.
+	const bool ok = z.ExtractTo(file_index, [&](const uint8_t *data, size_t len) {
+		// Stop before the total would exceed the limit (zip bomb), even
+		// if the declared sizes in the archive were inaccurate.
+		if (*bytesCopied > maxTotalSize || (int64_t)len > maxTotalSize - *bytesCopied) {
+			ERROR_LOG(Log::HLE, "Bailing: zip contents too large, limit %d", (int)maxTotalSize);
+			return false;
+		}
+		const size_t written = fwrite(data, 1, len, f);
+		if (written != len) {
+			ERROR_LOG(Log::HLE, "Wrote %d bytes out of %d - Disk full?", (int)written, (int)len);
+			return false;
+		}
+		*bytesCopied += len;
+		installProgress_ = (float)*bytesCopied / (float)allBytes;
+		return true;
+	});
+	fclose(f);
+	if (!ok) {
+		ERROR_LOG(Log::HLE, "Failed to extract file by index (%d) (%s) - archive corrupt?", file_index, outFilename.c_str());
+		File::Delete(outFilename);
+		return false;
+	}
+	return true;
 }
 
 // Doesn't care what it is, just extracts the whole ZIP to the requested location.
-bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipFileInfo &info, bool allowRoot, int64_t maxTotalSize) {
+bool GameManager::ExtractZipContents(const ZipContainer &z, const Path &dest, const ZipFileInfo &info, bool allowRoot, int64_t maxTotalSize) {
 	int64_t allBytes = 0;
 	int64_t bytesCopied = 0;
 
@@ -704,9 +648,8 @@ bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipF
 	std::vector<Path> createdFiles;
 	for (int i = 0; i < info.numFiles; i++) {
 		// Let's count the directories as the first 10%.
-		const char *fn = zip_get_name(z, i, 0);
+		const char *fn = z.Name(i);
 		if (!fn) {
-			// zip_get_name() returns NULL on a corrupted central directory entry.
 			continue;
 		}
 		std::string zippedName = fn;
@@ -733,17 +676,15 @@ bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipF
 			createdDirs.insert(outPath);
 		}
 		if (!isDir && fileAllowed(fn)) {
-			struct zip_stat zstat;
-			if (zip_stat_index(z, i, 0, &zstat) >= 0) {
-				// Guard against zip bombs: the total declared size must not
-				// exceed the limit. Check before adding to avoid overflow.
-				if ((int64_t)zstat.size > maxTotalSize || allBytes > maxTotalSize - (int64_t)zstat.size) {
-					ERROR_LOG(Log::HLE, "Bailing: zip contents too large (%d bytes), limit %d", (int)allBytes, (int)maxTotalSize);
-					SetInstallError(sy->T("Too large"));
-					goto bail;
-				}
-				allBytes += (int64_t)zstat.size;
+			const int64_t entrySize = (int64_t)z.Size(i);
+			// Guard against zip bombs: the total declared size must not
+			// exceed the limit. Check before adding to avoid overflow.
+			if (entrySize > maxTotalSize || allBytes > maxTotalSize - entrySize) {
+				ERROR_LOG(Log::HLE, "Bailing: zip contents too large (%d bytes), limit %d", (int)allBytes, (int)maxTotalSize);
+				SetInstallError(sy->T("Too large"));
+				goto bail;
 			}
+			allBytes += entrySize;
 		}
 		g_OSD.SetProgressBar("install", di->T("Installing..."), 0.0f, info.numFiles, (i + 1) * 0.1f, 0.1f);
 	}
@@ -752,9 +693,8 @@ bool GameManager::ExtractZipContents(struct zip *z, const Path &dest, const ZipF
 
 	// Now, loop through again in a second pass, writing files.
 	for (int i = 0; i < info.numFiles; i++) {
-		const char *fn = zip_get_name(z, i, 0);
+		const char *fn = z.Name(i);
 		if (!fn) {
-			// zip_get_name() returns NULL on a corrupted central directory entry.
 			continue;
 		}
 		// Note that we do NOT write files that are not in a directory, to avoid random
@@ -845,11 +785,10 @@ bool GameManager::InstallMemstickZip(const Path &zipfile, const Path &dest, cons
 	return true;
 }
 
-bool GameManager::InstallZippedISO(struct zip *z, int isoFileIndex, const Path &destDir) {
+bool GameManager::InstallZippedISO(const ZipContainer &z, int isoFileIndex, const Path &destDir) {
 	// Let's place the output file in the currently selected Games directory.
-	const char *fnPtr = zip_get_name(z, isoFileIndex, 0);
+	const char *fnPtr = z.Name(isoFileIndex);
 	if (!fnPtr) {
-		// zip_get_name() returns NULL on a corrupted central directory entry.
 		return false;
 	}
 	std::string fn = fnPtr;
@@ -859,16 +798,12 @@ bool GameManager::InstallZippedISO(struct zip *z, int isoFileIndex, const Path &
 	} else {
 		nameOffset++;
 	}
-	size_t allBytes = 1;
-	struct zip_stat zstat;
-	zip_stat_init(&zstat);
-	if (zip_stat_index(z, isoFileIndex, 0, &zstat) >= 0) {
-		allBytes += zstat.size;
-	}
+	const size_t isoSize = (size_t)z.Size(isoFileIndex);
+	size_t allBytes = 1 + isoSize;
 
 	std::string name = fn.substr(nameOffset);
 
-	INFO_LOG(Log::IO, "Name in zip: %s  size: %d", name.c_str(), (int)zstat.size);
+	INFO_LOG(Log::IO, "Name in zip: %s  size: %d", name.c_str(), (int)isoSize);
 
 	if (startsWith(name, "._")) {
 		// Not sure why Apple seems to add this when zipping file?

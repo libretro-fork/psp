@@ -557,13 +557,27 @@ else
 	$(LD) $(LINKOUT)$@ $(OBJECTS) $(LDFLAGS) $(GL_LIB)
 endif
 
+# Host-side image and codec checks (test/run.sh). They link the core's own objects,
+# so they build with the same flags; minixmlvalid.o is a program of its own.
+comma := ,
+TEST_OBJECTS = $(filter-out %/minixmlvalid.o,$(OBJECTS))
+TEST_LDFLAGS = $(filter-out -shared -Wl$(comma)--version-script=link.T,$(LDFLAGS))
+
+test/%: test/%.o $(TEST_OBJECTS)
+	$(LD) $(LINKOUT)$@ $< $(TEST_OBJECTS) $(TEST_LDFLAGS) $(GL_LIB)
+
+test/lrtest: test/lrtest.c
+	$(CC) -O2 -I$(LIBRETROCOMMONDIR)/include -o $@ $< -ldl
+
+test-tools: $(TARGET) test/codectest test/blocktest test/lrtest
+
 clean:
-	rm -f $(filter-out $(CORE_DIR)/ext/zstd/lib/decompress/huf_decompress_amd64.S,$(OBJECTS)) $(TARGET)
+	rm -f $(OBJECTS) $(TARGET) test/*.o test/codectest test/blocktest test/lrtest
 ifeq ($(FFMPEG_MINGW), 1)
 	rm -rf $(FFMPEG_MINGW_DIR)
 endif
 
-.PHONY: clean
+.PHONY: clean test-tools
 
 print-%:
 	@echo '$*=$($*)'

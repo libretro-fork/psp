@@ -1,100 +1,113 @@
-// Little utility functions for data compression.
-// Taken from http://panthema.net/2007/0328-ZLibString.html
-
-
-#include <string>
-#include <stdexcept>
 #include <cstring>
 
-#include <zlib.h>
+#include <encodings/deflate.h>
 
+#include "Common/Data/Encoding/Compression.h"
 #include "Common/Log.h"
 
-/** Compress a STL string using zlib with given compression level and return
-* the binary data. */
-bool compress_string(const std::string& str, std::string *dest, int compressionlevel) {
-	z_stream zs;                        // z_stream is zlib's control structure
-	memset(&zs, 0, sizeof(zs));
+int64_t InflateBuffer(void *stream, int windowBits, const uint8_t *in, size_t inLen, uint8_t *out, size_t outLen, size_t *consumed) {
+	rinflate_reset(stream, windowBits);
+	rinflate_set_in(stream, in, inLen);
+	rinflate_set_out(stream, out, outLen);
+	size_t rd = 0, wr = 0;
+	// One call runs until the stream ends or a buffer runs out.
+	const int status = rinflate_process(stream, &rd, &wr);
+	if (consumed)
+		*consumed = rd;
+	return status == RDEFLATE_PROCESS_END ? (int64_t)wr : -1;
+}
 
-	if (deflateInit(&zs, compressionlevel) != Z_OK) {
-		ERROR_LOG(Log::IO, "deflateInit failed while compressing.");
-		return false;
-	}
+int64_t InflateBuffer(int windowBits, const uint8_t *in, size_t inLen, uint8_t *out, size_t outLen, size_t *consumed) {
+	void *stream = rinflate_new(windowBits);
+	if (!stream)
+		return -1;
+	const int64_t result = InflateBuffer(stream, windowBits, in, inLen, out, outLen, consumed);
+	rinflate_free(stream);
+	return result;
+}
 
-	zs.next_in = (Bytef*)str.data();
-	zs.avail_in = (uInt)str.size();           // set the z_stream's input
-
-	int ret;
-	char outbuffer[32768];
-	std::string outstring;
-
-	// retrieve the compressed bytes blockwise
-	do {
-		zs.next_out = reinterpret_cast<Bytef*>(outbuffer);
-		zs.avail_out = sizeof(outbuffer);
-
-		ret = deflate(&zs, Z_FINISH);
-
-		if (outstring.size() < zs.total_out) {
-			// append the block to the output string
-			outstring.append(outbuffer,
-				zs.total_out - outstring.size());
+uint32_t Adler32(uint32_t adler, const uint8_t *buf, size_t len) {
+	// 5552 is the most bytes that can be summed before the 32-bit sums overflow.
+	uint32_t a = adler & 0xFFFF, b = adler >> 16;
+	while (len > 0) {
+		size_t n = len < 5552 ? len : 5552;
+		len -= n;
+		while (n--) {
+			a += *buf++;
+			b += a;
 		}
-	} while (ret == Z_OK);
-
-	deflateEnd(&zs);
-
-	if (ret != Z_STREAM_END) {          // an error occurred that was not EOF
-		ERROR_LOG(Log::IO, "Exception during zlib compression: (%d): %s", ret, zs.msg);
-		return false;
+		a %= 65521;
+		b %= 65521;
 	}
+	return (b << 16) | a;
+}
 
-	*dest = outstring;
+// Runs a stream to its end, growing *dest as output arrives.
+template <class Process, class SetOut>
+static bool RunToEnd(void *stream, std::string *dest, size_t initial, Process process, SetOut setOut) {
+	std::string out;
+	out.resize(initial < 4096 ? 4096 : initial);
+	size_t used = 0;
+	for (;;) {
+		setOut(stream, (uint8_t *)&out[used], out.size() - used);
+		size_t rd = 0, wr = 0;
+		const int status = process(stream, &rd, &wr);
+		used += wr;
+		if (status == RDEFLATE_PROCESS_END)
+			break;
+		if (status != RDEFLATE_PROCESS_NEXT)
+			return false;
+		if (used == out.size())
+			out.resize(out.size() * 2);
+		else if (rd == 0 && wr == 0)
+			return false;  // input ran out before the end of the stream
+	}
+	out.resize(used);
+	*dest = std::move(out);
 	return true;
 }
 
-/** Decompress an STL string using zlib and return the original data. */
-bool decompress_string(const std::string& str, std::string *dest) {
-	if (!str.size())
+bool compress_string(const std::string &str, std::string *dest, int compressionlevel, int windowBits) {
+	void *stream = rdeflate_new(compressionlevel, windowBits);
+	if (!stream)
 		return false;
+	rdeflate_set_in(stream, (const uint8_t *)str.data(), str.size());
+	rdeflate_finish(stream);
+	const bool ok = RunToEnd(stream, dest, str.size() / 2 + 64, rdeflate_process, rdeflate_set_out);
+	rdeflate_free(stream);
+	if (!ok)
+		ERROR_LOG(Log::IO, "deflate failed while compressing.");
+	return ok;
+}
 
-	z_stream zs;                        // z_stream is zlib's control structure
-	memset(&zs, 0, sizeof(zs));
-
-	// modification by hrydgard: inflateInit2, 16+MAXWBITS makes it read gzip data too
-	if (inflateInit2(&zs, 32+MAX_WBITS) != Z_OK) {
-		ERROR_LOG(Log::IO, "inflateInit failed while decompressing.");
+bool decompress_string(const std::string &str, std::string *dest) {
+	if (str.empty())
 		return false;
-	}
-
-	zs.next_in = (Bytef*)str.data();
-	zs.avail_in = (uInt)str.size();
-
-	int ret;
-	char outbuffer[32768];
-	std::string outstring;
-
-	// get the decompressed bytes blockwise using repeated calls to inflate
-	do {
-		zs.next_out = reinterpret_cast<Bytef*>(outbuffer);
-		zs.avail_out = sizeof(outbuffer);
-
-		ret = inflate(&zs, 0);
-
-		if (outstring.size() < zs.total_out) {
-			outstring.append(outbuffer,
-				zs.total_out - outstring.size());
-		}
-
-	} while (ret == Z_OK);
-
-	inflateEnd(&zs);
-
-	if (ret != Z_STREAM_END) {          // an error occurred that was not EOF
-		ERROR_LOG(Log::IO, "Exception during zlib decompression: (%i) %s", ret, zs.msg);
+	void *stream = rinflate_new(47);
+	if (!stream)
 		return false;
-	}
+	rinflate_set_in(stream, (const uint8_t *)str.data(), str.size());
+	// rinflate_set_out treats each new window as following the last, so growing works.
+	const bool ok = RunToEnd(stream, dest, str.size() * 4, rinflate_process, rinflate_set_out);
+	rinflate_free(stream);
+	if (!ok)
+		ERROR_LOG(Log::IO, "inflate failed while decompressing.");
+	return ok;
+}
 
-	*dest = outstring;
-	return true;
+// The prebuilt FFmpeg archives were linked against zlib and still call these two
+// (adler32 in the MOV/MXF demuxers, uncompress for compressed ID3v2 frames).
+// zlib's own ABI, so those archives resolve against libretro-common's inflate.
+extern "C" unsigned long adler32(unsigned long adler, const unsigned char *buf, unsigned int len) {
+	if (!buf)
+		return 1;
+	return Adler32((uint32_t)adler, buf, len);
+}
+
+extern "C" int uncompress(unsigned char *dest, unsigned long *destLen, const unsigned char *source, unsigned long sourceLen) {
+	const int64_t produced = InflateBuffer(15, source, sourceLen, dest, *destLen);
+	if (produced < 0)
+		return -3;  // Z_DATA_ERROR
+	*destLen = (unsigned long)produced;
+	return 0;  // Z_OK
 }

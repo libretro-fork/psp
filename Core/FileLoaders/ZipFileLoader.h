@@ -1,34 +1,32 @@
 #pragma once
 
-#include <mutex>
-
-#ifdef SHARED_LIBZIP
-#include <zip.h>
-#else
-#include "ext/libzip/zip.h"
-#endif
-
 #include "Common/CommonTypes.h"
 #include "Common/Log.h"
 #include "Common/File/Path.h"
+#include "Common/File/VFS/ZipFileReader.h"
 #include "Common/StringUtils.h"
 #include "Core/Loaders.h"
 
+struct rzip_seek;
+
 // Exposes a single (chosen) file from a zip file as another file loader.
 // Useful in a bunch of possible chains.
+// A stored member is read straight from the backend at its offset. A deflated one
+// goes through an rzip_seek index, built as far as reads reach: restart points
+// every megabyte and a few decoded spans, instead of the whole member in memory.
 class ZipFileLoader : public ProxiedFileLoader {
 public:
 	ZipFileLoader(FileLoader *sourceLoader);
 	~ZipFileLoader() override;
 
-	zip_t *GetZip() const {
-		return zipArchive_;
+	const ZipContainer &GetZip() const {
+		return zip_;
 	}
 
 	bool Initialize(int fileIndex);
 
 	bool Exists() override {
-		return dataFile_ != nullptr;
+		return initialized_;
 	}
 
 	bool IsDirectory() override {
@@ -53,17 +51,13 @@ public:
 	}
 
 private:
-	zip_int64_t ZipSourceCallback(void* data, zip_uint64_t len, zip_source_cmd_t cmd);
+	static int64_t BackendRead(void *userdata, uint64_t off, void *dst, size_t len);
 
-	enum {
-		BLOCK_SIZE = 65536,
-	};
-	zip_t *zipArchive_ = nullptr;
-	s64 zipReadPos_ = 0;
-
-	zip_file_t *dataFile_ = nullptr;
-	uint8_t *data_ = nullptr;  // malloc/free
-	s64 dataReadPos_ = 0;
+	ZipContainer zip_;
+	bool initialized_ = false;
+	bool stored_ = false;
+	u64 dataOffset_ = 0;          // stored members: where the bytes start in the zip
+	struct rzip_seek *seek_ = nullptr;  // deflated members
 	s64 dataFileSize_ = 0;
 	std::string fileExtension_;
 };

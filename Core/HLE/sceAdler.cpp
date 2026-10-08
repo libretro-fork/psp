@@ -15,11 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#ifdef SHARED_ZLIB
-#include <zlib.h>
-#else
-#include "../ext/zlib/zlib.h"
-#endif
+#include "Common/Data/Encoding/Compression.h"
 
 #include "sceAdler.h"
 #include "Common/Log.h"
@@ -34,7 +30,7 @@ static u32 sceAdler32(u32 adler, u32 data, u32 datalen) {
 	INFO_LOG(Log::sceMisc, "sceAdler32(adler=%08x, data=%08x, datalen=%08x)", adler, data, datalen);
 
 	u8 *buf = Memory::GetPointerWriteUnchecked(data);
-	u32 ret = adler32(adler, buf, datalen);
+	u32 ret = Adler32(adler, buf, datalen);
 
 	return ret;
 }

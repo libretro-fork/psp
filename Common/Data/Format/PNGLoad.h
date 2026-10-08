@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "Common/BitSet.h"
 #include "Common/File/Path.h"
@@ -34,4 +35,13 @@ struct PNGHeaderPeek {
 	int Height() const { return swap32(be_height); }
 };
 
+// bytesPerPixel 4 is RGBA8888, 3 is RGB888.
 bool pngSave(const Path &filename, const void *buffer, int w, int h, int bytesPerPixel);
+
+enum class PNGFormat {
+	RGBA8888,
+	BGRA8888,
+	RGB888,
+};
+// Tightly packed pixels in, a complete PNG file out.
+bool pngEncode(std::vector<uint8_t> *out, const void *buffer, int w, int h, PNGFormat format = PNGFormat::RGBA8888);

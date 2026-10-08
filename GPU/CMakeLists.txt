@@ -199,21 +199,9 @@ set(GPU_SOURCES
 add_library(GPU OBJECT ${GPU_SOURCES})
 target_compile_features(GPU PUBLIC cxx_std_17)
 
-if(LIBRETRO)
-	target_include_directories(GPU PRIVATE ${CMAKE_SOURCE_DIR}/libretro/libretro-common/include)
-endif()
-
 setup_target_project(GPU GPU)
 
 # The only direct external dependencies of GPU/ itself (as opposed to Common/GPU/*, which
-# already carries its own GL/Vulkan loader abstractions): raw gl*() calls in GPU/GLES, direct
-# ZSTD_compress/decompress calls in GPU/Debugger/Record.cpp and Playback.cpp, and Playback.cpp
-# also calls snappy_uncompress() directly.
-target_link_libraries(GPU PUBLIC ${OPENGL_LIBRARIES} ${X11_LIBRARIES} Ext::Snappy)
-
-if(USE_SYSTEM_ZSTD)
-	target_include_directories(GPU PRIVATE ${ZSTD_INCLUDE_DIR})
-	target_link_libraries(GPU PUBLIC ${ZSTD_LIBRARY})
-else()
-	target_link_libraries(GPU PUBLIC libzstd_static)
-endif()
+# already carries its own GL/Vulkan loader abstractions): raw gl*() calls in GPU/GLES, rzstd
+# calls in GPU/Debugger/Record.cpp and Playback.cpp, and snappy_uncompress() in Playback.cpp.
+target_link_libraries(GPU PUBLIC ${OPENGL_LIBRARIES} ${X11_LIBRARIES} Ext::Snappy libretro-common)

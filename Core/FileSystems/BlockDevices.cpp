@@ -33,9 +33,11 @@
 #include "Core/FileSystems/BlockDevices.h"
 #include "Core/FileSystems/ISOFileSystem.h"
 #include "Core/Util/PathUtil.h"
-#include "libchdr/chd.h"
+#include <formats/rchd.h>
 
-#include "zlib.h"
+#include <encodings/deflate.h>
+
+#include "Common/Data/Encoding/Compression.h"
 #include "ext/libkirk/amctrl.h"
 #include "ext/libkirk/kirk_engine.h"
 
@@ -316,6 +318,51 @@ bool FileBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached) {
 			return true;
 		}
 		DEBUG_LOG(Log::FileSystem, "Could not read 2048 byte block, at block offset %d. Only got %d bytes", blockNumber, (int)retval);
+		return false;
+	}
+	return true;
+}
+
+bool BlockDevice::ReadBytes(u64 offset, size_t len, u8 *out) {
+	const size_t blockSize = GetBlockSize();
+	u32 block = (u32)(offset / blockSize);
+	const size_t skip = (size_t)(offset % blockSize);
+	bool ok = true;
+	if (skip != 0 && len > 0) {
+		u8 sector[2048];
+		const size_t n = std::min(len, blockSize - skip);
+		// A failed read must not hand out uninitialized stack.
+		if (!ReadBlock(block++, sector)) {
+			memset(sector, 0, sizeof(sector));
+			ok = false;
+		}
+		memcpy(out, sector + skip, n);
+		out += n;
+		len -= n;
+	}
+	if (len >= blockSize) {
+		const u32 count = (u32)(len / blockSize);
+		ok = ReadBlocks(block, count, out) && ok;
+		block += count;
+		out += (size_t)count * blockSize;
+		len -= (size_t)count * blockSize;
+	}
+	if (len > 0) {
+		u8 sector[2048];
+		if (!ReadBlock(block, sector)) {
+			memset(sector, 0, sizeof(sector));
+			ok = false;
+		}
+		memcpy(out, sector, len);
+	}
+	return ok;
+}
+
+bool FileBlockDevice::ReadBytes(u64 offset, size_t len, u8 *out) {
+	// A plain image is the bytes themselves: one read, no sector staging.
+	const size_t got = fileLoader_->ReadAt(offset, len, out);
+	if (got < len) {
+		memset(out + got, 0, len - got);
 		return false;
 	}
 	return true;
@@ -608,6 +655,7 @@ CISOFileBlockDevice::CISOFileBlockDevice(FileLoader *fileLoader)
 		readBufferSize = CSO_READ_BUFFER_SIZE;
 	readBuffer = new u8[readBufferSize];
 	zlibBuffer = new u8[frameSize + (1u << indexShift)];
+	inflate_ = rinflate_new(-15);
 	zlibBufferFrame = numFrames;
 
 	const u32 indexSize = (u32)indexSize64;
@@ -662,6 +710,8 @@ CISOFileBlockDevice::~CISOFileBlockDevice()
 	delete [] index;
 	delete [] readBuffer;
 	delete [] zlibBuffer;
+	if (inflate_)
+		rinflate_free(inflate_);
 }
 
 bool CISOFileBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
@@ -676,7 +726,6 @@ bool CISOFileBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 	const u32 idx = index[frameNumber];
 	const u32 indexPos = idx & 0x7FFFFFFF;
 	const u32 nextIndexPos = index[frameNumber + 1] & 0x7FFFFFFF;
-	z_stream z{};
 
 	const u64 compressedReadPos = (u64)indexPos << indexShift;
 	const u64 compressedReadEnd = (u64)nextIndexPos << indexShift;
@@ -700,35 +749,17 @@ bool CISOFileBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 	} else {
 		const u32 readSize = (u32)fileLoader_->ReadAt(compressedReadPos, 1, compressedReadSize, readBuffer, flags);
 
-		z.zalloc = Z_NULL;
-		z.zfree = Z_NULL;
-		z.opaque = Z_NULL;
-		if (inflateInit2(&z, -15) != Z_OK) {
-			ERROR_LOG(Log::Loader, "GetBlockSize() ERROR: %s\n", (z.msg) ? z.msg : "?");
+		// A one-block frame inflates straight into the caller's buffer.
+		u8 *dst = frameSize == (u32)GetBlockSize() ? outPtr : zlibBuffer;
+		const int64_t produced = inflate_ ? InflateBuffer(inflate_, -15, readBuffer, readSize, dst, frameSize) : -1;
+		if (produced != (int64_t)frameSize) {
+			ERROR_LOG(Log::Loader, "block %d: inflate failed (%d of %d bytes)", blockNumber, (int)produced, frameSize);
 			NotifyReadError();
-			return false;
-		}
-		z.avail_in = readSize;
-		z.next_out = frameSize == (u32)GetBlockSize() ? outPtr : zlibBuffer;
-		z.avail_out = frameSize;
-		z.next_in = readBuffer;
-
-		int status = inflate(&z, Z_FINISH);
-		if (status != Z_STREAM_END) {
-			ERROR_LOG(Log::Loader, "block %d: inflate : %s[%d]\n", blockNumber, (z.msg) ? z.msg : "error", status);
-			NotifyReadError();
-			inflateEnd(&z);
+			if (dst == zlibBuffer)
+				zlibBufferFrame = numFrames;  // partly overwritten
 			memset(outPtr, 0, GetBlockSize());
 			return false;
 		}
-		if (z.total_out != frameSize) {
-			ERROR_LOG(Log::Loader, "block %d: block size error %d != %d\n", blockNumber, (u32)z.total_out, frameSize);
-			NotifyReadError();
-			inflateEnd(&z);
-			memset(outPtr, 0, GetBlockSize());
-			return false;
-		}
-		inflateEnd(&z);
 
 		if (frameSize != (u32)GetBlockSize()) {
 			zlibBufferFrame = frameNumber;
@@ -758,9 +789,8 @@ bool CISOFileBlockDevice::ReadBlocks(u32 minBlock, int count, u8 *outPtr) {
 	const u32 afterLastIndexPos = index[lastFrameNumber + 1] & 0x7FFFFFFF;
 	const u64 totalReadEnd = (u64)afterLastIndexPos << indexShift;
 
-	z_stream z{};
-	if (inflateInit2(&z, -15) != Z_OK) {
-		ERROR_LOG(Log::Loader, "Unable to initialize inflate: %s\n", (z.msg) ? z.msg : "?");
+	if (!inflate_) {
+		ERROR_LOG(Log::Loader, "Unable to initialize inflate");
 		return false;
 	}
 
@@ -803,34 +833,26 @@ bool CISOFileBlockDevice::ReadBlocks(u32 minBlock, int count, u8 *outPtr) {
 		if (plain) {
 			memcpy(outPtr, rawBuffer + frameBlockOffset * GetBlockSize(), frameBlocks * GetBlockSize());
 		} else {
-			z.avail_in = frameReadSize;
-			z.next_out = frameBlocks == blocksPerFrame ? outPtr : zlibBuffer;
-			z.avail_out = frameSize;
-			z.next_in = rawBuffer;
-
-			int status = inflate(&z, Z_FINISH);
-			if (status != Z_STREAM_END) {
-				ERROR_LOG(Log::Loader, "Inflate frame %d: failed - %s[%d]\n", frame, (z.msg) ? z.msg : "error", status);
+			// Whole frames inflate straight into the caller's buffer.
+			u8 *dst = frameBlocks == blocksPerFrame ? outPtr : zlibBuffer;
+			const int64_t produced = InflateBuffer(inflate_, -15, rawBuffer, frameReadSize, dst, frameSize);
+			if (produced != (int64_t)frameSize) {
+				ERROR_LOG(Log::Loader, "Inflate frame %d: failed (%d of %d bytes)", frame, (int)produced, frameSize);
 				NotifyReadError();
-				memset(outPtr, 0, frameBlocks * GetBlockSize());
-			} else if (z.total_out != frameSize) {
-				ERROR_LOG(Log::Loader, "Inflate frame %d: block size error %d != %d\n", frame, (u32)z.total_out, frameSize);
-				NotifyReadError();
+				if (dst == zlibBuffer)
+					zlibBufferFrame = numFrames;  // partly overwritten
 				memset(outPtr, 0, frameBlocks * GetBlockSize());
 			} else if (frameBlocks != blocksPerFrame) {
 				memcpy(outPtr, zlibBuffer + frameBlockOffset * GetBlockSize(), frameBlocks * GetBlockSize());
 				// In case we end up reusing it in a single read later.
 				zlibBufferFrame = frame;
 			}
-
-			inflateReset(&z);
 		}
 
 		block += frameBlocks;
 		outPtr += frameBlocks * GetBlockSize();
 	}
 
-	inflateEnd(&z);
 	return true;
 }
 
@@ -1051,172 +1073,118 @@ bool NPDRMDemoBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached)
 	return true;
 }
 
-struct CHDImpl {
-	chd_file *chd = nullptr;
-	const chd_header *header = nullptr;
-};
+// rchd does no I/O: it names the byte ranges it needs and is fed them.
+// Those ranges go straight from the loader into one scratch buffer the
+// decoder borrows, so a hunk's compressed bytes are never copied twice.
+static bool CHDServe(rchd_t *chd, FileLoader *loader, std::vector<u8> &scratch, const rchd_request_t &req, bool borrow) {
+	if (req.source != RCHD_SOURCE_SELF)
+		return false;
+	if (scratch.size() < req.length)
+		scratch.resize(req.length);
+	const size_t got = loader->ReadAt(req.offset, req.length, scratch.data());
+	if (got == 0)
+		return false;
+	if (borrow)
+		return rchd_feed_borrow(chd, req.offset, req.source, scratch.data(), got) == RCHD_OK;
+	return rchd_feed(chd, scratch.data(), got) == RCHD_OK;
+}
 
-struct ExtendedCoreFile {
-	core_file core;  // Must be the first struct member, for some tricky pointer casts.
-	uint64_t seekPos;
-};
+static const char *CHDErrorString(int err) {
+	switch (err) {
+	case RCHD_ERROR_DATA: return "invalid data";
+	case RCHD_ERROR_PARAM: return "invalid parameter";
+	case RCHD_ERROR_MEM: return "out of memory";
+	case RCHD_ERROR_UNSUPPORTED: return "unsupported format";
+	case RCHD_ERROR_CRC: return "checksum mismatch";
+	case RCHD_ERROR_NO_PARENT: return "parent CHD not supported";
+	case RCHD_ERROR_STATE: return "invalid state";
+	default: return "error";
+	}
+}
 
 CHDFileBlockDevice::CHDFileBlockDevice(FileLoader *fileLoader)
-	: BlockDevice(fileLoader), impl_(new CHDImpl()) {
-	Path paths[8];
-	paths[0] = fileLoader->GetPath();
-	int depth = 0;
-
-	core_file_ = new ExtendedCoreFile();
-	core_file_->core.argp = fileLoader;
-	core_file_->core.fsize = [](core_file *file) -> uint64_t {
-		FileLoader *loader = (FileLoader *)file->argp;
-		return loader->FileSize();
-	};
-	core_file_->core.fseek = [](core_file *file, int64_t offset, int seekType) -> int {
-		ExtendedCoreFile *coreFile = (ExtendedCoreFile *)file;
-		switch (seekType) {
-		case SEEK_SET:
-			coreFile->seekPos = offset;
-			break;
-		case SEEK_CUR:
-			coreFile->seekPos += offset;
-			break;
-		case SEEK_END:
-		{
-			FileLoader *loader = (FileLoader *)file->argp;
-			coreFile->seekPos = loader->FileSize() + offset;
-			break;
-		}
-		default:
-			break;
-		}
-		return 0;
-	};
-	core_file_->core.fread = [](void *out_data, size_t size, size_t count, core_file *file) {
-		ExtendedCoreFile *coreFile = (ExtendedCoreFile *)file;
-		FileLoader *loader = (FileLoader *)file->argp;
-		uint64_t totalSize = size * count;
-		loader->ReadAt(coreFile->seekPos, totalSize, out_data);
-		coreFile->seekPos += totalSize;
-		return size * count;
-	};
-	core_file_->core.fclose = [](core_file *file) {
-		ExtendedCoreFile *coreFile = (ExtendedCoreFile *)file;
-		delete coreFile;
-		return 0;
-	};
-
-	/*
-	// TODO: Support parent/child CHD files.
-
-	// Default, in case of failure
-	numBlocks = 0;
-
-	chd_header childHeader;
-
-	chd_error err = chd_read_header(paths[0].c_str(), &childHeader);
-	if (err != CHDERR_NONE) {
-		ERROR_LOG(Log::Loader, "Error loading CHD header for '%s': %s", paths[0].c_str(), chd_error_string(err));
-		NotifyReadError();
+	: BlockDevice(fileLoader) {
+	chd_ = rchd_new();
+	if (!chd_) {
+		errorString_ = "CHD error: out of memory";
 		return;
 	}
 
-	// static const UINT8 nullsha1[CHD_SHA1_BYTES] = { 0 };
-	if (memcmp(nullsha1, childHeader.parentsha1, sizeof(childHeader.sha1)) != 0) {
-		chd_header parentHeader;
-
-		// Look for parent CHD in current directory
-		Path chdDir = paths[0].NavigateUp();
-
-		std::vector<File::FileInfo> files;
-		if (File::GetFilesInDir(chdDir, &files)) {
-			parentHeader.length = 0;
-
-			for (const auto &file : files) {
-				std::string extension = file.fullName.GetFileExtension();
-				if (extension != ".chd") {
-					continue;
-				}
-
-				if (chd_read_header(filepath.c_str(), &parentHeader) == CHDERR_NONE &&
-					memcmp(parentHeader.sha1, childHeader.parentsha1, sizeof(parentHeader.sha1)) == 0) {
-					// ERROR_LOG(Log::Loader, "Checking '%s'", filepath.c_str());
-					paths[++depth] = filepath;
-					break;
-				}
-			}
-
-			// Check if parentHeader was opened
-			if (parentHeader.length == 0) {
-				ERROR_LOG(Log::Loader, "Error loading CHD '%s': parents not found", fileLoader->GetPath().c_str());
-				NotifyReadError();
-				return;
-			}
-			memcpy(childHeader.parentsha1, parentHeader.parentsha1, sizeof(childHeader.parentsha1));
-		} while (memcmp(nullsha1, childHeader.parentsha1, sizeof(childHeader.sha1)) != 0);
+	int err;
+	rchd_request_t req;
+	while ((err = rchd_open_step(chd_, &req)) == RCHD_PENDING) {
+		if (!CHDServe(chd_, fileLoader, scratch_, req, false)) {
+			err = req.source == RCHD_SOURCE_SELF ? RCHD_ERROR_DATA : RCHD_ERROR_NO_PARENT;
+			break;
+		}
 	}
-	*/
-
-	chd_file *file = nullptr;
-	chd_error err = chd_open_core_file(&core_file_->core, CHD_OPEN_READ, NULL, &file);
-	if (err != CHDERR_NONE) {
-		errorString_ = StringFromFormat("CHD error: %s: %s", paths[depth].c_str(), chd_error_string(err));
+	const rchd_info_t *info = err == RCHD_OK ? rchd_info(chd_) : nullptr;
+	if (info && info->has_parent)
+		err = RCHD_ERROR_NO_PARENT;
+	if (!info || err != RCHD_OK || info->unit_bytes != (u32)GetBlockSize()) {
+		if (err == RCHD_OK)
+			err = RCHD_ERROR_UNSUPPORTED;
+		errorString_ = StringFromFormat("CHD error: %s: %s", fileLoader->GetPath().c_str(), CHDErrorString(err));
+		rchd_free(chd_);
+		chd_ = nullptr;
 		return;
 	}
 
-	impl_->chd = file;
-	impl_->header = chd_get_header(impl_->chd);
-
-	readBuffer = new u8[impl_->header->hunkbytes];
-	currentHunk = -1;
-	blocksPerHunk = impl_->header->hunkbytes / impl_->header->unitbytes;
-	numBlocks = impl_->header->unitcount;
-
+	numBlocks = (u32)(info->logical_bytes / info->unit_bytes);
 	_dbg_assert_(errorString_.empty());
 }
 
 CHDFileBlockDevice::~CHDFileBlockDevice() {
-	if (impl_->chd) {
-		chd_close(impl_->chd);
-		delete[] readBuffer;
-	}
+	rchd_free(chd_);
 }
 
 bool CHDFileBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached) {
-	if (!impl_->chd) {
-		ERROR_LOG(Log::Loader, "ReadBlock: CHD not open. %s", fileLoader_->GetPath().c_str());
-		return false;
-	}
-	if ((u32)blockNumber >= numBlocks) {
-		memset(outPtr, 0, GetBlockSize());
-		return false;
-	}
-	u32 hunk = blockNumber / blocksPerHunk;
-	u32 blockInHunk = blockNumber % blocksPerHunk;
+	return ReadBlocks((u32)blockNumber, 1, outPtr);
+}
 
-	if (currentHunk != hunk) {
-		chd_error err = chd_read(impl_->chd, hunk, readBuffer);
-		if (err != CHDERR_NONE) {
-			ERROR_LOG(Log::Loader, "CHD read failed: %d %d %s", blockNumber, hunk, chd_error_string(err));
-			NotifyReadError();
+bool CHDFileBlockDevice::ReadRange(u64 offset, size_t len, u8 *out) {
+	int err = rchd_read_begin(chd_, offset, out, len);
+	rchd_request_t req;
+	if (err == RCHD_OK) {
+		while ((err = rchd_read_step(chd_, &req)) == RCHD_PENDING) {
+			if (!CHDServe(chd_, fileLoader_, scratch_, req, true)) {
+				err = RCHD_ERROR_DATA;
+				break;
+			}
 		}
-		currentHunk = hunk;
 	}
-	memcpy(outPtr, readBuffer + blockInHunk * impl_->header->unitbytes, GetBlockSize());
+	if (err != RCHD_OK) {
+		ERROR_LOG(Log::Loader, "CHD read failed at %llu (%d bytes): %s", (unsigned long long)offset, (int)len, CHDErrorString(err));
+		NotifyReadError();
+		return false;
+	}
 	return true;
 }
 
+bool CHDFileBlockDevice::ReadBytes(u64 offset, size_t len, u8 *out) {
+	// rchd addresses bytes, so a file read decodes straight into place.
+	if (!chd_ || offset + len > (u64)numBlocks * GetBlockSize())
+		return BlockDevice::ReadBytes(offset, len, out);
+	return ReadRange(offset, len, out);
+}
+
 bool CHDFileBlockDevice::ReadBlocks(u32 minBlock, int count, u8 *outPtr) {
-	if (minBlock >= numBlocks) {
-		memset(outPtr, 0, GetBlockSize() * count);
+	const size_t blockSize = GetBlockSize();
+	if (!chd_) {
+		ERROR_LOG(Log::Loader, "ReadBlocks: CHD not open. %s", fileLoader_->GetPath().c_str());
+		memset(outPtr, 0, blockSize * count);
 		return false;
 	}
-
-	for (int i = 0; i < count; i++) {
-		if (!ReadBlock(minBlock + i, outPtr + i * GetBlockSize())) {
-			return false;
-		}
+	if (minBlock >= numBlocks || count <= 0) {
+		memset(outPtr, 0, blockSize * std::max(count, 0));
+		return false;
 	}
-	return true;
+	// The tail past the image reads as zeros, like the other devices.
+	const u32 avail = std::min((u32)count, numBlocks - minBlock);
+	if (avail < (u32)count)
+		memset(outPtr + avail * blockSize, 0, (count - avail) * blockSize);
+
+	if (!ReadRange((u64)minBlock * blockSize, avail * blockSize, outPtr))
+		return false;
+	return avail == (u32)count;
 }

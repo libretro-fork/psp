@@ -154,8 +154,8 @@
 #if BASISD_SUPPORT_KTX2
    // If BASISD_SUPPORT_KTX2_ZSTD is 0, UASTC files compressed with Zstd cannot be loaded.
 	#if BASISD_SUPPORT_KTX2_ZSTD
-		// We only use two Zstd API's: ZSTD_decompress() and ZSTD_isError()
-		#include <zstd.h>
+		// Zstd comes from libretro-common's rzstd.
+		#include <encodings/rzstd.h>
 	#endif
 #endif
 
@@ -17236,8 +17236,8 @@ namespace basist
 		if (m_header.m_supercompression_scheme == KTX2_SS_ZSTANDARD)
 		{
 #if BASISD_SUPPORT_KTX2_ZSTD
-			size_t actualUncompSize = ZSTD_decompress(uncomp_data.data(), (size_t)uncomp_size, pComp_data, (size_t)comp_size);
-			if (ZSTD_isError(actualUncompSize))
+			size_t actualUncompSize = 0;
+			if (rzstd_decode(uncomp_data.data(), (size_t)uncomp_size, pComp_data, (size_t)comp_size, &actualUncompSize) != RZSTD_PROCESS_END)
 			{
 				BASISU_DEVEL_ERROR("ktx2_transcoder::decompress_level_data: Zstd decompression failed, file is invalid or corrupted\n");
 				return false;

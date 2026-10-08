@@ -1,7 +1,11 @@
-#include "ext/libzip/zip.h"
+#include <cstring>
+#include <string>
+
+#include <encodings/crc32.h>
 
 #include "Common/File/FileUtil.h"
 #include "Common/File/Path.h"
+#include "Common/File/VFS/ZipFileReader.h"
 #include "Core/Loaders.h"
 #include "Core/Util/GameManager.h"
 #include "Core/Util/PathUtil.h"
@@ -23,23 +27,28 @@ static bool TestHasParentDirComponent() {
 	return true;
 }
 
-// Creates a zip archive at the given path with one entry of the given name.
+// Creates a zip archive at the given path with one stored entry of the given name.
+static void Put16(std::string &s, uint32_t v) { s += (char)(v & 0xFF); s += (char)((v >> 8) & 0xFF); }
+static void Put32(std::string &s, uint32_t v) { Put16(s, v & 0xFFFF); Put16(s, v >> 16); }
+
 static bool CreateZipWithEntry(const Path &zipPath, const std::string &entryName, const std::string &contents) {
-	int errorp = 0;
-	zip_t *z = zip_open(zipPath.c_str(), ZIP_CREATE | ZIP_TRUNCATE, &errorp);
-	if (!z)
-		return false;
-	zip_source_t *source = zip_source_buffer(z, contents.data(), contents.size(), 0);
-	if (!source) {
-		zip_close(z);
-		return false;
-	}
-	if (zip_file_add(z, entryName.c_str(), source, ZIP_FL_ENC_UTF_8) < 0) {
-		zip_source_free(source);
-		zip_close(z);
-		return false;
-	}
-	return zip_close(z) == 0;
+	const uint32_t crc = encoding_crc32(0, (const uint8_t *)contents.data(), contents.size());
+	std::string zip;
+	Put32(zip, 0x04034b50); Put16(zip, 20); Put16(zip, 0); Put16(zip, 0); Put16(zip, 0); Put16(zip, 0);
+	Put32(zip, crc); Put32(zip, (uint32_t)contents.size()); Put32(zip, (uint32_t)contents.size());
+	Put16(zip, (uint32_t)entryName.size()); Put16(zip, 0);
+	zip += entryName;
+	zip += contents;
+	const uint32_t cdOffset = (uint32_t)zip.size();
+	Put32(zip, 0x02014b50); Put16(zip, 20); Put16(zip, 20); Put16(zip, 0); Put16(zip, 0); Put16(zip, 0); Put16(zip, 0);
+	Put32(zip, crc); Put32(zip, (uint32_t)contents.size()); Put32(zip, (uint32_t)contents.size());
+	Put16(zip, (uint32_t)entryName.size()); Put16(zip, 0); Put16(zip, 0); Put16(zip, 0); Put16(zip, 0);
+	Put32(zip, 0); Put32(zip, 0);
+	zip += entryName;
+	const uint32_t cdSize = (uint32_t)zip.size() - cdOffset;
+	Put32(zip, 0x06054b50); Put16(zip, 0); Put16(zip, 0); Put16(zip, 1); Put16(zip, 1);
+	Put32(zip, cdSize); Put32(zip, cdOffset); Put16(zip, 0);
+	return File::WriteDataToFile(false, zip.data(), zip.size(), zipPath);
 }
 
 // Crafts a zip with a parent-directory entry and verifies ExtractZipContents
@@ -55,9 +64,8 @@ static bool TestZipSlipExtraction() {
 	Path zipPath = tempRoot / "bad.zip";
 	EXPECT_TRUE(CreateZipWithEntry(zipPath, "../evil.txt", "should not escape"));
 
-	int errorp = 0;
-	zip_t *z = zip_open(zipPath.c_str(), 0, &errorp);
-	EXPECT_TRUE(z != nullptr);
+	ZipContainer z(zipPath);
+	EXPECT_TRUE((bool)z);
 
 	ZipFileInfo info;
 	info.numFiles = 1;
@@ -66,7 +74,7 @@ static bool TestZipSlipExtraction() {
 
 	GameManager manager;
 	EXPECT_TRUE(manager.ExtractZipContents(z, destDir, info, true));
-	zip_close(z);
+	z.close();
 
 	// The malicious file must not have been written outside destDir.
 	// A naive "dest / ../evil.txt" would land here.

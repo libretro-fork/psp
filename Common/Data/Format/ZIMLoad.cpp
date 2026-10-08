@@ -2,53 +2,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
-#include <zstd.h>
+#include <encodings/rzstd.h>
 
-#include "zlib.h"
+#include "Common/Data/Encoding/Compression.h"
 
 #include "Common/Log.h"
 #include "Common/Data/Format/ZIMLoad.h"
 #include "Common/Math/math_util.h"
 #include "Common/File/VFS/VFS.h"
-
-int ezuncompress(unsigned char* pDest, long* pnDestLen, const unsigned char* pSrc, long nSrcLen) {
-	z_stream stream;
-	stream.next_in = (Bytef*)pSrc;
-	stream.avail_in = (uInt)nSrcLen;
-	/* Check for source > 64K on 16-bit machine: */
-	if ((uLong)stream.avail_in != (uLong)nSrcLen) return Z_BUF_ERROR;
-
-	uInt destlen = (uInt)*pnDestLen;
-	if ((uLong)destlen != (uLong)*pnDestLen) return Z_BUF_ERROR;
-	stream.zalloc = (alloc_func)0;
-	stream.zfree = (free_func)0;
-
-	int err = inflateInit(&stream);
-	if (err != Z_OK) return err;
-
-	int nExtraChunks = 0;
-	do {
-		stream.next_out = pDest;
-		stream.avail_out = destlen;
-		err = inflate(&stream, Z_FINISH);
-		if (err == Z_STREAM_END )
-			break;
-		if (err == Z_NEED_DICT || (err == Z_BUF_ERROR && stream.avail_in == 0))
-			err = Z_DATA_ERROR;
-		if (err != Z_BUF_ERROR) {
-			inflateEnd(&stream);
-			return err;
-		}
-		nExtraChunks += 1;
-	} while (stream.avail_out == 0);
-
-	*pnDestLen = stream.total_out;
-
-	err = inflateEnd(&stream);
-	if (err != Z_OK) return err;
-
-	return nExtraChunks ? Z_BUF_ERROR : Z_OK;
-}
 
 int LoadZIMPtr(const uint8_t *zim, size_t datasize, int *width, int *height, int *flags, uint8_t **image) {
 	if (datasize < 16) {
@@ -139,10 +100,9 @@ int LoadZIMPtr(const uint8_t *zim, size_t datasize, int *width, int *height, int
 	}
 
 	if (*flags & ZIM_ZLIB_COMPRESSED) {
-		long outlen = (long)total_data_size;
-		int retcode = ezuncompress(*image, &outlen, (unsigned char *)(zim + 16), (long)payload_size);
-		if (Z_OK != retcode) {
-			ERROR_LOG(Log::IO, "ZIM zlib format decompression failed: %d", retcode);
+		const int64_t outlen = InflateBuffer(15, zim + 16, (size_t)payload_size, *image, (size_t)total_data_size);
+		if (outlen < 0) {
+			ERROR_LOG(Log::IO, "ZIM zlib format decompression failed");
 			free(*image);
 			*image = 0;
 			return 0;
@@ -152,8 +112,8 @@ int LoadZIMPtr(const uint8_t *zim, size_t datasize, int *width, int *height, int
 			ERROR_LOG(Log::IO, "Wrong size data in ZIM: %i vs %i", (int)outlen, (int)total_data_size);
 		}
 	} else if (*flags & ZIM_ZSTD_COMPRESSED) {
-		size_t outlen = ZSTD_decompress(*image, total_data_size, zim + 16, payload_size);
-		if (outlen != (size_t)total_data_size) {
+		size_t outlen = 0;
+		if (rzstd_decode(*image, total_data_size, zim + 16, payload_size, &outlen) != RZSTD_PROCESS_END || outlen != (size_t)total_data_size) {
 			ERROR_LOG(Log::IO, "ZIM zstd format decompression failed: %lld", (long long)outlen);
 			free(*image);
 			*image = 0;

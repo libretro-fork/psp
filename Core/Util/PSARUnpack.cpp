@@ -20,7 +20,7 @@
 #include <map>
 #include <string_view>
 
-#include "zlib.h"
+#include "Common/Data/Encoding/Compression.h"
 
 #include "Common/Data/Text/I18n.h"
 #include "Common/File/DirListing.h"
@@ -721,10 +721,9 @@ void PSARReader::EnsureContents() {
 	entryCompression_ = DetectCompression(block2_.data(), decoded);
 	if (entryCompression_ == PSARCompression::Zlib) {
 		entryData_.resize(contentExpandedSize_);
-		uLongf destLen = contentExpandedSize_;
-		const int zResult = uncompress(entryData_.data(), &destLen, block2_.data(), decoded);
-		if (zResult != Z_OK || destLen != contentExpandedSize_) {
-			WARN_LOG(Log::Loader, "PSAR: inflate failed for '%s' (%d)", entryName_.c_str(), zResult);
+		const int64_t destLen = InflateBuffer(15, block2_.data(), (size_t)decoded, entryData_.data(), entryData_.size());
+		if (destLen != (int64_t)contentExpandedSize_) {
+			WARN_LOG(Log::Loader, "PSAR: inflate failed for '%s' (%d)", entryName_.c_str(), (int)destLen);
 			entryData_.clear();
 		}
 	}

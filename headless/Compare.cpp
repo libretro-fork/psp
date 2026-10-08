@@ -19,7 +19,6 @@
 #include <cmath>
 #include <cstdarg>
 #include <iostream>
-#include <png.h>
 #include <vector>
 
 #include "headless/Compare.h"
@@ -503,22 +502,9 @@ bool ScreenshotComparer::SaveVisualComparisonPNG(const Path &resultFilename) {
 		}
 	}
 
-	FILE *fp = File::OpenCFile(resultFilename, "wb");
-	if (!fp)
-		return false;
-
-	png_image png;
-	memset(&png, 0, sizeof(png));
-	png.version = PNG_IMAGE_VERSION;
-	png.format = PNG_FORMAT_BGRA;
-	png.width = w_ * 2;
-	png.height = h_ * 2;
-
-	bool success = png_image_write_to_stdio(&png, fp, 0, comparison.get(), w_ * 2 * 4, nullptr) != 0;
-	fclose(fp);
-	png_image_free(&png);
-
-	return success && png.warning_or_error < 2;
+	std::vector<uint8_t> png;
+	return pngEncode(&png, comparison.get(), w_ * 2, h_ * 2, PNGFormat::BGRA8888) &&
+		File::WriteDataToFile(false, png.data(), png.size(), resultFilename);
 }
 
 int ChannelDifference(u8 actual, u8 reference) {

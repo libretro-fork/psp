@@ -520,22 +520,7 @@ int ISOFileSystem::Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 outd
 			int block = (u16)desc.firstLETableSector;
 			u32 size = Memory::ClampValidSizeAt(outdataPtr, (u32)desc.pathTableLength);
 			u8 *out = Memory::GetPointerWriteRangeOrException(outdataPtr, size);
-
-			int blocks = size / blockDevice->GetBlockSize();
-			blockDevice->ReadBlocks(block, blocks, out);
-			size -= blocks * blockDevice->GetBlockSize();
-			out += blocks * blockDevice->GetBlockSize();
-
-			// The remaining (or, usually, only) partial sector.
-			if (size > 0) {
-				u8 temp[2048];
-				// `blocks` whole sectors starting at `block` were already consumed by
-				// ReadBlocks() above, so the trailing partial sector is the next one.
-				if (!blockDevice->ReadBlock(block + blocks, temp)) {
-					memset(temp, 0, sizeof(temp));
-				}
-				memcpy(out, temp, size);
-			}
+			blockDevice->ReadBytes((u64)block * blockDevice->GetBlockSize(), size, out);
 			return 0;
 		}
 	}
@@ -617,44 +602,10 @@ size_t ISOFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size, int &usec) {
 		}
 
 		// Okay, we have size and position, let's rock.
-		const int firstBlockOffset = positionOnIso & 2047;
-		const int firstBlockSize = firstBlockOffset == 0 ? 0 : (int)std::min(size, 2048LL - firstBlockOffset);
-		const int lastBlockSize = (size - firstBlockSize) & 2047;
-		const s64 middleSize = size - firstBlockSize - lastBlockSize;
-		_dbg_assert_((middleSize & 2047) == 0);
-
-		u32 secNum = (u32)(positionOnIso / 2048);
-		u8 theSector[2048];
-
-		if ((middleSize & 2047) != 0) {
-			ERROR_LOG(Log::FileSystem, "Remaining size should be aligned");
-		}
-
-		const u8 *const start = pointer;
-		if (firstBlockSize > 0) {
-			// theSector is uninitialized stack memory, so on a failed read we must not copy it out -
-			// that would hand host stack contents to the game.
-			if (!blockDevice->ReadBlock(secNum++, theSector)) {
-				memset(theSector, 0, sizeof(theSector));
-			}
-			memcpy(pointer, theSector + firstBlockOffset, firstBlockSize);
-			pointer += firstBlockSize;
-		}
-		if (middleSize > 0) {
-			const u32 middleSectors = (u32)(middleSize / 2048);
-			blockDevice->ReadBlocks(secNum, middleSectors, pointer);
-			secNum += middleSectors;
-			pointer += middleSize;
-		}
-		if (lastBlockSize > 0) {
-			if (!blockDevice->ReadBlock(secNum++, theSector)) {
-				memset(theSector, 0, sizeof(theSector));
-			}
-			memcpy(pointer, theSector, lastBlockSize);
-			pointer += lastBlockSize;
-		}
-
-		size_t totalBytes = pointer - start;
+		blockDevice->ReadBytes(positionOnIso, (size_t)size, pointer);
+		// The sector after the last one touched, for the seek-time estimate.
+		const u32 secNum = (u32)(size > 0 ? (positionOnIso + size + 2047) / 2048 : positionOnIso / 2048);
+		const size_t totalBytes = (size_t)size;
 		if (abs((int)lastReadBlock_ - (int)secNum) > 100) {
 			// This is an estimate, sometimes it takes 1+ seconds, but it definitely takes time.
 			usec = 100000;

@@ -15,9 +15,10 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include "zlib.h"
+#include <encodings/crc32.h>
 
 #include "Common/CommonTypes.h"
+#include "Common/Data/Encoding/Compression.h"
 #include "Core/Debugger/MemBlockInfo.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/FunctionWrappers.h"
@@ -35,49 +36,41 @@ static int CommonDecompress(int windowBits, u32 OutBuffer, int OutBufferLength, 
 		return hleLogError(Log::HLE, 0, "bad crc32 address");
 	}
 
-	z_stream stream{};
 	u8 *outBufferPtr = Memory::GetPointerWriteOrException(OutBuffer);
-	stream.next_in = (Bytef*)Memory::GetPointerOrException(InBuffer);
+	const u8 *inBufferPtr = Memory::GetPointerOrException(InBuffer);
 	// We don't know the available length, just let it use as much as it wants.
-	stream.avail_in = (uInt)Memory::ClampValidSizeAt(InBuffer, Memory::g_MemorySize);
-	stream.next_out = outBufferPtr;
-	stream.avail_out = (uInt)OutBufferLength;
+	const size_t inAvail = Memory::ClampValidSizeAt(InBuffer, Memory::g_MemorySize);
+	const size_t outAvail = OutBufferLength > 0 ? Memory::ClampValidSizeAt(OutBuffer, (u32)OutBufferLength) : 0;
 
-	int err = inflateInit2(&stream, windowBits);
-	if (err != Z_OK) {
-		return hleLogError(Log::HLE, 0, "inflateInit2 failed %08x", err);
-	}
-	err = inflate(&stream, Z_FINISH);
-	inflateEnd(&stream);
-
-	if (err != Z_STREAM_END) {
-		return hleLogError(Log::HLE, 0, "inflate failed %08x", err);
+	size_t totalIn = 0;
+	const int64_t totalOut = InflateBuffer(windowBits, inBufferPtr, inAvail, outBufferPtr, outAvail, &totalIn);
+	if (totalOut < 0) {
+		return hleLogError(Log::HLE, 0, "inflate failed");
 	}
 	if (crc32Addr.IsValid()) {
-		uLong crc = crc32(0L, Z_NULL, 0);
-		*crc32Addr = crc32(crc, outBufferPtr, stream.total_out);
+		*crc32Addr = encoding_crc32(0, outBufferPtr, (size_t)totalOut);
 	}
 
-	if (MemBlockInfoDetailed(stream.total_in, stream.total_out)) {
+	if (MemBlockInfoDetailed((u32)totalIn, (u32)totalOut)) {
 		char tagData[128];
-		size_t tagSize = FormatMemWriteTagAt(tagData, sizeof(tagData), "sceDeflt/", InBuffer, stream.total_in);
-		NotifyMemInfo(MemBlockFlags::READ, InBuffer, stream.total_in, tagData, tagSize);
-		NotifyMemInfo(MemBlockFlags::WRITE, OutBuffer, stream.total_out, tagData, tagSize);
+		size_t tagSize = FormatMemWriteTagAt(tagData, sizeof(tagData), "sceDeflt/", InBuffer, (u32)totalIn);
+		NotifyMemInfo(MemBlockFlags::READ, InBuffer, (u32)totalIn, tagData, tagSize);
+		NotifyMemInfo(MemBlockFlags::WRITE, OutBuffer, (u32)totalOut, tagData, tagSize);
 	}
 
-	return hleLogDebug(Log::HLE, stream.total_out);
+	return hleLogDebug(Log::HLE, (int)totalOut);
 }
 
 static int sceDeflateDecompress(u32 OutBuffer, int OutBufferLength, u32 InBuffer, u32 Crc32Addr) {
-	return CommonDecompress(-MAX_WBITS, OutBuffer, OutBufferLength, InBuffer, Crc32Addr);
+	return CommonDecompress(-15, OutBuffer, OutBufferLength, InBuffer, Crc32Addr);
 }
 
 static int sceGzipDecompress(u32 OutBuffer, int OutBufferLength, u32 InBuffer, u32 Crc32Addr) {
-	return CommonDecompress(16 + MAX_WBITS, OutBuffer, OutBufferLength, InBuffer, Crc32Addr);
+	return CommonDecompress(31, OutBuffer, OutBufferLength, InBuffer, Crc32Addr);
 }
 
 static int sceZlibDecompress(u32 OutBuffer, int OutBufferLength, u32 InBuffer, u32 Crc32Addr) {
-	return CommonDecompress(MAX_WBITS, OutBuffer, OutBufferLength, InBuffer, Crc32Addr);
+	return CommonDecompress(15, OutBuffer, OutBufferLength, InBuffer, Crc32Addr);
 }
 
 const HLEFunction sceDeflt[] = {

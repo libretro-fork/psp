@@ -2,7 +2,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-#include <png.h>
+
+#include <formats/image.h>
+#include <formats/rpng.h>
+#include <libretro.h>  // RETRO_VFS_FILE_ACCESS_*
+#include <streams/interface_stream.h>
 
 #include "Common/Data/Format/PNGLoad.h"
 #include "Common/Log.h"
@@ -11,136 +15,56 @@
 // *image_data_ptr should be deleted with free()
 // return value of 1 == success.
 int pngLoad(const char *file, int *pwidth, int *pheight, unsigned char **image_data_ptr) {
-	png_image png;
-	memset(&png, 0, sizeof(png));
-	png.version = PNG_IMAGE_VERSION;
-
-	png_image_begin_read_from_file(&png, file);
-
-	if (PNG_IMAGE_FAILED(png))
-	{
-		WARN_LOG(Log::IO, "pngLoad: %s (%s)", png.message, file);
-		*image_data_ptr = nullptr;
+	*image_data_ptr = nullptr;
+	std::string data;
+	if (!File::ReadBinaryFileToString(Path(file), &data) || data.empty()) {
+		WARN_LOG(Log::IO, "pngLoad: can't read %s", file);
 		return 0;
 	}
-	*pwidth = png.width;
-	*pheight = png.height;
-	png.format = PNG_FORMAT_RGBA;
-
-	int stride = PNG_IMAGE_ROW_STRIDE(png);
-	*image_data_ptr = (unsigned char *)malloc(PNG_IMAGE_SIZE(png));
-	png_image_finish_read(&png, NULL, *image_data_ptr, stride, NULL);
-	return 1;
+	return pngLoadPtr((const unsigned char *)data.data(), data.size(), pwidth, pheight, image_data_ptr);
 }
-
-// Custom error handler
-void pngErrorHandler(png_structp png_ptr, png_const_charp error_msg) {
-	ERROR_LOG(Log::System, "libpng error: %s\n", error_msg);
-	longjmp(png_jmpbuf(png_ptr), 1);
-}
-
-void pngWarningHandler(png_structp png_ptr, png_const_charp warning_msg) {
-	DEBUG_LOG(Log::System, "libpng warning: %s\n", warning_msg);
-}
-
-struct PngReadContext {
-	const unsigned char *ptr;
-	size_t remaining;
-};
-
 
 int pngLoadPtr(const unsigned char *input_ptr, size_t input_len, int *pwidth, int *pheight, unsigned char **image_data_ptr, int maxWidth, int maxHeight) {
-	png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, pngErrorHandler, pngWarningHandler);
-	if (!png) {
+	*image_data_ptr = nullptr;
+	if (input_len < sizeof(PNGHeaderPeek))
 		return 0;
-	}
-	if (input_len == 0) {
-		return 0;
-	}
 
-	// Ignore incorrect sRGB profiles
-	png_set_option(png, PNG_SKIP_sRGB_CHECK_PROFILE, PNG_OPTION_ON);
-	png_set_benign_errors(png, PNG_OPTION_ON);
-
-	png_infop info = png_create_info_struct(png);
-	if (!info) {
-		png_destroy_read_struct(&png, NULL, NULL);
+	// Reject images larger than the caller's limits before anything is allocated,
+	// so attacker-controlled dimensions can't drive a huge allocation.
+	PNGHeaderPeek peek;
+	memcpy(&peek, input_ptr, sizeof(peek));
+	if (!peek.IsValidPNGHeader() || peek.Width() > maxWidth || peek.Height() > maxHeight) {
+		DEBUG_LOG(Log::IO, "PNG rejected: %dx%d (max %dx%d)", peek.Width(), peek.Height(), maxWidth, maxHeight);
 		return 0;
 	}
 
-	if (setjmp(png_jmpbuf(png))) {
-		png_destroy_read_struct(&png, &info, NULL);
-		if (*image_data_ptr) {
-			free(*image_data_ptr);
-			*image_data_ptr = NULL;
+	rpng_t *rpng = rpng_alloc();
+	if (!rpng)
+		return 0;
+	// rpng only reads through this pointer.
+	uint32_t *data = nullptr;
+	unsigned w = 0, h = 0;
+	int ret = IMAGE_PROCESS_ERROR;
+	if (rpng_set_buf_ptr(rpng, (void *)input_ptr, input_len) && rpng_start(rpng)) {
+		while (rpng_iterate_image(rpng)) {
 		}
-		return 0;
-	}
-
-	PngReadContext readContext = {input_ptr, input_len};
-
-	png_set_read_fn(png, &readContext, [](png_structp png_ptr, png_bytep outBytes, png_size_t byteCountToRead) {
-		PngReadContext *ctx = (PngReadContext *)png_get_io_ptr(png_ptr);
-		if (byteCountToRead > ctx->remaining) {
-			// This triggers the longjmp to your pngErrorHandler
-			png_error(png_ptr, "Read past end of buffer");
-			return;
+		if (rpng_is_valid(rpng)) {
+			// RGBA byte order, which is what everything here wants.
+			do {
+				ret = rpng_process_image(rpng, (void **)&data, input_len, &w, &h, true);
+			} while (ret == IMAGE_PROCESS_NEXT);
 		}
-
-		memcpy(outBytes, ctx->ptr, byteCountToRead);
-		ctx->ptr += byteCountToRead;
-		ctx->remaining -= byteCountToRead;
-	});
-
-	png_read_info(png, info);
-
-	const int color_type = png_get_color_type(png, info);
-	png_set_strip_16(png);
-	png_set_packing(png);
-	if (color_type == PNG_COLOR_TYPE_GRAY)
-		png_set_expand_gray_1_2_4_to_8(png);
-	if (color_type == PNG_COLOR_TYPE_PALETTE) {
-		png_set_palette_to_rgb(png);
-	} else if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) {
-		png_set_gray_to_rgb(png);
 	}
+	rpng_free(rpng);
 
-	if (png_get_valid(png, info, PNG_INFO_tRNS))
-		png_set_tRNS_to_alpha(png);
-	// Force 8-bit RGBA format
-	png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
-	png_set_interlace_handling(png);
-	// Ignore the file's gamma correction
-	png_set_gamma(png, 1.0, 1.0);
-
-	png_read_update_info(png, info);
-
-	*pwidth = png_get_image_width(png, info);
-	*pheight = png_get_image_height(png, info);
-
-	// Reject images larger than the caller's limits to avoid decompression
-	// bombs (attacker-controlled dimensions would otherwise drive a huge
-	// allocation here).
-	if (*pwidth > maxWidth || *pheight > maxHeight) {
-		DEBUG_LOG(Log::IO, "PNG too large: %dx%d (max %dx%d)", *pwidth, *pheight, maxWidth, maxHeight);
-		png_destroy_read_struct(&png, &info, NULL);
+	if (ret != IMAGE_PROCESS_END || !data || (int)w != peek.Width() || (int)h != peek.Height()) {
+		free(data);
+		ERROR_LOG(Log::IO, "PNG decode failed");
 		return 0;
 	}
-
-	size_t row_bytes = png_get_rowbytes(png, info);
-	*image_data_ptr = (unsigned char *)malloc(row_bytes * (*pheight));
-	if (!*image_data_ptr) {
-		png_destroy_read_struct(&png, &info, NULL);
-		return 0;
-	}
-
-	std::vector<png_bytep> row_pointers(*pheight);
-	for (int y = 0; y < *pheight; y++) {
-		row_pointers[y] = *image_data_ptr + y * row_bytes;
-	}
-
-	png_read_image(png, row_pointers.data());
-	png_destroy_read_struct(&png, &info, NULL);
+	*pwidth = (int)w;
+	*pheight = (int)h;
+	*image_data_ptr = (unsigned char *)data;
 	return 1;
 }
 
@@ -159,64 +83,57 @@ bool PNGHeaderPeek::IsValidPNGHeader() const {
 	return true;
 }
 
+// rpng's encoder writes to an intfstream; a memory one sized past the worst case
+// holds the whole file, which then goes out in one write.
+bool pngEncode(std::vector<uint8_t> *out, const void *buffer, int w, int h, PNGFormat format) {
+	const uint8_t *src = (const uint8_t *)buffer;
+	std::vector<uint8_t> bgr;
+	enum rpng_pixfmt fmt;
+	int bpp;
+	switch (format) {
+	case PNGFormat::RGBA8888: fmt = RPNG_PIXFMT_RGBA32; bpp = 4; break;
+	// ARGB32 as 32-bit words is B, G, R, A in memory on little-endian hosts.
+	case PNGFormat::BGRA8888: fmt = RPNG_PIXFMT_ARGB32; bpp = 4; break;
+	case PNGFormat::RGB888:
+	default:
+		// rpng takes 24-bit pixels as BGR.
+		bgr.resize((size_t)w * h * 3);
+		for (size_t i = 0; i < bgr.size(); i += 3) {
+			bgr[i + 0] = src[i + 2];
+			bgr[i + 1] = src[i + 1];
+			bgr[i + 2] = src[i + 0];
+		}
+		src = bgr.data();
+		fmt = RPNG_PIXFMT_BGR24;
+		bpp = 3;
+		break;
+	}
+	const size_t raw = (size_t)w * h * bpp;
+	const size_t bound = raw + raw / 16 + (size_t)h * 8 + 4096;
+	out->resize(bound);
+	intfstream_t *stream = intfstream_open_memory(out->data(), RETRO_VFS_FILE_ACCESS_WRITE, RETRO_VFS_FILE_ACCESS_HINT_NONE, bound);
+	if (!stream) {
+		out->clear();
+		return false;
+	}
+	const bool ok = rpng_save_image_stream_fmt(src, stream, w, h, w * bpp, fmt, nullptr);
+	const int64_t written = intfstream_get_ptr(stream);
+	intfstream_close(stream);
+	free(stream);
+	if (!ok || written <= 0) {
+		out->clear();
+		return false;
+	}
+	out->resize((size_t)written);
+	return true;
+}
+
 bool pngSave(const Path &filename, const void *buffer, int w, int h, int bytesPerPixel) {
-	png_bytepp row_ptrs = nullptr;
-
-	FILE *fp = File::OpenCFile(filename, "wb");
-	if (!fp) {
-		ERROR_LOG(Log::IO, "Unable to open png file for writing: %s", filename.c_str());
+	std::vector<uint8_t> png;
+	if (!pngEncode(&png, buffer, w, h, bytesPerPixel == 4 ? PNGFormat::RGBA8888 : PNGFormat::RGB888) ||
+		!File::WriteDataToFile(false, png.data(), png.size(), filename)) {
+		ERROR_LOG(Log::IO, "PNG encode failed: %s", filename.c_str());
 		return false;
 	}
-
-	png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, pngErrorHandler, pngWarningHandler);
-	if (png_ptr == nullptr) {
-		fclose(fp);
-		ERROR_LOG(Log::IO, "PNG encode failed.");
-		return false;
-	}
-
-	png_infop info_ptr = png_create_info_struct(png_ptr);
-	if (info_ptr == nullptr) {
-		png_destroy_write_struct(&png_ptr, nullptr);
-		fclose(fp);
-		ERROR_LOG(Log::IO, "PNG encode failed.");
-		return false;
-	}
-
-	if (setjmp(png_jmpbuf(png_ptr))) {
-		if (row_ptrs != nullptr) {
-			png_free(png_ptr, row_ptrs);
-		}
-		png_destroy_write_struct(&png_ptr, &info_ptr);
-		fclose(fp);
-
-		// Should we even do this?
-		File::Delete(filename);
-
-		ERROR_LOG(Log::IO, "PNG encode failed.");
-		return false;
-	}
-
-	png_set_write_fn(png_ptr, fp, [](png_structp png_ptr, png_bytep data, png_size_t size) {
-		if (fwrite(data, 1, size, (FILE *)png_get_io_ptr(png_ptr)) < size) {
-			png_error(png_ptr, "Failed to write to file.");
-		}
-	}, [](png_structp png_ptr) {
-		fflush((FILE *)png_get_io_ptr(png_ptr));
-	});
-
-	png_set_IHDR(png_ptr, info_ptr, w, h, 8, bytesPerPixel == 3 ? PNG_COLOR_TYPE_RGB : PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
-
-	row_ptrs = (png_bytepp)png_malloc(png_ptr, (png_alloc_size_t)h * (png_alloc_size_t)sizeof(png_bytep));
-	for (png_alloc_size_t i = 0; i < h; ++i) {
-		row_ptrs[i] = (png_bytep)buffer + (png_alloc_size_t)w * (png_alloc_size_t)bytesPerPixel * i;
-	}
-	png_set_rows(png_ptr, info_ptr, row_ptrs);
-
-	png_write_png(png_ptr, info_ptr, PNG_TRANSFORM_IDENTITY, nullptr);
-
-	png_free(png_ptr, row_ptrs);
-	png_destroy_write_struct(&png_ptr, &info_ptr);
-	fclose(fp);
 	return true;
 }

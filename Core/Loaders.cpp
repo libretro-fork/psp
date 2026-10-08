@@ -388,7 +388,7 @@ bool UmdReplace(const Path &filepath, FileLoader **fileLoader, std::string &erro
 // Close the return value with ZipClose (if non-null, of course).
 ZipContainer ZipOpenPath(const Path &fileName) {
 	ZipContainer z(fileName);
-	if (z == nullptr) {
+	if (!z) {
 		ERROR_LOG(Log::HLE, "Failed to open ZIP file '%s'", fileName.c_str());
 	}
 	return z;
@@ -438,43 +438,23 @@ inline char asciitolower(char in) {
 // i.e. straight from an untrusted file.
 static const u64 MAX_ZIP_EXTRACT_TO_MEMORY_SIZE = 16 * 1024 * 1024;
 
-static bool ZipExtractFileToMemory(struct zip *z, int fileIndex, std::string *data) {
-	zip_stat_t zstat{};
-	if (zip_stat_index(z, fileIndex, 0, &zstat) != 0) {
-		ERROR_LOG(Log::HLE, "zip_stat_index failed for file %d in zip", fileIndex);
-		return false;
-	}
-	if (!(zstat.valid & ZIP_STAT_SIZE)) {
-		ERROR_LOG(Log::HLE, "No size for file %d in zip", fileIndex);
-		return false;
-	}
-	if (zstat.size == 0) {
+static bool ZipExtractFileToMemory(const ZipContainer &z, int fileIndex, std::string *data) {
+	const u64 size = z.Size(fileIndex);
+	if (size == 0) {
 		data->clear();
 		return true;
 	}
-	if (zstat.size > MAX_ZIP_EXTRACT_TO_MEMORY_SIZE) {
-		ERROR_LOG(Log::HLE, "Refusing to extract file %d from zip: declared size %llu is implausible", fileIndex, (unsigned long long)zstat.size);
+	if (size > MAX_ZIP_EXTRACT_TO_MEMORY_SIZE) {
+		ERROR_LOG(Log::HLE, "Refusing to extract file %d from zip: declared size %llu is implausible", fileIndex, (unsigned long long)size);
 		return false;
 	}
-
-	size_t readSize = (size_t)zstat.size;
-	data->resize(readSize);
-
-	zip_file *zf = zip_fopen_index(z, fileIndex, 0);
-	if (!zf) {
-		ERROR_LOG(Log::HLE, "Failed to zip_fopen_index file %d from zip", fileIndex);
+	data->resize((size_t)size);
+	if (!z.ExtractInto(fileIndex, (uint8_t *)&(*data)[0], data->size())) {
+		ERROR_LOG(Log::HLE, "Failed to read %d bytes from zip - archive corrupt?", (int)size);
+		data->clear();
 		return false;
 	}
-
-	zip_int64_t retval = zip_fread(zf, data->data(), readSize);
-	zip_fclose(zf);
-
-	if (retval < 0 || retval < (int)readSize) {
-		ERROR_LOG(Log::HLE, "Failed to read %d bytes from zip (%d) - archive corrupt?", (int)readSize, (int)retval);
-		return false;
-	} else {
-		return true;
-	}
+	return true;
 }
 
 // TODO: Make this generic and handle all the things.
@@ -495,16 +475,15 @@ bool DetectArchiveContents(VFSInterface *vfs, ZipFileInfo *info) {
 	return false;
 }
 
-void DetectZipFileContents(zip_t *z, ZipFileInfo *info) {
+void DetectZipFileContents(const ZipContainer &z, ZipFileInfo *info) {
 	info->archiveType = ArchiveType::ZIP;
-	int numFiles = zip_get_num_files(z);
-	if (numFiles < 0) {
+	if (!z) {
 		// Broken zip archive?
 		ERROR_LOG(Log::HLE, "Failed to get the file count of zip file");
 		info->contents = ZipFileContents::UNKNOWN;
 		return;
 	}
-	_dbg_assert_(numFiles >= 0);
+	const int numFiles = z.NumEntries();
 
 	// Verify that this is a PSP zip file with the correct layout. We also try
 	// to detect simple zipped ISO files, those we'll just "install" to the current
@@ -528,11 +507,10 @@ void DetectZipFileContents(zip_t *z, ZipFileInfo *info) {
 	// TODO: It might be cleaner to write separate detection functions, but this big loop doing it all at once
 	// is quite convenient and makes it easy to add shared heuristics.
 	for (int i = 0; i < numFiles; i++) {
-		const char *fn = zip_get_name(z, i, 0);
-
-		zip_stat_t stat{};
-		zip_stat_index(z, i, 0, &stat);
-		totalFileSize += stat.size;
+		const char *fn = z.Name(i);
+		if (!fn)
+			continue;
+		totalFileSize += z.Size(i);
 
 		std::string fileName(fn);
 		if (endsWith(fileName, "/")) {
@@ -599,9 +577,6 @@ void DetectZipFileContents(zip_t *z, ZipFileInfo *info) {
 					if (sfo.HasKey("TITLE")) {
 						info->gameTitle = sfo.GetValueString("TITLE");
 						info->savedataTitle = sfo.GetValueString("SAVEDATA_TITLE");
-						char buff[20];
-						strftime(buff, 20, "%Y-%m-%d %H:%M:%S", localtime(&stat.mtime));
-						info->mTime = buff;
 						info->savedataDetails = sfo.GetValueString("SAVEDATA_DETAIL");
 						info->savedataDir = sfo.GetValueString("SAVEDATA_DIRECTORY");  // should also be parsable from the path.
 						hasParamSFO = true;

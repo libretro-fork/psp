@@ -1,6 +1,5 @@
 
 #include <assert.h>
-#include <png.h>
 #include <set>
 #include <map>
 #include <vector>

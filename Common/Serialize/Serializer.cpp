@@ -18,7 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <snappy-c.h>
-#include <zstd.h>
+#include <encodings/rzstd.h>
 
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -433,10 +433,10 @@ CChunkFileReader::Error CChunkFileReader::LoadFile(const Path &filename, std::st
 			auto status = snappy_uncompress((const char *)buffer, sz, (char *)uncomp_buffer, &uncomp_size);
 			success = status == SNAPPY_OK;
 		} else if (SerializeCompressType(header.Compress) == SerializeCompressType::ZSTD) {
-			size_t status = ZSTD_decompress((char *)uncomp_buffer, uncomp_size, (const char *)buffer, sz);
-			success = !ZSTD_isError(status);
+			size_t wrote = 0;
+			success = rzstd_decode(uncomp_buffer, uncomp_size, buffer, sz, &wrote) == RZSTD_PROCESS_END;
 			if (success) {
-				uncomp_size = status;
+				uncomp_size = wrote;
 			}
 		} else {
 			ERROR_LOG(Log::SaveState, "ChunkReader: Unexpected compression type %d", header.Compress);
@@ -491,7 +491,7 @@ CChunkFileReader::Error CChunkFileReader::SaveFile(const Path &filename, const s
 		write_len = snappy_max_compressed_length(sz);
 		break;
 	case SerializeCompressType::ZSTD:
-		write_len = ZSTD_compressBound(sz);
+		write_len = rzstd_compress_bound(sz);
 		break;
 	}
 	u8 *compressed_buffer = write_len == 0 ? nullptr : (u8 *)malloc(write_len);
@@ -512,20 +512,7 @@ CChunkFileReader::Error CChunkFileReader::SaveFile(const Path &filename, const s
 			success = snappy_compress((const char *)buffer, sz, (char *)compressed_buffer, &write_len) == SNAPPY_OK;
 			break;
 		case SerializeCompressType::ZSTD:
-			{
-				auto ctx = ZSTD_createCCtx();
-				if (!ctx) {
-					success = false;
-				} else {
-					// TODO: If free disk space is low, we could max this out to 22?
-					ZSTD_CCtx_setParameter(ctx, ZSTD_c_compressionLevel, ZSTD_CLEVEL_DEFAULT);
-					ZSTD_CCtx_setParameter(ctx, ZSTD_c_checksumFlag, 1);
-					ZSTD_CCtx_setPledgedSrcSize(ctx, sz);
-					write_len = ZSTD_compress2(ctx, compressed_buffer, write_len, buffer, sz);
-					success = !ZSTD_isError(write_len);
-				}
-				ZSTD_freeCCtx(ctx);
-			}
+			success = rzstd_encode(compressed_buffer, write_len, buffer, sz, 3, &write_len) == RZSTD_PROCESS_END;
 			break;
 		}
 

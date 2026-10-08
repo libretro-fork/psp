@@ -187,8 +187,18 @@ size_t LocalFileLoader::ReadAt(s64 absolutePos, size_t bytes, size_t count, void
 
 #if defined(HAVE_LIBRETRO_VFS)
 	std::lock_guard<std::mutex> guard(readLock_);
-	File::Fseek(file_, absolutePos, SEEK_SET);
-	return fread(data, bytes, count, file_);
+	// The VFS has no positioned read. Only seek when the read isn't sequential:
+	// a seek also throws away whatever the frontend's stream had buffered.
+	if (filePos_ != absolutePos) {
+		if (File::Fseek(file_, absolutePos, SEEK_SET) != 0) {
+			filePos_ = -1;
+			return 0;
+		}
+		filePos_ = absolutePos;
+	}
+	const size_t done = fread(data, 1, bytes * count, file_);
+	filePos_ = done == bytes * count ? filePos_ + (s64)done : -1;
+	return done / bytes;
 #elif PPSSPP_PLATFORM(SWITCH)
 	// Toolchain has no fancy IO API.  We must lock.
 	std::lock_guard<std::mutex> guard(readLock_);

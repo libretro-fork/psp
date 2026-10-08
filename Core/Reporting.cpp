@@ -28,7 +28,7 @@
 
 // for crc32
 extern "C" {
-#include "zlib.h"
+#include <encodings/crc32.h>
 }
 
 #include "Core/Reporting.h"
@@ -108,7 +108,7 @@ namespace Reporting
 	static u32 CalculateCRC(BlockDevice *blockDevice, std::atomic<bool> *cancel) {
 		auto ga = GetI18NCategory(I18NCat::GAME);
 
-		u32 crc = crc32(0, Z_NULL, 0);
+		u32 crc = 0;
 
 		u8 block[2048];
 		u32 numBlocks = blockDevice->GetNumBlocks();
@@ -122,7 +122,7 @@ namespace Reporting
 				g_OSD.RemoveProgressBar("crc", false, 0.0f);
 				return 0;
 			}
-			crc = crc32(crc, block, 2048);
+			crc = encoding_crc32(crc, block, 2048);
 			g_OSD.SetProgressBar("crc", std::string(ga->T("Calculate CRC")), 0.0f, (float)numBlocks, (float)i, 0.5f);
 		}
 

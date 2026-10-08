@@ -19,7 +19,6 @@
 
 #include <algorithm>
 
-#include <png.h>
 #include "ext/jpge/jpge.h"
 
 #include "Common/Data/Convert/ColorConv.h"
@@ -453,30 +452,12 @@ bool Save8888RGBAScreenshot(const Path &filename, const u8 *buffer, int w, int h
 }
 
 bool Save8888RGBAScreenshot(std::vector<uint8_t> &bufferPNG, const u8 *bufferRGBA8888, int w, int h) {
-	png_image png{};
-	png.version = PNG_IMAGE_VERSION;
-	png.format = PNG_FORMAT_RGBA;
-	png.width = w;
-	png.height = h;
-
-	png_alloc_size_t allocSize = bufferPNG.size();
-	int result = png_image_write_to_memory(&png, allocSize == 0 ? nullptr : bufferPNG.data(), &allocSize, 0, bufferRGBA8888, w * 4, nullptr);
-	bool success = result != 0 && png.warning_or_error <= 1;
-	if (!success && allocSize != bufferPNG.size()) {
-		bufferPNG.resize(allocSize);
-		png.warning_or_error = 0;
-		result = png_image_write_to_memory(&png, bufferPNG.data(), &allocSize, 0, bufferRGBA8888, w * 4, nullptr);
-		success = result != 0 && png.warning_or_error <= 1;
-	}
-	if (success)
-		bufferPNG.resize(allocSize);
-	png_image_free(&png);
-
-	if (!success) {
+	if (!pngEncode(&bufferPNG, bufferRGBA8888, w, h)) {
 		ERROR_LOG(Log::IO, "Buffering screenshot to PNG produced errors.");
 		bufferPNG.clear();
+		return false;
 	}
-	return success;
+	return true;
 }
 
 void TakeUserScreenshot() {

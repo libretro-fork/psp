@@ -1,6 +1,6 @@
 #include <cstring>
 #include <cstdint>
-#include <zstd.h>
+#include <encodings/rzstd.h>
 
 #include "Common/Log.h"
 #include "Common/Render/TextureAtlas.h"
@@ -39,7 +39,9 @@ public:
 			offset_ += sizeof(uint32_t);
 
 			_dbg_assert_(offset_ + compressed_size <= size_);
-			ZSTD_decompress(t, sizeof(T) * count, data_ + offset_, compressed_size);
+			size_t wrote = 0;
+			if (rzstd_decode((uint8_t *)t, sizeof(T) * count, data_ + offset_, compressed_size, &wrote) != RZSTD_PROCESS_END)
+				memset((void *)t, 0, sizeof(T) * count);
 			offset_ += compressed_size;
 		}
 		return t;

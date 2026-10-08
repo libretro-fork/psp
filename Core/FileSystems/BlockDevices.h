@@ -25,6 +25,7 @@
 
 #include <mutex>
 #include <memory>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 
@@ -46,6 +47,10 @@ public:
 		}
 		return true;
 	}
+	// Bytes [offset, offset + len) of the image, at any alignment. The default reads the
+	// partial blocks at either end through a sector buffer; devices that can address bytes
+	// read straight into out instead.
+	virtual bool ReadBytes(u64 offset, size_t len, u8 *out);
 	int constexpr GetBlockSize() const { return 2048;}  // forced, it cannot be changed by subclasses. If a subclass uses bigger blocks internally, it must cache and virtualize.
 	virtual u32 GetNumBlocks() const = 0;
 	virtual u64 GetUncompressedSize() const {
@@ -80,6 +85,7 @@ private:
 	size_t readBufferSize = 0;
 	u8 *zlibBuffer = nullptr;
 	u32 zlibBufferFrame = 0;
+	void *inflate_ = nullptr;  // one rinflate stream, reset per frame
 	u8 indexShift = 0;
 	u8 blockShift = 0;
 	u32 frameSize = 0;
@@ -94,6 +100,7 @@ public:
 	~FileBlockDevice();
 	bool ReadBlock(int blockNumber, u8 *outPtr, bool uncached = false) override;
 	bool ReadBlocks(u32 minBlock, int count, u8 *outPtr) override;
+	bool ReadBytes(u64 offset, size_t len, u8 *out) override;
 	u32 GetNumBlocks() const override {return (u32)(filesize_ / GetBlockSize());}
 	bool IsDisc() const override { return true; }
 	u64 GetUncompressedSize() const override {
@@ -194,9 +201,7 @@ private:
 	KirkState kirk_{};
 };
 
-struct CHDImpl;
-
-struct ExtendedCoreFile;
+struct rchd;
 
 class CHDFileBlockDevice : public BlockDevice {
 public:
@@ -204,14 +209,13 @@ public:
 	~CHDFileBlockDevice();
 	bool ReadBlock(int blockNumber, u8 *outPtr, bool uncached = false) override;
 	bool ReadBlocks(u32 minBlock, int count, u8 *outPtr) override;
+	bool ReadBytes(u64 offset, size_t len, u8 *out) override;
 	u32 GetNumBlocks() const override { return numBlocks; }
 	bool IsDisc() const override { return true; }
 private:
-	struct ExtendedCoreFile *core_file_ = nullptr;
-	std::unique_ptr<CHDImpl> impl_;
-	u8 *readBuffer = nullptr;
-	u32 currentHunk = 0;
-	u32 blocksPerHunk = 0;
+	bool ReadRange(u64 offset, size_t len, u8 *out);
+	struct rchd *chd_ = nullptr;
+	std::vector<u8> scratch_;  // compressed bytes, borrowed by the decoder
 	u32 numBlocks = 0;
 };
 

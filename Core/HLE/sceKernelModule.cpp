@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <set>
 
-#include "zlib.h"
+#include <encodings/crc32.h>
+
+#include "Common/Data/Encoding/Compression.h"
 
 #include "Common/Data/Convert/SmallDataConvert.h"
 #include "Common/Serialize/Serializer.h"
@@ -1051,29 +1053,12 @@ static bool KernelImportModuleFuncs(PSPModule *module, u32 *firstImportStubAddr,
 }
 
 static int gzipDecompress(u8 *OutBuffer, int OutBufferLength, u8 *InBuffer) {
-	int err;
-	z_stream stream;
-	u8 *outBufferPtr;
-
-	outBufferPtr = OutBuffer;
-	stream.next_in = InBuffer;
-	stream.avail_in = (uInt)OutBufferLength;
-	stream.next_out = outBufferPtr;
-	stream.avail_out = (uInt)OutBufferLength;
-	stream.zalloc = (alloc_func)0;
-	stream.zfree = (free_func)0;
-	err = inflateInit2(&stream, 16+MAX_WBITS);
-	if (err != Z_OK) {
-		return -1;
-	}
-	err = inflate(&stream, Z_FINISH);
-	if (err != Z_STREAM_END) {
+	const int64_t produced = InflateBuffer(31, InBuffer, (size_t)OutBufferLength, OutBuffer, (size_t)OutBufferLength);
+	if (produced < 0) {
 		ERROR_LOG(Log::Loader, "gzipDecompress: Didn't reach the end of the input, output buffer too small?");
-		inflateEnd(&stream);
 		return -2;
 	}
-	inflateEnd(&stream);
-	return stream.total_out;
+	return (int)produced;
 }
 
 static void parsePrxLibInfo(const u8* ptr, u32 headerSize) {
@@ -1304,7 +1289,7 @@ static PSPModule *__KernelLoadELFFromPtr(const u8 *ptr, size_t elfSize, u32 load
 	loadedModules.insert(module->GetUID());
 	memset(&module->nm, 0, sizeof(module->nm));
 
-	module->crc = crc32(0, ptr, (uInt)elfSize);
+	module->crc = encoding_crc32(0, ptr, elfSize);
 	module->nm.modid = module->GetUID();
 
 	bool reportedModule = false;
