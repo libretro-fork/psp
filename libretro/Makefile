@@ -412,15 +412,43 @@ else ifneq (,$(findstring win,$(platform)))
 	LDFLAGS += -shared -Wl,--no-undefined -static-libgcc -static-libstdc++ -Wl,--version-script=link.T -lwinmm -lgdi32 -lwsock32 -lws2_32 -lversion -liphlpapi
 	GL_LIB := -lopengl32
 	PLATFORM_EXT = win32
-   # The bundled Windows FFmpeg is MSVC-built and cannot be linked by MinGW,
-   # so compile against the same toolchain FFmpeg that is linked.
-   FFMPEGLDFLAGS += -lavformat -lavcodec -lavutil -lswresample -lswscale
+   # The prebuilt ffmpeg/Windows libraries are MSVC builds that GNU ld
+   # mislinks, so the bundled FFmpeg source is built with this toolchain.
+   FFMPEG_MINGW = 1
    fpic = -fPIC
 	CC = gcc
 	CXX = g++
 endif
 
 include Makefile.common
+
+ifeq ($(FFMPEG_MINGW), 1)
+# Same components as ffmpeg/windows_x64-build.sh. FFMPEG_CROSS_PREFIX names
+# the binutils prefix when cross-compiling (e.g. x86_64-w64-mingw32-).
+FFMPEG_MINGW_DIR    := obj-ffmpeg-mingw-$(TARGET_ARCH)
+FFMPEG_MINGW_PREFIX := $(FFMPEG_MINGW_DIR)/install
+FFMPEG_MINGW_STAMP  := $(FFMPEG_MINGW_PREFIX)/.built
+FFMPEG_MINGW_LIBS   := avformat avcodec swresample swscale avutil
+FFMPEG_MINGW_CONFIGURE := \
+	--target-os=mingw32 --arch=$(TARGET_ARCH) --enable-cross-compile \
+	$(if $(FFMPEG_CROSS_PREFIX),--cross-prefix=$(FFMPEG_CROSS_PREFIX)) \
+	--cc="$(CC)" --prefix="$(abspath $(FFMPEG_MINGW_PREFIX))" \
+	--disable-shared --enable-static --disable-debug --disable-yasm \
+	--enable-w32threads --disable-pthreads --disable-everything \
+	--disable-avdevice --disable-avfilter --disable-postproc --disable-programs \
+	--disable-network --disable-doc --disable-iconv --disable-zlib \
+	--disable-bzlib --disable-lzma --disable-sdl --disable-xlib \
+	--disable-schannel --disable-securetransport \
+	--enable-decoder=aac,aac_latm,atrac3,atrac3p,mp3,pcm_s16le,pcm_s8 \
+	--enable-decoder=h264,mpeg4,mpeg2video,mjpeg,mjpegb \
+	--enable-encoder=pcm_s16le,ffv1,mpeg4 \
+	--enable-muxer=avi \
+	--enable-demuxer=h264,m4v,mp3,mpegvideo,mpegps,mjpeg,avi,aac,pmp,oma,pcm_s16le,pcm_s8,wav \
+	--enable-parser=h264,mpeg4video,mpegaudio,mpegvideo,mjpeg,aac,aac_latm \
+	--enable-protocol=file
+FFMPEGINCFLAGS += -I$(FFMPEG_MINGW_PREFIX)/include
+FFMPEGLDFLAGS  += $(foreach lib,$(FFMPEG_MINGW_LIBS),$(FFMPEG_MINGW_PREFIX)/lib/lib$(lib).a)
+endif
 
 ifeq ($(GLES), 1)
 	GLFLAGS += -DGLES -DUSING_GLES2
@@ -497,6 +525,18 @@ endif
 
 all: $(TARGET)
 
+ifeq ($(FFMPEG_MINGW), 1)
+$(FFMPEG_MINGW_STAMP):
+	rm -rf $(FFMPEG_MINGW_DIR)
+	mkdir -p $(FFMPEG_MINGW_DIR)
+	cd $(FFMPEG_MINGW_DIR) && "$(abspath $(FFMPEGDIR))/configure" $(FFMPEG_MINGW_CONFIGURE)
+	$(MAKE) -C $(FFMPEG_MINGW_DIR) install
+	touch $@
+
+# Everything that includes FFmpeg headers needs the install first.
+$(filter %.o,$(OBJECTS)): | $(FFMPEG_MINGW_STAMP)
+endif
+
 %.o: %.S
 	$(AS) $(CFLAGS) -c $(OBJOUT)$@ $<
 
@@ -515,6 +555,9 @@ endif
 
 clean:
 	rm -f $(filter-out $(CORE_DIR)/ext/zstd/lib/decompress/huf_decompress_amd64.S,$(OBJECTS)) $(TARGET)
+ifeq ($(FFMPEG_MINGW), 1)
+	rm -rf $(FFMPEG_MINGW_DIR)
+endif
 
 .PHONY: clean
 
