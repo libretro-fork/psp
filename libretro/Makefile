@@ -409,10 +409,11 @@ else ifneq (,$(findstring win,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro.dll
 	CFLAGS += -D_UNICODE -DUNICODE
 	CXXFLAGS += -fpermissive -Wno-multichar -D_UNICODE -DUNICODE -DARMIPS_USE_STD_FILESYSTEM
-	LDFLAGS += -shared -Wl,--no-undefined -static-libgcc -static-libstdc++ -Wl,--version-script=link.T -lwinmm -lgdi32 -lwsock32 -lws2_32
+	LDFLAGS += -shared -Wl,--no-undefined -static-libgcc -static-libstdc++ -Wl,--version-script=link.T -lwinmm -lgdi32 -lwsock32 -lws2_32 -lversion -liphlpapi
 	GL_LIB := -lopengl32
 	PLATFORM_EXT = win32
-   FFMPEGINCFLAGS += -I$(FFMPEGDIR)/Windows/$(TARGET_ARCH)/include
+   # The bundled Windows FFmpeg is MSVC-built and cannot be linked by MinGW,
+   # so compile against the same toolchain FFmpeg that is linked.
    FFMPEGLDFLAGS += -lavformat -lavcodec -lavutil -lswresample -lswscale
    fpic = -fPIC
 	CC = gcc

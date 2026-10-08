@@ -182,6 +182,27 @@ jobs:
         echo "Visual Studio: $VS_PATH"
         make -C libretro -f Makefile -j4 platform=${{ matrix.platform }} VsInstallRoot="$(cygpath -u "$VS_PATH")"
 
+  # The MinGW build of the libretro core (platform=win), as built from MSYS2. It links the toolchain's
+  # own FFmpeg (the bundled Windows one is MSVC-built) and uses the current MSYS2 GCC, so it catches
+  # GCC-specific C errors, missing Win32 import libs and FFmpeg API drift that the MSVC jobs don't.
+  build-libretro-mingw:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+
+    - name: Setup MSYS2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+      with:
+        msystem: MINGW64
+        install: make mingw-w64-x86_64-gcc mingw-w64-x86_64-ffmpeg
+
+    - name: Build libretro core
+      shell: msys2 {0}
+      run: make -C libretro -f Makefile -j4 platform=win
+
   test-windows:
     runs-on: windows-latest
     needs: build-windows
