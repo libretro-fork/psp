@@ -26,119 +26,9 @@ env:
   BUILD_CONFIGURATION: Release
 
 jobs:
-  build-windows:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [x64, ARM64]
-
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        submodules: recursive
-
-    - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
-
-    - name: Check Valid Version Tags
-      id: valid-tags
-      shell: bash
-      run: |
-        # This is required for git describe --always to work for git-version.cpp.
-        git fetch --deepen=15000 --no-recurse-submodules --tags || exit 0
-        echo "count=$(git tag -l 'v[0-9]*' | wc -l | tr -d ' ')" >> $GITHUB_OUTPUT # $env:GITHUB_OUTPUT on pwsh
-
-    - name: Fetch upstream tags # Fallback to fetching tags from upstream
-      if: steps.valid-tags.outputs.count == '0'
-      shell: bash
-      run: |
-        # TODO: should try to fetch tags from whereever this repo was forked from before fetching from official repo
-        git remote add upstream https://github.com/hrydgard/ppsspp.git
-        git fetch --deepen=15000 --no-recurse-submodules --tags --force upstream || exit 0
-
-    - name: Create git-version.cpp for Windows # Not sure why the one at git-version-gen.cmd couldn't get the version properly.
-      #if: github.ref_type == 'tag'
-      run: |
-        $GIT_VERSION=git describe --always
-        echo "Num of Valid Tags = ${{ steps.valid-tags.outputs.count }}"
-        echo "Test GitVer = ${{ github.ref_name }} / $GIT_VERSION / ${GITHUB_REF_NAME}"
-        echo "const char *PPSSPP_GIT_VERSION = `"$GIT_VERSION`";" > git-version.cpp
-        echo "#define PPSSPP_GIT_VERSION_NO_UPDATE 1" >> git-version.cpp
-        
-        # Generate Windows/win-version.h too.
-        if ($GIT_VERSION.StartsWith("v")) {
-          $WIN_VERSION_COMMA=$GIT_VERSION -replace '^v', '' -replace '-g[0-9a-f]+$', '' -replace '[-\.]', ','
-          echo "Test WinVer = $WIN_VERSION_COMMA"
-          echo "#define PPSSPP_WIN_VERSION_STRING `"$GIT_VERSION`"" > Windows/win-version.h
-          echo "#define PPSSPP_WIN_VERSION_COMMA $WIN_VERSION_COMMA" >> Windows/win-version.h
-          echo "#define PPSSPP_WIN_VERSION_NO_UPDATE 1" >> Windows/win-version.h
-        }
-        
-    - name: Build Windows
-      working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: msbuild /m /p:TrackFileAccess=false /p:Configuration=${{ env.BUILD_CONFIGURATION }} /p:Platform=${{ matrix.platform }} Windows/PPSSPP.sln
-
-    - name: Package build
-      working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: |
-        mkdir ppsspp
-        cp PPSSPP*.exe ppsspp/
-        cp *.pdb ppsspp/
-        cp Windows/*.bat ppsspp/
-        cp -r assets ppsspp/assets
-
-    - name: Package headless (non-Win32)
-      if: matrix.platform != 'Win32'
-      run: cp Windows/${{ matrix.platform }}/Release/*.exe ppsspp/
-
-    - name: Package headless (Win32)
-      if: matrix.platform == 'Win32'
-      run: cp Windows/Release/*.exe ppsspp/
-
-    - name: Upload build
-      uses: actions/upload-artifact@v7
-      with:
-        name: Windows ${{ matrix.platform }} build
-        path: ppsspp/
-
-    - name: Create release
-      if: github.ref_type == 'tag'
-      working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: |
-        rm ppsspp/PPSSPPHeadless*
-        rm ppsspp/UnitTest*
-        rm ppsspp/*.pdb
-        mkdir releases
-        Compress-Archive -Path "ppsspp/*" -Update -DestinationPath "releases/PPSSPP-${{ github.ref_name }}-Windows-${{ matrix.platform }}.zip"
-
-    - name: Upload release
-      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-      if: github.ref_type == 'tag'
-      with:
-        files: releases/*.zip
-
-  build-uwp:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        submodules: recursive
-
-    - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
-
-    - name: Restore NuGet packages
-      working-directory: ${{ github.workspace }}/UWP
-      run: nuget restore PPSSPP_UWP.sln
-
-    - name: Build UWP
-      working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: msbuild /m /p:TrackFileAccess=false /p:Configuration=${{ env.BUILD_CONFIGURATION }} /p:Platform=x64 /p:AppxPackageSigningEnabled=false UWP/PPSSPP_UWP.sln
-
   # Mirrors the two Windows jobs in libretro's own GitLab CI (see .gitlab-ci.yml). The libretro core
-  # is built by GNU make driving cl.exe/link.exe from an MSYS2 shell, not by the VS solution, so it
-  # catches MSVC-specific errors that neither build-windows nor the Linux/Android libretro builds do
+  # is built by GNU make driving cl.exe/link.exe from an MSYS2 shell, so it catches MSVC-specific
+  # errors that the Linux/Android libretro builds don't
   # - duplicate symbols in particular, since MSVC emits inline functions that gcc/clang inline away.
   build-libretro-windows:
     name: build-libretro-windows (${{ matrix.arch }})
@@ -203,34 +93,6 @@ jobs:
       shell: msys2 {0}
       run: make -C libretro -f Makefile -j4 platform=win
 
-  test-windows:
-    runs-on: windows-latest
-    needs: build-windows
-    timeout-minutes: 30
-    steps:
-    - uses: actions/checkout@v7
-      with:
-        submodules: false
-
-    - name: Fetch tests
-      working-directory: ${{ env.GITHUB_WORKSPACE }}
-      # Doing this to avoid ffmpeg and other large submodules.
-      run: git submodule update --init pspautotests assets/lang
-
-    - name: Download build
-      uses: actions/download-artifact@v8
-      with:
-        name: Windows x64 build
-        path: ppsspp/
-
-    - name: Execute unit tests
-      working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: ppsspp\\UnitTest.exe ALL
-
-    - name: Execute headless tests
-      working-directory: ${{ env.GITHUB_WORKSPACE }}
-      run: python test.py -g --graphics=software
-
   build:
     name: build (${{ matrix.id }})
     strategy:
@@ -241,12 +103,12 @@ jobs:
           extra: test
           cc: clang
           cxx: clang++
-          args: ./b.sh --headless --unittest
+          args: ./b.sh --headless --unittest PPSSPPHeadless PPSSPPUnitTest
           id: clang-normal
         - os: ubuntu-26.04
           cc: gcc
           cxx: g++
-          args: ./b.sh --headless --unittest
+          args: ./b.sh --headless --unittest PPSSPPHeadless PPSSPPUnitTest
           id: gcc-normal
 
         # Gives the headless tests an arm64 host to run the CPU backends on - the arm64 JIT is a
@@ -255,33 +117,9 @@ jobs:
           extra: test
           cc: clang
           cxx: clang++
-          args: ./b.sh --headless --unittest
+          args: ./b.sh --headless --unittest PPSSPPHeadless PPSSPPUnitTest
           id: clang-arm64
 
-        - os: ubuntu-26.04
-          extra: android
-          cc: clang
-          cxx: clang++
-          args: cd android && ./ab.sh APP_ABI=arm64-v8a UNITTEST=1 HEADLESS=1
-          id: android-arm64
-        - os: ubuntu-26.04
-          extra: android
-          cc: clang
-          cxx: clang++
-          args: cd android && ./ab.sh APP_ABI=armeabi-v7a UNITTEST=1 HEADLESS=1
-          id: android-arm32
-        - os: ubuntu-26.04
-          extra: android
-          cc: clang
-          cxx: clang++
-          args: cd android && ./ab.sh APP_ABI=x86_64 UNITTEST=1 HEADLESS=1
-          id: android-x86_64
-        - os: ubuntu-26.04
-          extra: android
-          cc: clang
-          cxx: clang++
-          args: cd android && ./ab.sh APP_ABI=arm64-v8a OPENXR=1
-          id: android-vr
         - os: ubuntu-26.04
           extra: android
           cc: clang
@@ -301,6 +139,20 @@ jobs:
           cxx: clang++
           args: make -C libretro -f Makefile -j2
           id: clang-libretro
+        # The core on an arm64 host: the arm64 JIT and the NEON paths in the codecs.
+        - os: ubuntu-26.04-arm
+          extra: libretro
+          cc: gcc
+          cxx: g++
+          args: make -C libretro -f Makefile -j2
+          id: gcc-libretro-arm64
+        # The CMake build of the core on Linux, which nothing else here builds.
+        - os: ubuntu-26.04
+          extra: libretro
+          cc: gcc
+          cxx: g++
+          args: ./b.sh --libretro ppsspp_libretro
+          id: cmake-libretro
 
         - os: ubuntu-26.04
           extra: loongarch64
@@ -320,7 +172,7 @@ jobs:
           extra: test
           cc: clang
           cxx: clang++
-          args: ./b.sh --headless --unittest --no-png
+          args: ./b.sh --headless --unittest PPSSPPHeadless PPSSPPUnitTest
           id: macos
         - os: macos-latest
           extra: libretro_mac
@@ -328,12 +180,6 @@ jobs:
           cxx: clang++
           args: ./b.sh --libretro
           id: macos-libretro
-        - os: macos-latest
-          extra: ios
-          cc: clang
-          cxx: clang++
-          args: ./b-ios.sh
-          id: ios
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -370,27 +216,6 @@ jobs:
         sudo apt-get update -y -qq
         sudo apt-get install -y gcc-14-${{ matrix.extra }}-linux-gnu g++-14-${{ matrix.extra }}-linux-gnu binutils-${{ matrix.extra }}-linux-gnu libgl-dev libglu1-mesa-dev qemu-user
         sudo cmake/scripts/setup-cross.sh ${{ matrix.extra }}
-
-    - name: Install iOS dependencies
-      if: matrix.id == 'ios'
-      run: |
-        brew install ldid dpkg pillow
-        # Check Xcode version
-        xcodebuild -version
-
-    - name: Create iOS Version.txt file
-      if: matrix.id == 'ios'
-      run: |
-        # Create Version.txt file (should probably do this during building process)
-        mkdir -p build-ios/PPSSPP.app
-        GIT_VERSION=$(git describe --always --tags)
-        echo ${GIT_VERSION#v} > build-ios/PPSSPP.app/Version.txt
-
-    - name: Create macOS & iOS git-version.cpp for tagged release
-      if: github.ref_type == 'tag' && (matrix.id == 'macos' || matrix.id == 'ios')
-      run: |
-        echo "const char *PPSSPP_GIT_VERSION = \"${GITHUB_REF_NAME}\";" > git-version.cpp
-        echo "#define PPSSPP_GIT_VERSION_NO_UPDATE 1" >> git-version.cpp
 
     - name: Setup ccache
       uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24
@@ -445,29 +270,10 @@ jobs:
         python3 test.py -g --graphics=software --cpu=jit-ir --timeout=60 \
           --known-failures=${{ matrix.extra }}
 
-    - name: Package build
-      if: matrix.extra == 'test' || matrix.id == 'ios'
+    - name: Package test tools
+      if: matrix.extra == 'test'
       run: |
         mkdir -p ppsspp
-        if [ -e build*/$BUILD_CONFIGURATION/PPSSPPSDL ]; then
-          cp build*/$BUILD_CONFIGURATION/PPSSPPSDL ppsspp/
-        elif [ -e build*/PPSSPPSDL.app ]; then
-          cp -a build*/PPSSPPSDL.app ppsspp/
-          # GitHub Actions zipping kills symlinks and permissions.
-          pushd ppsspp
-          zip -qry PPSSPPSDL.zip PPSSPPSDL.app
-          rm -rf PPSSPPSDL.app
-          popd
-        elif [ -e build-ios/PPSSPP.app ]; then
-          # Get the final files generated by b-ios.h script
-          find build -name 'PPSSPP*.ipa' -exec cp -a '{}' ppsspp/ \;
-          find build -name 'PPSSPP*.xcarchive' -exec cp -a '{}' ppsspp/ \;
-          find build -name 'PPSSPP*.deb' -exec cp -a '{}' ppsspp/ \;
-          find build -name 'org.ppsspp*.deb' -exec cp -a '{}' ppsspp/ \;
-        elif [ -e build*/PPSSPPSDL ]; then
-          cp build*/PPSSPPSDL ppsspp/
-          cp -r assets ppsspp/assets
-        fi
         if [ -e build*/$BUILD_CONFIGURATION/PPSSPPHeadless ]; then
           cp build*/$BUILD_CONFIGURATION/PPSSPPHeadless ppsspp/
         elif [ -e build*/PPSSPPHeadless ]; then
@@ -485,33 +291,6 @@ jobs:
       with:
         name: ${{ matrix.os }} build
         path: ppsspp/
-
-    - name: Upload iOS build
-      uses: actions/upload-artifact@v7
-      if: matrix.id == 'ios'
-      with:
-        name: ${{ matrix.id }} build
-        path: ppsspp/
-
-    - name: Create macOS release
-      if: github.ref_type == 'tag' && matrix.id == 'macos'
-      working-directory: ppsspp
-      run: mv PPSSPPSDL.zip PPSSPPSDL-macOS-${GITHUB_REF_NAME}.zip
-
-    - name: Upload macOS & iOS release
-      uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-      if: github.ref_type == 'tag' && (matrix.id == 'macos' || matrix.id == 'ios')
-      with:
-        files: |
-          ppsspp/*.zip
-          ppsspp/*.ipa
-          ppsspp/*.deb
-        body: >
-          PPSSPP is a cross-platform PSP emulator.
-          Visit PPSSPP [official website](https://ppsspp.org)
-          for a [full changelog](https://ppsspp.org/index.html#news)
-          as well as the [downloads section](https://ppsspp.org/downloads.html)
-          for other platforms.
 
   test:
     strategy:
@@ -623,7 +402,7 @@ jobs:
 
     - name: Build for testing
       run: |
-        ./b.sh --headless --unittest
+        ./b.sh --headless --unittest PPSSPPHeadless PPSSPPUnitTest
 
     - name: Execute unit tests
       run: |
