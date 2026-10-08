@@ -6,6 +6,7 @@
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
 #include "Common/TimeUtil.h"
+#include "Common/Thread/ParkingLot.h"
 
 #include "Common/GPU/Vulkan/VulkanAlloc.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
@@ -274,7 +275,8 @@ public:
 		for (auto &task : tasks_) {
 			task.pipeline->Create(vulkan_, task.compatibleRenderPass, task.rpType, task.sampleCount, task.scheduleTime, task.countToCompile);
 		}
-		tasksInFlight_.fetch_sub(1);
+		if (tasksInFlight_.fetch_sub(1) == 1)
+			ParkingLotNotify(&tasksInFlight_);
 	}
 
 	VulkanContext *vulkan_;
@@ -288,15 +290,9 @@ public:
 };
 
 int CreateMultiPipelinesTask::WaitForAll() {
-	int inFlight = 0;
-	int maxInFlight = 0;
-	while ((inFlight = tasksInFlight_.load()) > 0) {
-		if (inFlight > maxInFlight) {
-			maxInFlight = inFlight;
-		}
-		sleep_ms(2, "create-multi-pipelines-wait");
-	}
-	return maxInFlight;
+	const int inFlight = tasksInFlight_.load();
+	ParkingLotWait(&tasksInFlight_, [] { return tasksInFlight_.load() <= 0; });
+	return inFlight > 0 ? inFlight : 0;
 }
 
 std::atomic<int> CreateMultiPipelinesTask::tasksInFlight_;
@@ -631,13 +627,12 @@ void VulkanRenderManager::CompileThreadFunc() {
 			std::unique_lock<std::mutex> lock(compileQueueMutex_);
 			compileScheduling_ = false;
 		}
+		compileProgress_.fetch_add(1);
+		ParkingLotNotify(&compileProgress_);
 
 		if (exitAfterCompile) {
 			break;
 		}
-
-		// Hold off just a bit before we check again, to allow bunches of pipelines to collect.
-		sleep_ms(1, "pipeline-collect");
 	}
 
 	std::unique_lock<std::mutex> lock(compileQueueMutex_);
@@ -688,14 +683,17 @@ void VulkanRenderManager::PresentWaitThreadFunc() {
 	uint64_t waitedId = frameIdGen_;
 	while (runCompileThread_) {
 		const uint64_t timeout = 1000000000ULL;  // 1 sec
-		if (VK_SUCCESS == vkWaitForPresentKHR(vulkan_->GetDevice(), vulkan_->GetSwapchain(), waitedId, timeout)) {
+		const VkResult res = vkWaitForPresentKHR(vulkan_->GetDevice(), vulkan_->GetSwapchain(), waitedId, timeout);
+		if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
 			frameTimeHistory_[waitedId].actualPresent = time_now_d();
 			frameTimeHistory_[waitedId].waitCount++;
 			waitedId++;
-		} else {
-			// We caught up somehow, which is a bad sign (we should have blocked, right?). Maybe we should break out of the loop?
-			sleep_ms(1, "present-wait-problem");
+		} else if (res == VK_TIMEOUT) {
 			frameTimeHistory_[waitedId].waitCount++;
+		} else {
+			// Lost swapchain or device: every further wait would fail at once.
+			WARN_LOG(Log::G3D, "vkWaitForPresentKHR failed (%d), stopping present timing", (int)res);
+			break;
 		}
 		_dbg_assert_(waitedId <= frameIdGen_);
 	}
@@ -911,14 +909,16 @@ void VulkanRenderManager::ReportBadStateForDraw() {
 
 int VulkanRenderManager::WaitForPipelines() {
 	// Pipelines still in the queue, or taken off it but not yet made into tasks, aren't in flight yet.
+	// The compile thread bumps compileProgress_ after each batch it turns into tasks.
 	while (true) {
+		const int seen = compileProgress_.load();
 		{
 			std::unique_lock<std::mutex> lock(compileQueueMutex_);
 			if (compileQueue_.empty() && !compileScheduling_) {
 				break;
 			}
 		}
-		sleep_ms(2, "pipeline-queue-wait");
+		ParkingLotWait(&compileProgress_, [&] { return compileProgress_.load() != seen; });
 	}
 	return CreateMultiPipelinesTask::WaitForAll();
 }

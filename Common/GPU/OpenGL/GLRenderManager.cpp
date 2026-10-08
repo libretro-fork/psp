@@ -132,11 +132,28 @@ void GLRenderManager::NotifyEmuThreadExit() {
 	pushCondVar_.notify_one();
 }
 
+void GLRenderManager::NotifyEmuThreadPaused() {
+	GLRRenderThreadTask *task = new GLRRenderThreadTask(GLRRunType::PAUSE);
+	{
+		std::unique_lock<std::mutex> lock(pushMutex_);
+		renderThreadQueue_.push(task);
+	}
+	pushCondVar_.notify_one();
+}
+
 // Unlike in Vulkan, this isn't a full independent function, instead it gets called every frame.
 //
 // This means that we have to block and run the render queue until we've presented one frame,
 // at which point we can leave.
 bool GLRenderManager::ThreadFrame() {
+	return RunQueue(RunUntil::PRESENT);
+}
+
+bool GLRenderManager::ThreadRunUntilPaused() {
+	return RunQueue(RunUntil::PAUSE);
+}
+
+bool GLRenderManager::RunQueue(RunUntil until) {
 	if (hitExit_) {
 		return false;
 	}
@@ -161,9 +178,17 @@ bool GLRenderManager::ThreadFrame() {
 			return false;
 		}
 
+		if (task->runType == GLRRunType::PAUSE) {
+			delete task;
+			_dbg_assert_(until == RunUntil::PAUSE);
+			if (until == RunUntil::PAUSE)
+				break;
+			continue;
+		}
+
 		// Render the scene.
 		VLOG("  PULL: Frame %d RUN (%0.3f)", task->frame, time_now_d());
-		if (Run(*task)) {
+		if (Run(*task) && until == RunUntil::PRESENT) {
 			// Swap requested, so we just bail the loop.
 			delete task;
 			break;

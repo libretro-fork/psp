@@ -91,12 +91,6 @@
 
 #include <sys/stat.h>
 
-// NOTE: There's another one in DirListing.cpp.
-#ifdef _WIN32
-constexpr bool SIMULATE_SLOW_IO = false;
-#else
-constexpr bool SIMULATE_SLOW_IO = false;
-#endif
 constexpr bool LOG_IO = false;
 
 #ifndef S_ISDIR
@@ -145,9 +139,6 @@ void InitLibretroVFS(const struct retro_vfs_interface_info *vfs) noexcept {
 FILE *OpenCFile(const Path &path, const char *mode) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "OpenCFile %s, %s", path.c_str(), mode);
-	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(300, "slow-io-sim");
 	}
 	switch (path.Type()) {
 	case PathType::NATIVE:
@@ -271,9 +262,6 @@ int OpenFD(const Path &path, OpenFlag flags) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "OpenFD %s, %d", path.c_str(), flags);
 	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(300, "slow-io-sim");
-	}
 
 	switch (path.Type()) {
 	case PathType::CONTENT_URI:
@@ -385,9 +373,6 @@ std::string ResolvePath(std::string_view path) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "ResolvePath %.*s", (int)path.size(), path.data());
 	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
-	}
 
 	if (startsWith(path, "http://") || startsWith(path, "https://")) {
 		return std::string(path);
@@ -481,9 +466,6 @@ bool Exists(const Path &path) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "Exists %s", path.ToVisualString().c_str());
 	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(200, "slow-io-sim");
-	}
 
 	if (path.Type() == PathType::CONTENT_URI) {
 		return Android_FileExists(path.c_str());
@@ -521,9 +503,6 @@ bool Exists(const Path &path) {
 bool IsDirectory(const Path &path) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "IsDirectory %s", path.c_str());
-	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
 	}
 
 	switch (path.Type()) {
@@ -573,9 +552,6 @@ bool IsDirectory(const Path &path) {
 // Deletes a given filename, return true on success
 // Doesn't supports deleting a directory
 bool Delete(const Path &filename, bool quiet) {
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(200, "slow-io-sim");
-	}
 	switch (filename.Type()) {
 	case PathType::NATIVE:
 		break; // OK
@@ -631,8 +607,7 @@ bool Delete(const Path &filename, bool quiet) {
 
 // Returns true if successful, or path already exists.
 bool CreateDir(const Path &path, bool quiet) {
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
+	if (LOG_IO) {
 		INFO_LOG(Log::IO, "CreateDir %s", path.c_str());
 	}
 	switch (path.Type()) {
@@ -784,9 +759,6 @@ bool Rename(const Path &srcFilename, const Path &destFilename) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "Rename %s -> %s", srcFilename.c_str(), destFilename.c_str());
 	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
-	}
 
 	if (srcFilename.Type() != destFilename.Type()) {
 		// Impossible. You're gonna need to make a copy, and delete the original. Not the responsibility
@@ -846,9 +818,6 @@ bool Rename(const Path &srcFilename, const Path &destFilename) {
 bool Copy(const Path &srcFilename, const Path &destFilename) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "Copy %s -> %s", srcFilename.c_str(), destFilename.c_str());
-	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
 	}
 	switch (srcFilename.Type()) {
 	case PathType::NATIVE:
@@ -948,8 +917,7 @@ bool Copy(const Path &srcFilename, const Path &destFilename) {
 
 // Will overwrite the target.
 bool Move(const Path &srcFilename, const Path &destFilename) {
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
+	if (LOG_IO) {
 		INFO_LOG(Log::IO, "Move %s -> %s", srcFilename.c_str(), destFilename.c_str());
 	}
 	bool fast = MoveIfFast(srcFilename, destFilename);
@@ -992,9 +960,6 @@ bool MoveIfFast(const Path &srcFilename, const Path &destFilename) {
 uint64_t GetFileSize(const Path &filename) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "GetFileSize %s", filename.c_str());
-	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
 	}
 	switch (filename.Type()) {
 	case PathType::NATIVE:
@@ -1127,9 +1092,6 @@ bool SetFileWritable(const Path &filename, bool writable) {
 bool DeleteDir(const Path &path) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "DeleteDir %s", path.c_str());
-	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(100, "slow-io-sim");
 	}
 	switch (path.Type()) {
 	case PathType::NATIVE:

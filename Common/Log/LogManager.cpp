@@ -31,6 +31,10 @@
 
 #if PPSSPP_PLATFORM(WINDOWS)
 #include <io.h>
+#include "Common/CommonWindows.h"
+#endif
+#if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP) && !defined(__LIBRETRO__)
+#define HAVE_CONSOLE_LISTENER
 #include "Common/Log/ConsoleListener.h"
 #endif
 
@@ -178,7 +182,7 @@ LogManager::LogManager() {
 	if (IsDebuggerPresent()) {
 		outputs_ |= LogOutput::DebugString;
 	}
-#if !PPSSPP_PLATFORM(UWP)
+#ifdef HAVE_CONSOLE_LISTENER
 	if (!consoleLog_) {
 		consoleLog_ = new ConsoleListener();
 	}
@@ -190,7 +194,7 @@ LogManager::LogManager() {
 LogManager::~LogManager() {
 	Shutdown();
 
-#if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
+#ifdef HAVE_CONSOLE_LISTENER
 	delete consoleLog_;
 	consoleLog_ = nullptr;
 #endif
@@ -355,7 +359,7 @@ void LogManager::LogLine(LogLevel level, Log type, const char *file, int line, c
 		PrintfLog(message);
 	}
 
-#if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
+#ifdef HAVE_CONSOLE_LISTENER
 	if (outputs_ & LogOutput::WinConsole) {
 		if (consoleLog_) {
 			consoleLog_->Log(message);

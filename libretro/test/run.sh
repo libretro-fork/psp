@@ -26,4 +26,13 @@ for img in test.iso test.cso test.chd test_zstd.chd stored.zip deflated.zip; do
 	[ -z "$ref" ] && ref=$line
 	[ "$line" = "$ref" ] || { echo "FAIL: $img differs from test.iso"; exit 1; }
 done
+# The GL backend runs the emulator on a thread of its own. Drive it through every
+# path that pauses or stops that thread; Mesa's llvmpipe is enough.
+mkdir -p "$data/gl"
+unzip -o -q "$root/frametests/dumps/Depth/15826 hot pixel ULUS10298.zip" -d "$data/gl"
+save=$(mktemp -d)
+LRTEST_SYSTEM=$sys LRTEST_SAVE=$save timeout -k 5 300 "$here/lrgltest" "$root/libretro/ppsspp_libretro.so" "$data/gl/15826 hot pixel ULUS10298.ppdmp" 300 \
+	|| { echo "FAIL: GL backend run"; exit 1; }
+rm -rf "$save"
+
 echo "All image and codec checks passed."

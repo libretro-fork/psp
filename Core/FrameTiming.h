@@ -10,8 +10,6 @@ class DrawContext;
 
 class FrameTiming {
 public:
-	void DeferWaitUntil(double until, double *curTimePtr);
-	void PostSubmit();
 	void ComputePresentMode(Draw::DrawContext *draw, bool fastForward);
 
 	bool FastForwardNeedsSkipFlip() const {
@@ -25,12 +23,6 @@ private:
 	// For use on the next Present. These two are set by ComputePresentMode.
 	Draw::PresentMode presentMode_;
 	bool fastForwardSkipFlip_;
-
-	double waitUntil_;
-	double *curTimePtr_;
 };
 
 extern FrameTiming g_frameTiming;
-
-
-void WaitUntil(double now, double timestamp, const char *reason);

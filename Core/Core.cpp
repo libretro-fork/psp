@@ -109,46 +109,6 @@ static std::thread::id g_cpuThreadId;
 // without taking g_cpuQueueMutex - g_cpuThreadId itself never changes once this becomes true.
 static std::atomic<bool> g_cpuThreadIdValid{ false };
 
-// Bumped by anything that gives a paused CPU thread something to do - a queued task, a step
-// request, a resume. Core_IdleWaitWhileStepping() blocks on this rather than spinning; see there.
-static std::mutex g_idleMutex;
-static std::condition_variable g_idleCond;
-static u64 g_idleWakeCounter = 0;
-
-void Core_WakeIdleCPUThread() {
-	{
-		std::lock_guard<std::mutex> guard(g_idleMutex);
-		g_idleWakeCounter++;
-	}
-	g_idleCond.notify_all();
-}
-
-// Called on the CPU thread when it's stopped and has nothing queued. Without this the whole
-// pause is a busy-wait: Core_ProcessStepping() returns immediately when idle, so Core_RunLoopUntil()
-// returns immediately, so whatever drives it goes straight back round. headless does that with no
-// frame pacing whatsoever, which measured at a full core burned for as long as the CPU stayed
-// stopped - and since a debugger session is stopped most of the time, it dominates any profile
-// taken of one (as sync overhead around Core_RunOnCPUThread, which is simply the hottest thing in
-// the spin).
-//
-// The wait is deliberately short rather than indefinite. Callers do real work after we return -
-// most importantly the app build renders the ImGui debugger from this same thread - so this must
-// bound how long a paused frame takes, not replace the frame loop. Anything that actually wants
-// the CPU thread also calls Core_WakeIdleCPUThread(), so the timeout is only a backstop for state
-// changed without one, never the normal path to noticing work.
-static void Core_IdleWaitWhileStepping() {
-	constexpr auto kMaxIdleWait = std::chrono::milliseconds(2);
-	{
-		// Don't sleep if something is already waiting on us.
-		std::lock_guard<std::mutex> guard(g_cpuQueueMutex);
-		if (!g_cpuQueue.empty())
-			return;
-	}
-	std::unique_lock<std::mutex> guard(g_idleMutex);
-	const u64 seen = g_idleWakeCounter;
-	g_idleCond.wait_for(guard, kMaxIdleWait, [&] { return g_idleWakeCounter != seen; });
-}
-
 void Core_RunOnCPUThread(std::function<void()> func) {
 	if (g_cpuThreadIdValid.load(std::memory_order_acquire) && std::this_thread::get_id() == g_cpuThreadId) {
 		// Already on the CPU thread (or called before it's ever run) - just do it now, avoids deadlock.
@@ -161,12 +121,6 @@ void Core_RunOnCPUThread(std::function<void()> func) {
 
 	std::unique_lock<std::mutex> guard(g_cpuQueueMutex);
 	g_cpuQueue.push_back(task);
-	if (!System_GetPropertyBool(SystemProperty::SYSPROP_IS_HEADLESS)) {
-		// Do this with g_cpuQueueMutex held: the CPU thread checks that queue before it decides to
-		// sleep, so waking it after the push (and before we block) can't leave it asleep on a task
-		// that's already there.
-		Core_WakeIdleCPUThread();
-	}
 	g_cpuQueueCond.wait(guard, [&] { return task->done; });
 }
 
@@ -219,10 +173,6 @@ CoreShutdownLock Core_LockAgainstShutdown() {
 // See Core.h for the rationale. Held by NativeFrame() (in NativeApp.cpp) around the span where it
 // actually touches CPU-thread-owned debugger state.
 std::mutex g_frameMutex;
-
-// This is so that external threads can wait for the CPU to become inactive.
-static std::condition_variable m_InactiveCond;
-static std::mutex m_hInactiveMutex;
 
 static int steppingCounter = 0;
 static std::set<CoreLifecycleFunc> lifecycleFuncs;
@@ -375,18 +325,7 @@ bool Core_IsInactive() {
 }
 
 void Core_StateProcessed() {
-	if (coreStatePending) {
-		std::lock_guard<std::mutex> guard(m_hInactiveMutex);
-		coreStatePending = false;
-		m_InactiveCond.notify_all();
-	}
-}
-
-void Core_WaitInactive() {
-	while (Core_IsActive() && !GPUStepping::IsStepping()) {
-		std::unique_lock<std::mutex> guard(m_hInactiveMutex);
-		m_InactiveCond.wait_for(guard, std::chrono::seconds(1));
-	}
+	coreStatePending = false;
 }
 
 void Core_SetPowerSaving(bool mode) {
@@ -410,6 +349,7 @@ void Core_RunLoopUntil(u64 globalticks) {
 		// top of this loop means it's reached at least once per call (i.e. about once per host frame)
 		// whether the CPU is running or not.
 		Core_ProcessCPUQueue();
+		GPUStepping::WakeStaleRequests();
 		g_breakpoints.Frame();
 		switch (coreState) {
 		case CORE_POWERDOWN:
@@ -424,11 +364,7 @@ void Core_RunLoopUntil(u64 globalticks) {
 				if (coreState == CORE_REENTER_DISPATCH) {
 					coreState = preState;
 				}
-				// Still stopped with nothing pending, so block briefly instead of handing straight
-				// back to a caller that will just call us again - see Core_IdleWaitWhileStepping().
-				if (coreState == CORE_STEPPING_CPU || coreState == CORE_STEPPING_GE) {
-					Core_IdleWaitWhileStepping();
-				}
+				// Still stopped: the frontend paces calls, so hand straight back.
 				return;
 			}
 			break;
@@ -489,7 +425,6 @@ bool Core_RequestCPUStep(CPUStepType type) {
 	}
 	BreakReason reason = type == CPUStepType::Into ? BreakReason::DebugStepInto : BreakReason::DebugStep;
 	g_cpuStepQueue.push_back({ type, reason, 0 });
-	Core_WakeIdleCPUThread();
 	return true;
 }
 
@@ -719,7 +654,6 @@ void Core_Resume() {
 	if (coreState == CORE_STEPPING_GE) {
 		GPUStepping::ResumeFromStepping();
 		coreState = CORE_RUNNING_GE;
-		Core_WakeIdleCPUThread();
 		return;
 	}
 
@@ -727,7 +661,6 @@ void Core_Resume() {
 	Core_ResetException();
 	coreState = CORE_RUNNING_CPU;
 	g_breakReason = BreakReason::None;
-	Core_WakeIdleCPUThread();
 	System_Notify(SystemNotification::DEBUG_MODE_CHANGE);
 }
 

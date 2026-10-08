@@ -23,6 +23,9 @@
 #include <map>
 #include <set>
 
+#include <retro_atomic.h>
+
+#include "Common/Thread/ParkingLot.h"
 #include "Core/Core.h"
 
 #include "Core/System.h"
@@ -79,6 +82,10 @@ struct AsyncIOResult {
 
 class AsyncIOManager {
 public:
+	AsyncIOManager() {
+		retro_atomic_int_init(&progress_, 0);
+	}
+
 	void DoState(PointerWrap &p);
 
 	bool HasOperation(u32 handle);
@@ -91,6 +98,7 @@ public:
 
 	void SetThreadEnabled(bool threadEnabled) {
 		threadEnabled_ = threadEnabled;
+		Progress();
 	}
 
 	bool ThreadEnabled() {
@@ -175,6 +183,7 @@ public:
 			for (AsyncIOEvent ev = GetNextEvent(); AsyncIOEventType(ev) != IO_EVENT_INVALID; ev = GetNextEvent()) {
 				guard.unlock();
 				ProcessEventIfApplicable(ev, globalticks);
+				Progress();
 				guard.lock();
 			}
 		} while (CoreTiming::GetTicks(currentMIPS) < globalticks);
@@ -263,6 +272,14 @@ private:
 
 	void EventResult(u32 handle, const AsyncIOResult &result);
 
+	// Bumped after anything a result waiter's predicate reads changes, so waiters
+	// park on it with no timeout and miss no wakeup.
+	void Progress() {
+		retro_atomic_fetch_add_int(&progress_, 1);
+		ParkingLotNotify(&progress_);
+	}
+	retro_atomic_int_t progress_;
+
 	bool threadEnabled_ = false;
 	bool eventsRunning_ = false;
 	bool eventsHaveRun_ = false;
@@ -272,7 +289,6 @@ private:
 	std::condition_variable_any eventsDrain_;
 
 	std::mutex resultsLock_;
-	std::condition_variable resultsWait_;
 	std::set<u32> resultsPending_;
 	std::map<u32, AsyncIOResult> results_;
 };

@@ -42,12 +42,6 @@
 #define fileno
 #endif // HAVE_LIBNX
 
-// NOTE: There's another one in FileUtil.cpp.
-#ifdef _WIN32
-constexpr bool SIMULATE_SLOW_IO = false;
-#else
-constexpr bool SIMULATE_SLOW_IO = false;
-#endif
 constexpr bool LOG_IO = false;
 
 namespace File {
@@ -95,9 +89,6 @@ void ReadFileAttributes(FileInfo *fileInfo, const T &attrs) {
 bool GetFileInfo(const Path &path, FileInfo * fileInfo) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "GetFileInfo %s", path.ToVisualString().c_str());
-	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(300, "slow-io-sim");
 	}
 
 	switch (path.Type()) {
@@ -232,9 +223,6 @@ std::vector<File::FileInfo> ApplyFilter(std::vector<File::FileInfo> files, const
 bool GetFilesInDir(const Path &directory, std::vector<FileInfo> *files, const char *filter, int flags, std::string_view prefix) {
 	if (LOG_IO) {
 		INFO_LOG(Log::IO, "GetFilesInDir '%s' (ext %s, prefix %.*s)", directory.ToVisualString().c_str(), filter, (int)prefix.size(), prefix.data());
-	}
-	if (SIMULATE_SLOW_IO) {
-		sleep_ms(300, "slow-io-sim");
 	}
 
 	if (directory.Type() == PathType::CONTENT_URI) {

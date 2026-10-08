@@ -173,16 +173,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "Fast"
    },
    {
-      "ppsspp_force_lag_sync",
-      "Force Real Clock Sync",
-      NULL,
-      "Slower, less lag.",
-      NULL,
-      "system",
-      BOOL_OPTIONS,
-      "disabled"
-   },
-   {
       "ppsspp_locked_cpu_speed",
       "Locked CPU Speed",
       NULL,

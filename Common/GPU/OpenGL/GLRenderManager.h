@@ -210,6 +210,7 @@ enum class GLRRunType {
 	PRESENT,
 	SYNC,
 	EXIT,
+	PAUSE,
 };
 
 class GLRenderManager;
@@ -248,13 +249,12 @@ public:
 	void ThreadStart(Draw::DrawContext *draw);
 	void ThreadEnd();
 	bool ThreadFrame();  // False means it's time to exit.
-	// True if ThreadFrame() has queued work and will not block on an empty queue.
-	bool HasQueuedThreadWork() {
-		std::lock_guard<std::mutex> lock(pushMutex_);
-		return !renderThreadQueue_.empty();
-	}
+	// Runs queued work up to the marker NotifyEmuThreadPaused() queues. False means exit.
+	bool ThreadRunUntilPaused();
 
 	void NotifyEmuThreadExit();
+	// Called by the emu thread once it has parked, after its last frame's work is queued.
+	void NotifyEmuThreadPaused();
 
 	void SetErrorCallback(ErrorCallbackFn callback, void *userdata) {
 		queueRunner_.SetErrorCallback(callback, userdata);
@@ -954,6 +954,9 @@ private:
 
 	bool exitNotified_ = false;
 	bool hitExit_ = false;
+
+	enum class RunUntil { PRESENT, PAUSE };
+	bool RunQueue(RunUntil until);
 
 #ifdef _DEBUG
 	GLRProgram *curProgram_ = nullptr;

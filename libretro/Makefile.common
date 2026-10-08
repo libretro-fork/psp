@@ -281,7 +281,6 @@ SOURCES_CXX += \
 	$(COMMONDIR)/File/AndroidContentURI.cpp \
 	$(COMMONDIR)/File/DiskFree.cpp \
 	$(COMMONDIR)/File/Path.cpp \
-	$(COMMONDIR)/File/PathBrowser.cpp \
 	$(COMMONDIR)/File/FileUtil.cpp \
 	$(COMMONDIR)/File/FileDescriptor.cpp \
 	$(COMMONDIR)/File/DirListing.cpp \
@@ -324,20 +323,19 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Math/lin/matrix4x4.cpp \
 	$(COMMONDIR)/Net/HTTPClient.cpp \
 	$(COMMONDIR)/Net/HTTPHeaders.cpp \
-	$(COMMONDIR)/Net/HTTPServer.cpp \
 	$(COMMONDIR)/Net/HTTPRequest.cpp \
 	$(COMMONDIR)/Net/HTTPNaettRequest.cpp \
 	$(COMMONDIR)/Net/NetBuffer.cpp \
 	$(COMMONDIR)/Net/Resolve.cpp \
 	$(COMMONDIR)/Net/Sinks.cpp \
 	$(COMMONDIR)/Net/URL.cpp \
-	$(COMMONDIR)/Net/WebsocketServer.cpp \
 	$(COMMONDIR)/Render/ManagedTexture.cpp \
 	$(COMMONDIR)/Render/DrawBuffer.cpp \
 	$(COMMONDIR)/Render/TextureAtlas.cpp \
 	$(COMMONDIR)/Serialize/Serializer.cpp \
 	$(COMMONDIR)/Thread/ThreadUtil.cpp \
 	$(COMMONDIR)/Thread/ParallelLoop.cpp \
+	$(COMMONDIR)/Thread/ParkingLot.cpp \
 	$(COMMONDIR)/Thread/ThreadManager.cpp \
 	$(COMMONDIR)/UI/IconCache.cpp \
 	$(COMMONDIR)/System/Display.cpp \
@@ -346,7 +344,6 @@ SOURCES_CXX += \
 	$(COMMONDIR)/ArmCPUDetect.cpp \
 	$(COMMONDIR)/CPUDetect.cpp \
 	$(COMMONDIR)/Buffer.cpp \
-	$(COMMONDIR)/Log/ConsoleListener.cpp \
 	$(COMMONDIR)/ExceptionHandlerSetup.cpp \
 	$(COMMONDIR)/FakeCPUDetect.cpp \
 	$(COMMONDIR)/GhidraClient.cpp \
@@ -733,8 +730,7 @@ SOURCES_CXX += \
 	       $(COREDIR)/Util/AudioFormat.cpp \
 	       $(COREDIR)/Util/PathUtil.cpp \
 	       $(COREDIR)/Util/PortManager.cpp \
-	       $(COREDIR)/Util/GameDB.cpp \
-	       $(CORE_DIR)/UI/GameInfoCache.cpp
+	       $(COREDIR)/Util/GameDB.cpp
 
 SOURCES_CXX += $(COREDIR)/HLE/__sceAudio.cpp
 

@@ -15,7 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <chrono>
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
 
@@ -54,6 +54,8 @@ static std::condition_variable actionWait;
 static bool actionComplete;
 // Held by a requesting thread for the whole request, so two debuggers can't overwrite each other's action.
 static std::mutex requestLock;
+// Threads inside RequestPauseAction(); WakeStaleRequests() only looks when this is set.
+static std::atomic<int> requestsWaiting{0};
 
 // Many things need to run on the GPU thread.  For example, reading the framebuffer.
 // A message system is used to achieve this (temporarily "unpausing" the thread.)
@@ -165,6 +167,11 @@ static bool RequestPauseAction(PauseAction act) {
 
 	SetPauseAction(act);
 
+	struct WaitingScope {
+		WaitingScope() { requestsWaiting.fetch_add(1); }
+		~WaitingScope() { requestsWaiting.fetch_sub(1); }
+	} waiting;
+
 	std::unique_lock<std::mutex> guard(actionLock);
 	while (!actionComplete) {
 		if (!CanRunActions()) {
@@ -181,8 +188,8 @@ static bool RequestPauseAction(PauseAction act) {
 			}
 			return false;
 		}
-		// Polls coreState, since leaving stepping doesn't notify.
-		actionWait.wait_for(guard, std::chrono::milliseconds(10));
+		// Leaving stepping wakes us through WakeStaleRequests().
+		actionWait.wait(guard);
 	}
 	return true;
 }
@@ -250,11 +257,22 @@ void ResumeFromStepping() {
 }
 
 void Reset() {
-	std::lock_guard<std::mutex> pauseGuard(pauseLock);
+	{
+		std::lock_guard<std::mutex> pauseGuard(pauseLock);
+		std::lock_guard<std::mutex> guard(actionLock);
+		isStepping = false;
+		pauseAction = PAUSE_CONTINUE;
+		lastGState = {};
+	}
+	WakeStaleRequests();
+}
+
+void WakeStaleRequests() {
+	if (requestsWaiting.load(std::memory_order_relaxed) == 0 || CanRunActions())
+		return;
+	// Taking the lock orders this after a waiter's check, so the wakeup can't be lost.
 	std::lock_guard<std::mutex> guard(actionLock);
-	isStepping = false;
-	pauseAction = PAUSE_CONTINUE;
-	lastGState = {};
+	actionWait.notify_all();
 }
 
 bool IsStepping() {

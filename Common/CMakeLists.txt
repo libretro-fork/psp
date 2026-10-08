@@ -23,6 +23,22 @@ set(CommonVR
 	VR/VRRenderer.h
 )
 
+# The HTTP/WebSocket servers, the path browser and the Windows console are for
+# the headless tools; libretro/Makefile.common leaves them out of the core too.
+set(CommonNonLibretro)
+if(NOT LIBRETRO)
+	list(APPEND CommonNonLibretro
+		File/PathBrowser.cpp
+		File/PathBrowser.h
+		Net/HTTPServer.cpp
+		Net/HTTPServer.h
+		Net/WebsocketServer.cpp
+		Net/WebsocketServer.h
+		Log/ConsoleListener.cpp
+		Log/ConsoleListener.h
+	)
+endif()
+
 add_library(Common STATIC
 	ABI.cpp
 	ABI.h
@@ -49,6 +65,7 @@ add_library(Common STATIC
 	LoongArch64Emitter.h
 	${CommonD3D}
 	${CommonVR}
+	${CommonNonLibretro}
 	Serialize/Serializer.cpp
 	Serialize/Serializer.h
 	Serialize/SerializeDeque.h
@@ -127,8 +144,6 @@ add_library(Common STATIC
 	File/DiskFree.cpp
 	File/Path.h
 	File/Path.cpp
-	File/PathBrowser.h
-	File/PathBrowser.cpp
 	File/FileUtil.cpp
 	File/FileUtil.h
 	File/DirListing.cpp
@@ -228,8 +243,6 @@ add_library(Common STATIC
 	Net/HTTPNaettRequest.h
 	Net/HTTPRequest.cpp
 	Net/HTTPRequest.h
-	Net/HTTPServer.cpp
-	Net/HTTPServer.h
 	Net/NetBuffer.cpp
 	Net/NetBuffer.h
 	Net/Resolve.cpp
@@ -239,8 +252,6 @@ add_library(Common STATIC
 	Net/SocketCompat.h
 	Net/URL.cpp
 	Net/URL.h
-	Net/WebsocketServer.cpp
-	Net/WebsocketServer.h
 	Profiler/Profiler.cpp
 	Profiler/Profiler.h
 	Render/AtlasGen.cpp
@@ -272,6 +283,8 @@ add_library(Common STATIC
 	Thread/Channel.h
 	Thread/ParallelLoop.cpp
 	Thread/ParallelLoop.h
+	Thread/ParkingLot.cpp
+	Thread/ParkingLot.h
 	Thread/Promise.h
 	Thread/ThreadUtil.cpp
 	Thread/ThreadUtil.h
@@ -324,8 +337,6 @@ add_library(Common STATIC
 	GhidraClient.cpp
 	Log.h
 	Log.cpp
-	Log/ConsoleListener.cpp
-	Log/ConsoleListener.h
 	Log/LogManager.cpp
 	Log/LogManager.h
 	LogReporting.cpp

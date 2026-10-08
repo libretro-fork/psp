@@ -185,9 +185,8 @@ bool Core_IsStepping();
 bool Core_IsActive();
 bool Core_IsInactive();
 
-// Warning: these three are only used on Windows - debugger integration.
+// Warning: these are only used on Windows - debugger integration.
 void Core_StateProcessed();
-void Core_WaitInactive();
 
 void Core_SetPowerSaving(bool mode);
 bool Core_GetPowerSaving();
@@ -231,11 +230,6 @@ CoreShutdownLock Core_LockAgainstShutdown();
 // Called from the CPU thread only - which is whatever thread NativeFrame() itself runs on.
 void Core_ProcessCPUQueue();
 
-// While the CPU is stopped with nothing pending, the CPU thread blocks briefly rather than
-// spinning (see Core_IdleWaitWhileStepping() in Core.cpp). Call this after making state changes
-// that give it something to do, so it notices immediately instead of at the next timeout. Already
-// called by Core_RunOnCPUThread(), Core_RequestCPUStep() and Core_Resume(); free-threaded.
-void Core_WakeIdleCPUThread();
 
 // Guards CPU-thread-owned debugger state (breakpoints, symbol map, registers, memory, etc.)
 // against concurrent unsynchronized reads from other threads' paint handlers.

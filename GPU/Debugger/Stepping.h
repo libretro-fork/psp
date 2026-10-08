@@ -32,6 +32,9 @@ namespace GPUStepping {
 	void ResumeFromStepping();
 	// Clears all stepping state, for game shutdown.
 	void Reset();
+	// Called from the emu thread each run loop pass: wakes debugger requests
+	// that can no longer run because stepping ended.
+	void WakeStaleRequests();
 
 	int GetSteppingCounter();
 

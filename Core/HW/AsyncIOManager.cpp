@@ -86,33 +86,35 @@ bool AsyncIOManager::ReadResult(u32 handle, AsyncIOResult &result) {
 }
 
 bool AsyncIOManager::WaitResult(u32 handle, AsyncIOResult &result) {
-	std::unique_lock<std::mutex> guard(resultsLock_);
 	ScheduleEvent(IO_EVENT_SYNC);
-	while (HasEvents() && ThreadEnabled() && resultsPending_.find(handle) != resultsPending_.end()) {
-		if (PopResult(handle, result)) {
-			return true;
+	for (;;) {
+		const int seen = retro_atomic_load_acquire_int(&progress_);
+		{
+			std::lock_guard<std::mutex> guard(resultsLock_);
+			if (PopResult(handle, result))
+				return true;
+			if (!HasEvents() || !ThreadEnabled() || resultsPending_.find(handle) == resultsPending_.end())
+				return false;
 		}
-		resultsWait_.wait_for(guard, std::chrono::milliseconds(16));
+		ParkingLotWait(&progress_, [&] { return retro_atomic_load_acquire_int(&progress_) != seen; });
 	}
-	return PopResult(handle, result);
 }
 
 u64 AsyncIOManager::ResultFinishTicks(u32 handle) {
 	AsyncIOResult result;
 
-	std::unique_lock<std::mutex> guard(resultsLock_);
 	ScheduleEvent(IO_EVENT_SYNC);
-	while (HasEvents() && ThreadEnabled() && resultsPending_.find(handle) != resultsPending_.end()) {
-		if (ReadResult(handle, result)) {
-			return result.finishTicks;
+	for (;;) {
+		const int seen = retro_atomic_load_acquire_int(&progress_);
+		{
+			std::lock_guard<std::mutex> guard(resultsLock_);
+			if (ReadResult(handle, result))
+				return result.finishTicks;
+			if (!HasEvents() || !ThreadEnabled() || resultsPending_.find(handle) == resultsPending_.end())
+				return 0;
 		}
-		resultsWait_.wait_for(guard, std::chrono::milliseconds(16));
+		ParkingLotWait(&progress_, [&] { return retro_atomic_load_acquire_int(&progress_) != seen; });
 	}
-	if (ReadResult(handle, result)) {
-		return result.finishTicks;
-	}
-
-	return 0;
 }
 
 void AsyncIOManager::ProcessEvent(AsyncIOEvent ev) {
@@ -143,12 +145,14 @@ void AsyncIOManager::Write(u32 handle, const u8 *buf, size_t bytes) {
 }
 
 void AsyncIOManager::EventResult(u32 handle, const AsyncIOResult &result) {
-	std::lock_guard<std::mutex> guard(resultsLock_);
-	if (results_.find(handle) != results_.end()) {
-		ERROR_LOG_REPORT(Log::sceIo, "Overwriting previous result for file action on handle %d", handle);
+	{
+		std::lock_guard<std::mutex> guard(resultsLock_);
+		if (results_.find(handle) != results_.end()) {
+			ERROR_LOG_REPORT(Log::sceIo, "Overwriting previous result for file action on handle %d", handle);
+		}
+		results_[handle] = result;
 	}
-	results_[handle] = result;
-	resultsWait_.notify_one();
+	Progress();
 }
 
 void AsyncIOManager::DoState(PointerWrap &p) {

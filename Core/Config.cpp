@@ -243,7 +243,6 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("Wow64WarningDismissed", SETTING(g_Config, bWow64WarningDismissed), false, CfgFlag::DEFAULT),
 #endif
 	ConfigSetting("Language", SETTING(g_Config, sLanguageIni), &DefaultLangRegion, CfgFlag::DEFAULT),
-	ConfigSetting("ForceLagSync2", SETTING(g_Config, bForceLagSync), false, CfgFlag::PER_GAME),
 	ConfigSetting("DiscordRichPresence", SETTING(g_Config, bDiscordRichPresence), false, CfgFlag::DEFAULT),
 	ConfigSetting("UISound", SETTING(g_Config, bUISound), false, CfgFlag::DEFAULT),
 

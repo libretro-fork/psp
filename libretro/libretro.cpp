@@ -24,6 +24,7 @@
 #include "Common/Data/Text/I18n.h"
 #include "Common/StringUtils.h"
 
+#include "Common/Thread/ParkingLot.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/Core.h"
@@ -497,18 +498,8 @@ static std::string map_psp_language_to_i18n_locale(int val)
    }
 }
 
-static void check_dynamic_variables(CoreParameter &coreParam) {
-   if (g_Config.bForceLagSync)
-   {
-      bool isFastForwarding;
-      if (environ_cb(RETRO_ENVIRONMENT_GET_FASTFORWARDING, &isFastForwarding))
-         coreParam.fastForward = isFastForwarding;
-   }
-}
-
 static void check_variables(CoreParameter &coreParam)
 {
-   check_dynamic_variables(coreParam);
 
    struct retro_variable var = {0};
    std::string sTextureShaderName_prev;
@@ -600,15 +591,6 @@ static void check_variables(CoreParameter &coreParam)
          g_Config.iIOTimingMethod = IOTIMING_REALISTIC;
       else if (!strcmp(var.value, "Simulate UMD slow reading speed"))
          g_Config.iIOTimingMethod = IOTIMING_UMDSLOWREALISTIC;
-   }
-
-   var.key = "ppsspp_force_lag_sync";
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      if (!strcmp(var.value, "disabled"))
-         g_Config.bForceLagSync = false;
-      else
-         g_Config.bForceLagSync = true;
    }
 
    var.key = "ppsspp_locked_cpu_speed";
@@ -1405,10 +1387,12 @@ namespace Libretro {
                break;
             case EmuThreadState::PAUSE_REQUESTED:
                // CAS so a concurrent QUIT_REQUESTED is not clobbered; the loop re-reads the state.
-               emuThreadState.compare_exchange_strong(state, EmuThreadState::PAUSED);
+               // The marker follows this frame's work, so the frontend has drained it on seeing it.
+               if (emuThreadState.compare_exchange_strong(state, EmuThreadState::PAUSED))
+                  ctx->NotifyEmuThreadPaused();
                break;
             case EmuThreadState::PAUSED:
-               sleep_ms(1, "libretro-paused");
+               ParkingLotWait(&emuThreadState, [] { return emuThreadState != EmuThreadState::PAUSED; });
                break;
             case EmuThreadState::QUIT_REQUESTED:
                ctx->NotifyEmuThreadExit();
@@ -1431,7 +1415,9 @@ namespace Libretro {
 
       emuThreadState = EmuThreadState::RUNNING;
 
-      if (!wasPaused)
+      if (wasPaused)
+         ParkingLotNotify(&emuThreadState);
+      else
       {
          ctx->ThreadStart();
          emuThread = std::thread(&EmuThreadFunc);
@@ -1445,8 +1431,10 @@ namespace Libretro {
       if (!emuThread.joinable())
          return;
 
-      if (emuThreadState != EmuThreadState::STOPPED)
+      if (emuThreadState != EmuThreadState::STOPPED) {
          emuThreadState = EmuThreadState::QUIT_REQUESTED;
+         ParkingLotNotify(&emuThreadState);
+      }
 
       // Eat remaining frames.
       while (ctx->ThreadFrame()) {}
@@ -1461,16 +1449,9 @@ namespace Libretro {
 
       emuThreadState = EmuThreadState::PAUSE_REQUESTED;
 
-      // Drain queued frames until the emu thread parks at a frame boundary.
-      // A single frame is not enough when the emu thread is blocked on a
-      // readback sync in the following frame, and ThreadFrame() blocks on an
-      // empty queue, so only pump it when work is queued.
-      while (emuThreadState != EmuThreadState::PAUSED) {
-         if (ctx->ThreadFramePending())
-            ctx->ThreadFrame();
-         else
-            sleep_ms(1, "libretro-pause-poll");
-      }
+      // Run queued work, readback syncs included, up to the marker the emu
+      // thread queues once it has parked at a frame boundary.
+      ctx->ThreadRunUntilPaused();
    }
 
 } // namespace Libretro
@@ -1739,8 +1720,7 @@ void retro_run(void) {
       if (useEmuThread)
          EmuThreadPause();
       check_variables(PSP_CoreParameter());
-   } else
-      check_dynamic_variables(PSP_CoreParameter());
+   }
 
    // Process input.
    retro_input();

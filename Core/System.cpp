@@ -768,9 +768,6 @@ bool PSP_InitStart(const CoreParameter &coreParam) {
 			}
 		}
 
-		// Use this to test exit-during-boot and other exceptional cases.
-		// sleep_ms(6000, "test");
-
 		g_CoreParameter.fileType = fileType;
 
 		// TODO: The reason we pass in g_CoreParameter.errorString here is that it's persistent -
@@ -802,20 +799,10 @@ bool PSP_InitStart(const CoreParameter &coreParam) {
 	return true;
 }
 
-BootState PSP_InitUpdate(std::string *error_string) {
+// The loader thread has been joined; finishes on the calling thread.
+static BootState PSP_InitFinish(std::string *error_string) {
 	const BootState bootState = g_bootState;
-
-	if (bootState == BootState::Booting || bootState == BootState::Off) {
-		// Nothing to do right now.
-		_dbg_assert_(bootState == BootState::Booting || !g_loadingThread.joinable());
-		return bootState;
-	}
-
 	_dbg_assert_(bootState == BootState::Complete || bootState == BootState::Failed);
-
-	// Since we load on a background thread, wait for startup to complete.
-	_assert_msg_(g_loadingThread.joinable(), "bootstate: %d", (int)bootState);
-	g_loadingThread.join();
 
 	if (bootState == BootState::Failed) {
 		// Failed! (Note: PSP_Shutdown was already called on the loader thread).
@@ -848,6 +835,21 @@ BootState PSP_InitUpdate(std::string *error_string) {
 	return BootState::Complete;
 }
 
+BootState PSP_InitUpdate(std::string *error_string) {
+	const BootState bootState = g_bootState;
+
+	if (bootState == BootState::Booting || bootState == BootState::Off) {
+		// Nothing to do right now.
+		_dbg_assert_(bootState == BootState::Booting || !g_loadingThread.joinable());
+		return bootState;
+	}
+
+	// The loader thread's last act is setting the state, so this join returns at once.
+	_assert_msg_(g_loadingThread.joinable(), "bootstate: %d", (int)bootState);
+	g_loadingThread.join();
+	return PSP_InitFinish(error_string);
+}
+
 // Most platforms should not use this one, they should call PSP_InitStart and then do their thing
 // while repeatedly calling PSP_InitUpdate. This is basically just for libretro convenience.
 BootState PSP_Init(const CoreParameter &coreParam, std::string *error_string) {
@@ -857,13 +859,9 @@ BootState PSP_Init(const CoreParameter &coreParam, std::string *error_string) {
 		return BootState::Failed;
 	}
 
-	while (true) {
-		BootState state = PSP_InitUpdate(error_string);
-		if (state != BootState::Booting) {
-			return state;
-		}
-		sleep_ms(5, "psp-init-poll");
-	}
+	// Every path out of the loader thread sets Complete or Failed.
+	g_loadingThread.join();
+	return PSP_InitFinish(error_string);
 }
 
 BootState PollBootState() {

@@ -630,6 +630,8 @@ private:
 	std::vector<CompileQueueEntry> compileQueue_;
 	// Set while the compile thread turns a batch it took off compileQueue_ into tasks.
 	bool compileScheduling_ = false;
+	// Bumped after each batch is scheduled; WaitForPipelines() parks on it.
+	std::atomic<int> compileProgress_{0};
 
 	// Thread for measuring presentation delay.
 	std::thread presentWaitThread_;

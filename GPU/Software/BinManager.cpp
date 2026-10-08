@@ -23,6 +23,7 @@
 #include "Common/BitSet.h"
 #include "Common/Profiler/Profiler.h"
 #include "Common/Thread/ParallelLoop.h"
+#include "Common/Thread/ParkingLot.h"
 #include "Common/Thread/ThreadManager.h"
 #include "Common/Data/Text/StringWriter.h"
 #include "Common/TimeUtil.h"
@@ -740,10 +741,28 @@ void BinManager::MakeRoom() {
 	Drain();
 	ReclaimItems();
 	while (queue_.Full()) {
-		if (!ProcessTiles(0))
-			std::this_thread::yield();
+		if (!ProcessTiles(0)) {
+			// Every tile with work is held by a worker. Park until one lets go of a tile
+			// (workers only notify while roomWaiting_ is up) or room frees up.
+			roomWaiting_.store(true, std::memory_order_seq_cst);
+			ParkingLotWait(&roomWaiting_, [&] {
+				ReclaimItems();
+				return !queue_.Full() || HasIdleTileWithWork();
+			});
+			roomWaiting_.store(false, std::memory_order_relaxed);
+		}
 		ReclaimItems();
 	}
+}
+
+bool BinManager::HasIdleTileWithWork() const {
+	const int count = activeCount_.load(std::memory_order_acquire);
+	for (int n = 0; n < count; ++n) {
+		const Tile &tile = tiles_[activeTiles_[n]];
+		if (tile.head.load(std::memory_order_relaxed) != tile.tail.load(std::memory_order_acquire) && !tile.busy.load(std::memory_order_seq_cst))
+			return true;
+	}
+	return false;
 }
 
 bool BinManager::ProcessTiles(int start) {
@@ -779,7 +798,10 @@ bool BinManager::ProcessTiles(int start) {
 				}
 				tile.head.store(head, std::memory_order_release);
 			}
-			tile.busy.store(false, std::memory_order_release);
+			// Paired with the seq_cst store in MakeRoom(): either it sees this tile idle, or we see it waiting.
+			tile.busy.store(false, std::memory_order_seq_cst);
+			if (roomWaiting_.load(std::memory_order_seq_cst))
+				ParkingLotNotify(&roomWaiting_);
 			found = true;
 			any = true;
 		}

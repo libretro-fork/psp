@@ -30,8 +30,10 @@ public:
 	}
 	virtual void SwapBuffers() = 0;
 	void Resize() override {}
-	// True if ThreadFrame() has queued work to run (emu thread backends only).
-	virtual bool ThreadFramePending() { return false; }
+	// Emu thread backends only: the emu thread queues a marker once parked, and
+	// the frontend thread runs the queue up to it. False means the emu thread exited.
+	virtual void NotifyEmuThreadPaused() {}
+	virtual bool ThreadRunUntilPaused() { return true; }
 
 	virtual void GotBackbuffer();
 	virtual void LostBackbuffer();

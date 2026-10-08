@@ -108,7 +108,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update -y -qq
-        sudo apt-get install -y libgl1-mesa-dev mame-tools genisoimage zip python3-pil python3-zstandard
+        sudo apt-get install -y libgl1-mesa-dev libegl-dev libgl1-mesa-dri mame-tools genisoimage zip unzip python3-pil python3-zstandard
 
     - name: Setup ccache
       uses: hendrikmuhs/ccache-action@f09c25b45002a07be2955cbe52e8cee55643f89d # v1.2.24

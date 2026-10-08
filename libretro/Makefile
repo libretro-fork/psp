@@ -569,10 +569,13 @@ test/%: test/%.o $(TEST_OBJECTS)
 test/lrtest: test/lrtest.c
 	$(CC) -O2 -I$(LIBRETROCOMMONDIR)/include -o $@ $< -ldl
 
-test-tools: $(TARGET) test/codectest test/blocktest test/lrtest
+test/lrgltest: test/lrgltest.c
+	$(CC) -O2 -I$(LIBRETROCOMMONDIR)/include -o $@ $< -ldl -lEGL
+
+test-tools: $(TARGET) test/codectest test/blocktest test/lrtest test/lrgltest
 
 clean:
-	rm -f $(OBJECTS) $(TARGET) test/*.o test/codectest test/blocktest test/lrtest
+	rm -f $(OBJECTS) $(TARGET) test/*.o test/codectest test/blocktest test/lrtest test/lrgltest
 ifeq ($(FFMPEG_MINGW), 1)
 	rm -rf $(FFMPEG_MINGW_DIR)
 endif

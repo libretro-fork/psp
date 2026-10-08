@@ -97,9 +97,8 @@ static int leaveVblankEvent = -1;
 static int vblankWakeEvent = -1;
 static std::vector<SceUID> vblankWakePending;
 static int afterFlipEvent = -1;
+// The real clock sync event is gone; these stay for save states that hold one.
 static int lagSyncEvent = -1;
-
-static double lastLagSync = 0.0;
 static bool lagSyncScheduled = false;
 
 static int numSkippedFrames;
@@ -173,23 +172,6 @@ static bool UseAutoFrameSkip() {
 	return g_Config.bAutoFrameSkip && !g_Config.bSkipBufferEffects;
 }
 
-static bool UseLagSync() {
-	return g_Config.bForceLagSync && !UseAutoFrameSkip();
-}
-
-static void ScheduleLagSync(int over = 0) {
-	lagSyncScheduled = UseLagSync();
-	if (lagSyncScheduled) {
-		// Reset over if it became too high, such as after pausing or initial loading.
-		// There's no real sense in it being more than 1/60th of a second.
-		if (over > 1000000 / framerate) {
-			over = 0;
-		}
-		CoreTiming::ScheduleEvent(usToCycles(1000 + over), lagSyncEvent, 0);
-		lastLagSync = time_now_d();
-	}
-}
-
 void __DisplayInit() {
 	__DisplaySetFramerate();
 	hasSetMode = false;
@@ -219,7 +201,7 @@ void __DisplayInit() {
 	afterFlipEvent = CoreTiming::RegisterEvent("AfterFlip", &hleAfterFlip);
 
 	lagSyncEvent = CoreTiming::RegisterEvent("LagSync", &hleLagSync);
-	ScheduleLagSync();
+	lagSyncScheduled = false;
 
 	CoreTiming::ScheduleEvent(msToCycles(frameMs - vblankMs), enterVblankEvent, 0);
 	curFrameTime = 0.0;
@@ -277,16 +259,13 @@ void __DisplayDoState(PointerWrap &p) {
 		Do(p, lagSyncEvent);
 		Do(p, lagSyncScheduled);
 		CoreTiming::RestoreRegisterEvent(lagSyncEvent, "LagSync", &hleLagSync);
-		if (p.mode == p.MODE_READ) {
-			lastLagSync = time_now_d();
-			if (lagSyncScheduled != UseLagSync()) {
-				ScheduleLagSync();
-			}
-		}
+		// A pending event from an old state runs once and does not come back.
+		if (p.mode == p.MODE_READ)
+			lagSyncScheduled = false;
 	} else {
 		lagSyncEvent = -1;
 		CoreTiming::RestoreRegisterEvent(lagSyncEvent, "LagSync", &hleLagSync);
-		ScheduleLagSync();
+		lagSyncScheduled = false;
 	}
 
 	Do(p, gstate);
@@ -439,7 +418,7 @@ static void DoFrameDropLogging(float scaledTimestep) {
 
 // All the throttling and frameskipping logic is here.
 // This is called just before we drop out of the main loop, in order to allow the submit and present to happen.
-static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep, bool endOfFrame) {
+static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep) {
 	PROFILE_THIS_SCOPE("timing");
 	*skipFrame = false;
 
@@ -484,68 +463,13 @@ static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep, 
 		}
 	}
 
+	// Ahead of time: the frontend paces frames, so take up the slack instead of waiting.
 	if (curFrameTime < nextFrameTime && throttle) {
-		// If time gap is huge just jump (somebody fast-forwarded)
-		if (nextFrameTime - curFrameTime > 2*scaledTimestep) {
-			nextFrameTime = curFrameTime;
-		} else {
-			// Wait until we've caught up.
-			// If we're ending the frame here, we'll defer the sleep until after the command buffers
-			// have been handed off to the render thread, for some more overlap.
-			if (endOfFrame) {
-				g_frameTiming.DeferWaitUntil(nextFrameTime, &curFrameTime);
-			} else {
-				WaitUntil(curFrameTime, nextFrameTime, "display-wait");
-				curFrameTime = time_now_d();  // I guess we could also just set it to nextFrameTime...
-			}
-		}
+		nextFrameTime = curFrameTime;
 	}
 
 	lastFrameTime = nextFrameTime;
 	wasPaused = false;
-}
-
-static void DoFrameIdleTiming() {
-	PROFILE_THIS_SCOPE("timing");
-	if (!FrameTimingThrottled() || !g_Config.bEnableSound || wasPaused) {
-		return;
-	}
-
-	double before = time_now_d();
-	double dist = before - lastFrameTime;
-	// Ignore if the distance is just crazy.  May mean wrap or pause.
-	if (dist < 0.0 || dist >= 15.0 * timePerVblank) {
-		return;
-	}
-
-	float scaledVblank = timePerVblank;
-	int fpsLimit = FrameTimingLimit();
-	if (fpsLimit != 0 && fpsLimit != framerate) {
-		// 0 is handled in FrameTimingThrottled().
-		scaledVblank *= (float)framerate / fpsLimit;
-	}
-
-	// If we have over at least a vblank of spare time, maintain at least 30fps in delay.
-	// This prevents fast forward during loading screens.
-	// Give a little extra wiggle room in case the next vblank does more work.
-	const double goal = lastFrameTime + (numVBlanksSinceFlip - 1) * scaledVblank - 0.001;
-	if (numVBlanksSinceFlip >= 2 && before < goal) {
-		double cur_time;
-		while ((cur_time = time_now_d()) < goal) {
-#ifdef _WIN32
-			sleep_ms(1, "frame-idle");
-#else
-			const double left = goal - cur_time;
-			if (left > 0.0f && left < 1.0f) {  // Sanity check
-				usleep((long)(left * 1000000));
-			}
-#endif
-		}
-
-		if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || g_coreCollectDebugStats) {
-			DisplayNotifySleep(time_now_d() - before);
-		}
-	}
 }
 
 void hleEnterVblank(u64 userdata, int cyclesLate) {
@@ -656,8 +580,7 @@ void __DisplayFlip(int cyclesLate) {
 	bool needFlip = fbDirty || noRecentFlip || postEffectRequiresFlip;
 	if (!needFlip) {
 		// Okay, there's no new frame to draw, game might be sitting in a static loading screen
-		// or similar, and not long enough to trigger noRecentFlip. But audio may be playing, so we need to time still.
-		DoFrameIdleTiming();
+		// or similar, and not long enough to trigger noRecentFlip.
 		g_frameTiming.ComputePresentMode(draw, false);
 		return;
 	}
@@ -720,7 +643,7 @@ void __DisplayFlip(int cyclesLate) {
 		scaledTimestep *= (float)framerate / fpsLimit;
 	}
 	bool skipFrame;
-	DoFrameTiming(throttle, &skipFrame, scaledTimestep, nextFrame);
+	DoFrameTiming(throttle, &skipFrame, scaledTimestep);
 
 	int maxFrameskip = 8;
 	const int frameSkipNum = g_Config.iFrameSkip;
@@ -766,11 +689,6 @@ void hleAfterFlip(u64 userdata, int cyclesLate) {
 	gpu->PSPFrame();
 
 	PPGeNotifyFrame();
-
-	// This seems like as good a time as any to check if the config changed.
-	if (lagSyncScheduled != UseLagSync()) {
-		ScheduleLagSync();
-	}
 }
 
 static void hleVblankWake(u64 userdata, int cyclesLate) {
@@ -800,48 +718,7 @@ void hleLeaveVblank(u64 userdata, int cyclesLate) {
 }
 
 void hleLagSync(u64 userdata, int cyclesLate) {
-	// The goal here is to prevent network, audio, and input lag from the real world.
-	// Our normal timing is very "stop and go".  This is efficient, but causes real world lag.
-	// This event (optionally) runs every 1ms to sync with the real world.
-	PROFILE_THIS_SCOPE("timing");
-
-	if (!FrameTimingThrottled()) {
-		lagSyncScheduled = false;
-		return;
-	}
-
-	float scale = 1.0f;
-	int fpsLimit = FrameTimingLimit();
-	if (fpsLimit != 0 && fpsLimit != framerate) {
-		// 0 is handled in FrameTimingThrottled().
-		scale = (float)framerate / fpsLimit;
-	}
-
-	const double goal = lastLagSync + (scale / 1000.0f);
-	double before = time_now_d();
-	// Don't lag too long ever, if they leave it paused.
-	double now = before;
-	while (now < goal && goal < now + 0.01) {
-		// Tight loop on win32 - intentionally, as timing is otherwise not precise enough.
-		// TODO: Use the precise waits if available
-#ifndef _WIN32
-		const double left = goal - now;
-		if (left > 0.0f && left < 1.0f) {  // Sanity check
-			usleep((long)(left * 1000000.0));
-		}
-#else
-		yield();
-#endif
-		now = time_now_d();
-	}
-
-	const int emuOver = (int)cyclesToUs(cyclesLate);
-	const int over = (int)((now - goal) * 1000000);
-	ScheduleLagSync(over - emuOver);
-
-	if ((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::FRAME_GRAPH || g_coreCollectDebugStats) {
-		DisplayNotifySleep(now - before);
-	}
+	lagSyncScheduled = false;
 }
 
 static u32 sceDisplayIsVblank() {

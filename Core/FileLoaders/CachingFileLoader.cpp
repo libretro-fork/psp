@@ -105,12 +105,7 @@ void CachingFileLoader::InitCache() {
 }
 
 void CachingFileLoader::ShutdownCache() {
-	// TODO: Maybe add some hint that deletion is coming soon?
-	// We can't delete while the thread is running, so have to wait.
-	// This should only happen from the menu.
-	while (aheadThreadRunning_) {
-		sleep_ms(1, "shutdown-cache-poll");
-	}
+	// We can't delete while the read-ahead thread is running; the join waits for it.
 	if (aheadThread_.joinable())
 		aheadThread_.join();
 
