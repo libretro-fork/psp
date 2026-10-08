@@ -1135,10 +1135,19 @@ SOURCES_C += $(LIBRETROCOMMONDIR)/compat/compat_posix_string.c \
              $(LIBRETROCOMMONDIR)/file/file_path_io.c \
              $(LIBRETROCOMMONDIR)/streams/file_stream.c \
              $(LIBRETROCOMMONDIR)/streams/file_stream_transforms.c \
-             $(LIBRETROCOMMONDIR)/string/stdstring.c \
+             $(LIBRETROCOMMONDIR)/string/rstrtod.c \
              $(LIBRETROCOMMONDIR)/time/rtime.c \
              $(LIBRETROCOMMONDIR)/vfs/vfs_implementation.c
 endif
+
+SOURCES_C += $(LIBRETROCOMMONDIR)/features/features_cpu.c \
+             $(LIBRETROCOMMONDIR)/queues/retro_spsc.c \
+             $(LIBRETROCOMMONDIR)/queues/retro_waitable_spsc.c \
+             $(LIBRETROCOMMONDIR)/rthreads/retro_asym_eventcount.c \
+             $(LIBRETROCOMMONDIR)/rthreads/retro_eventcount.c \
+             $(LIBRETROCOMMONDIR)/rthreads/retro_procbarrier.c \
+             $(LIBRETROCOMMONDIR)/rthreads/rthreads.c \
+             $(LIBRETROCOMMONDIR)/rthreads/tpool.c
 
 INCFLAGS += -I$(LIBRETROCOMMONDIR)/include
 

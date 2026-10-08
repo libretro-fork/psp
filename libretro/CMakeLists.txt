@@ -21,9 +21,17 @@ set(LIBRETRO_SRCS ${LIBRETRO_SRCS}
 	libretro-common/file/file_path_io.c
 	libretro-common/streams/file_stream.c
 	libretro-common/streams/file_stream_transforms.c
-	libretro-common/string/stdstring.c
+	libretro-common/string/rstrtod.c
 	libretro-common/time/rtime.c
-	libretro-common/vfs/vfs_implementation.c)
+	libretro-common/vfs/vfs_implementation.c
+	libretro-common/features/features_cpu.c
+	libretro-common/queues/retro_spsc.c
+	libretro-common/queues/retro_waitable_spsc.c
+	libretro-common/rthreads/retro_asym_eventcount.c
+	libretro-common/rthreads/retro_eventcount.c
+	libretro-common/rthreads/retro_procbarrier.c
+	libretro-common/rthreads/rthreads.c
+	libretro-common/rthreads/tpool.c)
 
 include_directories(libretro)
 
