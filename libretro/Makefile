@@ -423,8 +423,10 @@ endif
 include Makefile.common
 
 ifeq ($(FFMPEG_MINGW), 1)
-# Same components as ffmpeg/windows_x64-build.sh. FFMPEG_CROSS_PREFIX names
-# the binutils prefix when cross-compiling (e.g. x86_64-w64-mingw32-).
+# Same components as ffmpeg/windows_x64-build.sh, with every autodetected
+# hwaccel and external library off so the result doesn't depend on what the
+# build machine has installed. FFMPEG_CROSS_PREFIX names the binutils prefix
+# when cross-compiling (e.g. x86_64-w64-mingw32-).
 FFMPEG_MINGW_DIR    := obj-ffmpeg-mingw-$(TARGET_ARCH)
 FFMPEG_MINGW_PREFIX := $(FFMPEG_MINGW_DIR)/install
 FFMPEG_MINGW_STAMP  := $(FFMPEG_MINGW_PREFIX)/.built
@@ -438,7 +440,9 @@ FFMPEG_MINGW_CONFIGURE := \
 	--disable-avdevice --disable-avfilter --disable-postproc --disable-programs \
 	--disable-network --disable-doc --disable-iconv --disable-zlib \
 	--disable-bzlib --disable-lzma --disable-sdl --disable-xlib \
-	--disable-schannel --disable-securetransport \
+	--disable-schannel --disable-securetransport --disable-libxcb \
+	--disable-d3d11va --disable-dxva2 --disable-vaapi --disable-vda \
+	--disable-vdpau --disable-videotoolbox \
 	--enable-decoder=aac,aac_latm,atrac3,atrac3p,mp3,pcm_s16le,pcm_s8 \
 	--enable-decoder=h264,mpeg4,mpeg2video,mjpeg,mjpegb \
 	--enable-encoder=pcm_s16le,ffv1,mpeg4 \
