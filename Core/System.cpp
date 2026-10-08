@@ -859,7 +859,14 @@ BootState PSP_Init(const CoreParameter &coreParam, std::string *error_string) {
 		return BootState::Failed;
 	}
 
+	return PSP_InitWait(error_string);
+}
+
+BootState PSP_InitWait(std::string *error_string) {
+	if (g_bootState == BootState::Off)
+		return BootState::Off;
 	// Every path out of the loader thread sets Complete or Failed.
+	_assert_msg_(g_loadingThread.joinable(), "bootstate: %d", (int)g_bootState.load());
 	g_loadingThread.join();
 	return PSP_InitFinish(error_string);
 }

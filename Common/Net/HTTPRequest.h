@@ -31,7 +31,7 @@ using RequestCompletionCallback = std::function<void(Request &)>;
 // Abstract request.
 class Request {
 public:
-	Request(RequestMethod method, std::string_view url, std::string_view name, const Path &outFile, bool *cancelled, RequestFlags mode);
+	Request(RequestMethod method, std::string_view url, std::string_view name, const Path &outFile, RequestFlags mode);
 	virtual ~Request() {}
 
 	void SetAccept(const char *mime) {
@@ -77,8 +77,8 @@ public:
 
 	// Virtual so a backend can act on it. The HTTPS one has to tell naett, which is what actually
 	// stops a transfer in progress - see HTTPSRequest::Cancel.
-	virtual void Cancel() { cancelled_ = true; }
-	bool IsCancelled() const { return cancelled_; }
+	virtual void Cancel() { cancel_.Cancel(); }
+	bool IsCancelled() const { return cancel_.IsCancelled(); }
 
 	// If not downloading to a file, access this to get the result.
 	Buffer &buffer() { return buffer_; }
@@ -95,7 +95,8 @@ protected:
 	std::string userAgent_;
 	Path outfile_;
 	Buffer buffer_;
-	bool cancelled_ = false;
+	// Cancel() also wakes this request's socket waits.
+	net::CancelToken cancel_;
 	int resultCode_ = 0;
 	bool hasRunCallback_ = false;
 	std::vector<std::string> responseHeaders_;

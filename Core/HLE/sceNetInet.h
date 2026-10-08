@@ -131,4 +131,7 @@ int NetApctl_GetState();
 
 int sceNetApctlConnect(int connIndex);
 int sceNetInetPoll(u32 fdsPtr, u32 nfds, int timeout);
+void __NetInetInit();
+// present: the state has the wait event's id (sceNet section 8 and up).
+void __NetInetDoWaitEvent(PointerWrap &p, bool present);
 int sceNetApctlDisconnect();

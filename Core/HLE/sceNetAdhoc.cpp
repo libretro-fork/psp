@@ -59,7 +59,8 @@
 #include "Core/HLE/KernelWaitHelpers.h"
 #include "Core/HLE/NetAdhocCommon.h"
 
-#include "ext/aemu_postoffice/client/postoffice_client.h"
+#include "Common/Net/Cancel.h"
+#include "ext/aemu_postoffice_client/postoffice_client.h"
 
 #ifdef _WIN32
 #undef errno
@@ -314,6 +315,7 @@ void deleteMatchingEvents(const int matchingId = -1);
 void discardMatchingEvents();
 void DoNetAdhocMatchingInited(PointerWrap &p);
 void DoNetAdhocMatchingThreads(PointerWrap &p);
+void DoNetAdhocMatchingTick(PointerWrap &p, bool present);
 void ZeroNetAdhocMatchingThreads();
 void SaveNetAdhocMatchingInited();
 void RestoreNetAdhocMatchingInited();
@@ -325,6 +327,7 @@ bool __NetAdhocConnected() {
 void __NetAdhocShutdown() {
 	// Kill AdhocServer Thread
 	adhocServerRunning = false;
+	AdhocServerWake();
 	if (adhocServerThread.joinable()) {
 		adhocServerThread.join();
 	}
@@ -623,6 +626,7 @@ int WaitBlockingAdhocctlSocket(AdhocctlRequest request, int usec, const char* re
 
 	u64 param = ((u64)__KernelGetCurThread()) << 32 | uid;
 	adhocctlStartTime = (u64)(time_now_d() * 1000000.0);
+	FriendFinderWake();
 	adhocctlRequests[uid] = request;
 	CoreTiming::ScheduleEvent(usToCycles(usec), adhocctlNotifyEvent, param);
 	__KernelWaitCurThread(WAITTYPE_NET, uid, request.opcode, 0, false, reason);
@@ -1318,6 +1322,7 @@ static int ptp_accept_postoffice(int idx, SceNetEtherAddr *saddr, uint16_t *spor
 	internal->data.ptp.id = AEMU_POSTOFFICE_ID_BASE + idx;
 	internal->flags = 0;
 	internal->connectThread = NULL;
+	internal->connectCancel = NULL;
 
 	AdhocSocket **slot = NULL;
 	int i;
@@ -1425,20 +1430,19 @@ static int ptp_connect_postoffice(int idx, const char *caller) {
 	}
 
 	if (internal->connectThreadDone) {
-		if (internal->connectThread != NULL) {
-			internal->connectThread->join();
-			delete internal->connectThread;
-			internal->connectThread = NULL;
-		}
+		// The last attempt is over, so this join returns at once.
+		JoinPostofficeConnect(internal, false);
 
 		internal->connectThreadDone = false;
 		internal->connectThreadResult = 0;
 
-		internal->connectThread = new std::thread([internal, addr, idx] {
+		internal->connectCancel = new net::CancelToken();
+		const int cancelFd = (int)internal->connectCancel->WakeFd();
+		internal->connectThread = new std::thread([internal, addr, idx, cancelFd] {
 			int state;
 			SceNetEtherAddr fixed_daddr = internal->data.ptp.paddr;
 			fixGameMac(&fixed_daddr);
-			void *ptp_socket = ptp_connect_v4(&addr, (const char *)&internal->data.ptp.laddr, offset_port_simple(internal->data.ptp.lport), (const char *)&fixed_daddr, offset_port_simple(internal->data.ptp.pport), &state);
+			void *ptp_socket = ptp_connect_v4(&addr, (const char *)&internal->data.ptp.laddr, offset_port_simple(internal->data.ptp.lport), (const char *)&fixed_daddr, offset_port_simple(internal->data.ptp.pport), &state, cancelFd);
 			if (ptp_socket == NULL) {
 				internal->connectThreadResult = SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
 				ERROR_LOG(Log::sceNet, "%s: failed connecting to ptp socket, %d", __func__, state);
@@ -1786,7 +1790,7 @@ int WaitBlockingAdhocSocket(u64 threadSocketId, int type, int pspSocketId, void*
 }
 
 void __NetAdhocDoState(PointerWrap &p) {
-	auto s = p.Section("sceNetAdhoc", 1, 9);
+	auto s = p.Section("sceNetAdhoc", 1, 10);
 	if (!s)
 		return;
 
@@ -1876,6 +1880,7 @@ void __NetAdhocDoState(PointerWrap &p) {
 	} else if (p.mode == p.MODE_READ) {
 		adhocctlRequests.clear();
 	}
+	DoNetAdhocMatchingTick(p, s >= 10);
 
 	if (p.mode == p.MODE_READ) {
 		// Discard leftover events
@@ -1925,10 +1930,12 @@ void __NetAdhocInit() {
 	// Create built-in AdhocServer Thread. The flag is set here rather than by the thread, so that a
 	// shutdown that clears it before the thread gets going can't be undone (see friendFinder).
 	adhocServerRunning = false;
+	AdhocServerWake();
 	if (adhocServerThread.joinable()) {
 		adhocServerThread.join();
 	}
 	if (g_Config.bEnableWlan && g_Config.bEnableAdhocServer) {
+		AdhocServerPrepare();
 		adhocServerRunning = true;
 		adhocServerThread = std::thread(proAdhocServerThread, SERVER_PORT);
 	}
@@ -2004,6 +2011,7 @@ int sceNetAdhocctlInit(int stackSize, int prio, u32 productAddr) {
 	netAdhocctlInited = true; //needed for cleanup during AdhocctlTerm even when it failed to connect to Adhoc Server (since it's being faked as success)
 	g_adhocServerLoginFailed = false;
 	isAdhocctlNeedLogin = true;
+	FriendFinderWake();
 
 	// Create fake PSP Thread for callback
 	// TODO: Should use a separated threads for friendFinder, matchingEvent, and matchingInput and created on AdhocctlInit & AdhocMatchingStart instead of here
@@ -2020,6 +2028,7 @@ int sceNetAdhocctlInit(int stackSize, int prio, u32 productAddr) {
 		if (friendFinderThread.joinable()) {
 			friendFinderThread.join();
 		}
+		FriendFinderPrepare();
 		friendFinderRunning = true;
 		friendFinderThread = std::thread(friendFinder);
 	}
@@ -3195,6 +3204,7 @@ int sceNetAdhocctlScan() {
 			isAdhocctlBusy = true;
 			g_adhocServerLoginFailed = false;
 			isAdhocctlNeedLogin = true;
+			FriendFinderWake();
 			adhocctlState = ADHOCCTL_STATE_SCANNING;
 			adhocctlCurrentMode = ADHOCCTL_MODE_NORMAL;
 
@@ -3490,6 +3500,7 @@ int NetAdhocctl_Term() {
 
 		// Terminate Adhoc Threads
 		friendFinderRunning = false;
+		FriendFinderWake();
 		if (friendFinderThread.joinable()) {
 			friendFinderThread.join();
 		}
@@ -3689,6 +3700,7 @@ int NetAdhocctl_Create(const char *groupName) {
 				isAdhocctlBusy = true;
 				g_adhocServerLoginFailed = false;
 				isAdhocctlNeedLogin = true;
+				FriendFinderWake();
 
 				// Set Network Name
 				if (groupName) {
@@ -3709,6 +3721,7 @@ int NetAdhocctl_Create(const char *groupName) {
 				//Faking success, to prevent Full Auto 2 from freezing while Initializing Network
 				else {
 					adhocctlStartTime = (u64)(time_now_d() * 1000000.0);
+					FriendFinderWake();
 					if (adhocctlCurrentMode == ADHOCCTL_MODE_GAMEMODE) {
 						adhocctlState = ADHOCCTL_STATE_GAMEMODE;
 						notifyAdhocctlHandlers(ADHOCCTL_EVENT_GAME, 0);
@@ -3842,6 +3855,7 @@ int NetAdhocctl_CreateEnterGameMode(const char* group_name, int game_type, int n
 	adhocConnectionType = ADHOC_CREATE;
 	netAdhocGameModeEntered = true;
 	netAdhocEnterGameModeTimeout = timeout;
+	FriendFinderWake();
 	return NetAdhocctl_Create(group_name);
 }
 
@@ -3904,6 +3918,7 @@ static int sceNetAdhocctlJoinEnterGameMode(const char * group_name, const char *
 	adhocConnectionType = ADHOC_JOIN;
 	netAdhocGameModeEntered = true;
 	netAdhocEnterGameModeTimeout = timeout;
+	FriendFinderWake();
 	return hleLogDebug(Log::sceNet, NetAdhocctl_Create(group_name));
 }
 
@@ -4320,6 +4335,7 @@ static int ptp_open_postoffice(const SceNetEtherAddr *saddr, uint16_t sport, con
 	internal->data.ptp.snd_sb_cc = 0;
 	internal->flags = 0;
 	internal->connectThread = NULL;
+	internal->connectCancel = NULL;
 	internal->connectThreadDone = true;
 	internal->lastAttempt = 0;
 	internal->internalLastAttempt = 0;
@@ -4918,10 +4934,7 @@ static int ptp_close_postoffice(int idx){
 	AdhocSocket *internal = adhocSockets[idx];
 
 	// sync
-	if (internal->connectThread != NULL) {
-		internal->connectThread->join();
-		delete internal->connectThread;
-	}
+	JoinPostofficeConnect(internal, true);
 
 	void *socket = internal->postofficeHandle;
 	if (socket != NULL) {
@@ -5015,6 +5028,7 @@ static int ptp_listen_postoffice(const SceNetEtherAddr *saddr, uint16_t sport, u
 	internal->data.ptp.snd_sb_cc = 0;
 	internal->flags = 0;
 	internal->connectThread = NULL;
+	internal->connectCancel = NULL;
 	internal->lastAttempt = 0;
 	internal->internalLastAttempt = 0;
 

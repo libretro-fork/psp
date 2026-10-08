@@ -200,12 +200,11 @@ bool GhidraClient::FetchResource(const std::string &path, std::string &outResult
 		pendingResult_.error = "can't resolve host";
 		return false;
 	}
-	bool cancelled = false;
-	if (!http.Connect(1, 5.0, &cancelled)) {
+	if (!http.Connect(1, 5.0)) {
 		pendingResult_.error = "can't connect to host";
 		return false;
 	}
-	net::RequestProgress progress(&cancelled);
+	net::RequestProgress progress(nullptr);
 	Buffer result;
 	const int code = http.GET(http::RequestParams(path.c_str()), &result, &progress);
 	http.Disconnect();

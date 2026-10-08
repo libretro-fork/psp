@@ -257,12 +257,12 @@ private:
 
 	u32 headerAddr_ = 0;
 	u32 headerSize_ = 0;
-	bool cancelled_ = false;
+	// sceHttpAbortRequest sets it; it also wakes the socket waits.
+	net::CancelToken cancel_;
 	int responseCode_ = -1;
 	int entityLength_ = -1;
 
 	http::Client client;
-	//net::RequestProgress progress_(&cancelled_);
 	std::vector<std::string> responseHeaders_;
 	std::string httpLine_;
 	std::string responseContent_;

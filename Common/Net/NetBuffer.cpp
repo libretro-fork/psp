@@ -27,21 +27,16 @@ void RequestProgress::Update(int64_t downloaded, int64_t totalBytes, bool done) 
 	}
 }
 
-bool Buffer::FlushSocket(uintptr_t sock, double timeout, bool *cancelled) {
-	static constexpr float CANCEL_INTERVAL = 0.25f;
-
+bool Buffer::FlushSocket(uintptr_t sock, double timeout, const CancelToken *cancel) {
 	data_.iterate_blocks([&](const char *data, size_t size) {
 		for (size_t pos = 0, end = size; pos < end; ) {
-			bool ready = false;
-			double endTimeout = time_now_d() + timeout;
-			while (!ready) {
-				if (cancelled && *cancelled)
-					return false;
-				ready = fd_util::WaitUntilReady(sock, CANCEL_INTERVAL, true);
-				if (!ready && time_now_d() > endTimeout) {
-					ERROR_LOG(Log::IO, "FlushSocket timed out");
-					return false;
-				}
+			// The timeout applies to each send, not the whole flush.
+			const WaitResult wait = WaitSocket(sock, true, timeout, cancel);
+			if (wait == WaitResult::TIMEOUT) {
+				ERROR_LOG(Log::IO, "FlushSocket timed out");
+				return false;
+			} else if (wait != WaitResult::READY) {
+				return false;
 			}
 			int sent = send(sock, &data[pos], end - pos, MSG_NOSIGNAL);
 			// TODO: Do we need some retry logic here, instead of just giving up?
@@ -59,7 +54,6 @@ bool Buffer::FlushSocket(uintptr_t sock, double timeout, bool *cancelled) {
 }
 
 bool Buffer::ReadAllWithProgress(int fd, int knownSize, RequestProgress *progress) {
-	static constexpr float CANCEL_INTERVAL = 0.25f;
 	std::vector<char> buf;
 	// We're non-blocking and reading from an OS buffer, so try to read as much as we can at a time.
 	if (knownSize >= 65536 * 16) {
@@ -73,15 +67,10 @@ bool Buffer::ReadAllWithProgress(int fd, int knownSize, RequestProgress *progres
 	double st = time_now_d();
 	int total = 0;
 	while (true) {
-		bool ready = false;
-
-		// If we might need to cancel, check on a timer for it to be ready.
-		// After this, we'll block on reading so we do this while first if we have a cancel pointer.
-		while (!ready && progress && progress->cancelled) {
-			if (*progress->cancelled)
-				return false;
-			ready = fd_util::WaitUntilReady(fd, CANCEL_INTERVAL, false);
-		}
+		// Block until there's data, the end of the stream, or a cancel.
+		const WaitResult wait = WaitSocket(fd, false, -1.0, progress ? progress->cancel : nullptr);
+		if (wait != WaitResult::READY)
+			return false;
 
 		int retval = recv(fd, &buf[0], buf.size(), MSG_NOSIGNAL);
 		if (retval == 0) {

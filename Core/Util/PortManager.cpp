@@ -506,8 +506,7 @@ static int upnpService(unsigned int timeout) {
 
 	int failCount = 0;
 	bool wasEnabled = false;
-	// Absolute time before which we won't try to (re)discover a router. This has to be a deadline
-	// rather than a sleep length: an incoming request wakes us early, and without it every single
+	// Absolute time before which we won't try to (re)discover a router: without it every single
 	// request would trigger another full SSDP discovery while the router is unreachable.
 	double nextInitTime = 0.0;
 
@@ -525,10 +524,6 @@ static int upnpService(unsigned int timeout) {
 				nextInitTime = 0.0;
 			}
 		}
-
-		// 0 means "sleep until someone wakes us" - which is what this thread does for the whole
-		// session for most users, rather than waking up periodically to find nothing to do.
-		double wakeAt = 0.0;
 
 		if (!g_Config.bEnableUPnP) {
 			// Callers queue requests without checking the setting (see bind() in sceNetInet), so throw
@@ -577,18 +572,12 @@ static int upnpService(unsigned int timeout) {
 					nextInitTime = time_now_d() + MIN_RETRY_SECONDS;
 				}
 			}
-			if (g_PortManager.GetInitState() != UPNP_INITSTATE_DONE)
-				wakeAt = nextInitTime;
 		}
 
+		// Sleep until someone wakes us, with no timer: a router that couldn't be reached is tried
+		// again on the next request (or setting change) once the backoff has passed.
 		std::unique_lock<std::mutex> lock(g_upnpLock);
-		auto shouldWake = [seq] { return g_upnpExit || g_upnpWakeSeq != seq; };
-		if (wakeAt == 0.0) {
-			g_upnpCond.wait(lock, shouldWake);
-		} else {
-			const double delay = std::max(wakeAt - time_now_d(), 0.0);
-			g_upnpCond.wait_for(lock, std::chrono::duration<double>(delay), shouldWake);
-		}
+		g_upnpCond.wait(lock, [seq] { return g_upnpExit || g_upnpWakeSeq != seq; });
 	}
 
 	// Clean up regardless of g_Config.bEnableUPnP, to avoid leaving open ports on the router.

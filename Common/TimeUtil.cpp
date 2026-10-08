@@ -4,7 +4,6 @@
 #include <cstdint>
 
 #include "Common/TimeUtil.h"
-#include "Common/Data/Random/Rng.h"
 #include "Common/Log.h"
 
 #ifdef HAVE_LIBNX
@@ -17,16 +16,10 @@
 
 #ifdef _WIN32
 #include "CommonWindows.h"
-#include <mmsystem.h>
 #include <sys/timeb.h>
 #else
 #include <sys/time.h>
 #include <unistd.h>
-#endif
-
-// for _mm_pause
-#if PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
-#include <emmintrin.h>
 #endif
 
 #include <ctime>
@@ -47,10 +40,6 @@ static double frequencyMult;
 static LARGE_INTEGER startTime;
 static LARGE_INTEGER startFileTime;
 
-HANDLE Timer;
-int SchedulerPeriodMs = 10;
-INT64 QpcPerSecond;
-
 void TimeInit() {
 	FILETIME ft;
 	GetSystemTimeAsFileTime(&ft); //returns ticks in UTC
@@ -60,25 +49,11 @@ void TimeInit() {
 
 	QueryPerformanceFrequency(&frequency);
 	QueryPerformanceCounter(&startTime);
-	QpcPerSecond = frequency.QuadPart;
 	frequencyMult = 1.0 / frequency.QuadPart;
-
-	// The timer will be automatically deleted on process destruction. Don't need to CloseHandle.
-	Timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-
-	// TODO: We probably don't need this anymore if we are using the high res waitable timers?
-#if !PPSSPP_PLATFORM(UWP)
-	TIMECAPS caps;
-	timeGetDevCaps(&caps, sizeof caps);
-	timeBeginPeriod(caps.wPeriodMin);
-	SchedulerPeriodMs = (int)caps.wPeriodMin;
-#endif
+	// No timeBeginPeriod: nothing sleeps, so the process's timer resolution is left alone.
 }
 
 void TimeShutdown() {
-#if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
-	timeEndPeriod(1);
-#endif
 }
 
 double time_now_d() {
@@ -121,10 +96,6 @@ double time_to_unix_utc(double timestamp) {
 	li.LowPart = startFileTime.LowPart;
 	li.HighPart = startFileTime.HighPart;
 	return (double)(li.QuadPart - UNIX_TIME_START + static_cast<int64_t>(timestamp * TICKS_PER_SECOND)) / TICKS_PER_SECOND;
-}
-
-void yield() {
-	YieldProcessor();
 }
 
 Instant::Instant() {
@@ -182,15 +153,6 @@ double time_now_unix_utc() {
 	struct timespec tp;
 	clock_gettime(CLOCK_REALTIME, &tp);
 	return (double)tp.tv_sec + (double)tp.tv_nsec / 1000000000.0;
-}
-
-void yield() {
-#if PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
-	_mm_pause();
-#elif PPSSPP_ARCH(ARM64)
-	// Took this out for now. See issue #17877
-	// __builtin_arm_isb(15);
-#endif
 }
 
 Instant::Instant() {
@@ -254,8 +216,6 @@ double from_time_raw_relative(uint64_t raw_time) {
 	return from_time_raw(raw_time);
 }
 
-void yield() {}
-
 double time_now_unix_utc() {
 	// Not time_now_raw() - that's a monotonic clock with no relation to the epoch.
 	struct timeval tv;
@@ -297,8 +257,8 @@ double Instant::ElapsedSeconds() const {
 
 #endif
 
-#define SLEEP_LOG_ENABLED 0
-
+#ifndef __LIBRETRO__
+// The headless tools and tests only; see TimeUtil.h.
 void sleep_ms(int ms, const char *reason) {
 	if (ms <= 0) {
 		return;
@@ -334,63 +294,7 @@ void sleep_us(int us, const char *reason) {
 	usleep(us);
 #endif
 }
-
-// This can be a little more expensive in some circumstances, so only use when necessary.
-void sleep_precise(double seconds, const char *reason) {
-	if (seconds <= 0.0) {
-		return;
-	}
-#if SLEEP_LOG_ENABLED
-	INFO_LOG(Log::System, "Sleep precise %f s: %s", seconds, reason);
 #endif
-#ifdef _WIN32
-	// Precise Windows sleep function from: https://github.com/blat-blatnik/Snippets/blob/main/precise_sleep.c
-	// Described in: https://blog.bearcats.nl/perfect-sleep-function/
-	LARGE_INTEGER qpc;
-	QueryPerformanceCounter(&qpc);
-	INT64 targetQpc = (INT64)(qpc.QuadPart + seconds * QpcPerSecond);
-
-	if (Timer) { // Try using a high resolution timer first.
-		const double TOLERANCE = 0.001'02;
-		INT64 maxTicks = (INT64)SchedulerPeriodMs * 9'500;
-		for (;;) // Break sleep up into parts that are lower than scheduler period.
-		{
-			double remainingSeconds = (targetQpc - qpc.QuadPart) / (double)QpcPerSecond;
-			INT64 sleepTicks = (INT64)((remainingSeconds - TOLERANCE) * 10'000'000);
-			if (sleepTicks <= 0)
-				break;
-			LARGE_INTEGER due;
-			due.QuadPart = -(sleepTicks > maxTicks ? maxTicks : sleepTicks);
-			// Note: SetWaitableTimerEx is not available on Vista.
-			if (!SetWaitableTimer(Timer, &due, 0, NULL, NULL, FALSE)) {
-				_dbg_assert_(false);
-				break;
-			}
-			WaitForSingleObject(Timer, INFINITE);
-			QueryPerformanceCounter(&qpc);
-		}
-	} else { // Fallback to Sleep.
-		const double TOLERANCE = 0.000'02;
-		double sleepMs = (seconds - TOLERANCE) * 1000 - SchedulerPeriodMs; // Sleep for 1 scheduler period less than requested.
-		int sleepSlices = (int)(sleepMs / SchedulerPeriodMs);
-		if (sleepSlices > 0)
-			Sleep((DWORD)sleepSlices * SchedulerPeriodMs);
-		QueryPerformanceCounter(&qpc);
-	}
-	while (qpc.QuadPart < targetQpc) // Spin for any remaining time.
-	{
-		YieldProcessor();
-		QueryPerformanceCounter(&qpc);
-	}
-	// On other platforms, we just do a conversion with more input precision than in sleep_ms which is restricted to whole milliseconds.
-#elif defined(HAVE_LIBNX)
-	svcSleepThread((int64_t)(seconds * 1000000000.0));
-#elif defined(__EMSCRIPTEN__)
-	emscripten_sleep(seconds * 1000.0);
-#else
-	usleep(seconds * 1000000.0);
-#endif
-}
 
 // Return the current time formatted as Minutes:Seconds:Milliseconds
 // in the form 00:00:000.
@@ -408,10 +312,3 @@ void GetCurrentTimeFormatted(char formattedTime[13]) {
 #endif
 }
 
-// We don't even bother synchronizing this, it's fine if threads stomp a bit.
-static GMRng g_sleepRandom;
-
-void sleep_random(double minSeconds, double maxSeconds, const char *reason) {
-	const double waitSeconds = minSeconds + (maxSeconds - minSeconds) * g_sleepRandom.F();
-	sleep_precise(waitSeconds, reason);
-}

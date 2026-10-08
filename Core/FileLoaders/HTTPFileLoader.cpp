@@ -265,7 +265,6 @@ size_t HTTPFileLoader::ReadAt(s64 absolutePos, size_t bytes, void *data, Flags f
 
 void HTTPFileLoader::Connect(double timeout) {
 	if (!connected_) {
-		cancel_ = false;
 		connected_ = client_.Connect(3, timeout, &cancel_);
 	}
 }

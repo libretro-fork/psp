@@ -26,7 +26,7 @@ public:
 	// Inits the addrinfo chain.
 	bool Resolve(const char *host, int port, DNSType type = DNSType::ANY);
 
-	bool Connect(int maxTries = 2, double timeout = 20.0f, bool *cancelConnect = nullptr);
+	bool Connect(int maxTries = 2, double timeout = 20.0f, const net::CancelToken *cancel = nullptr);
 	void Disconnect();
 
 	// TODO: Try to expose this less.
@@ -137,8 +137,8 @@ private:
 // This is simply a finished request, that can still be queried like a normal one so users don't know it came from the cache.
 class CachedRequest : public Request {
 public:
-	CachedRequest(RequestMethod method, std::string_view url, std::string_view name, bool *cancelled, RequestFlags flags, std::string_view responseData)
-		: Request(method, url, name, Path(), cancelled, flags)
+	CachedRequest(RequestMethod method, std::string_view url, std::string_view name, RequestFlags flags, std::string_view responseData)
+		: Request(method, url, name, Path(), flags)
 	{
 		buffer_.Append(responseData);
 	}

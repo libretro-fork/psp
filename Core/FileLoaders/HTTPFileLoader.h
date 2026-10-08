@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "Common/File/Path.h"
+#include "Common/Net/Cancel.h"
 #include "Common/Net/HTTPClient.h"
 #include "Common/Net/Resolve.h"
 #include "Common/Net/URL.h"
@@ -47,7 +48,7 @@ public:
 	size_t ReadAt(s64 absolutePos, size_t bytes, void *data, Flags flags = Flags::NONE) override;
 
 	void Cancel() override {
-		cancel_ = true;
+		cancel_.Cancel();
 	}
 
 	std::string LatestError() const override {
@@ -74,7 +75,7 @@ private:
 	net::RequestProgress progress_;
 	::Path filename_;
 	bool connected_ = false;
-	bool cancel_ = false;
+	net::CancelToken cancel_;
 	const char *latestError_ = "";
 
 	std::once_flag preparedFlag_;

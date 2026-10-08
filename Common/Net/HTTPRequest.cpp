@@ -10,8 +10,8 @@
 
 namespace http {
 
-Request::Request(RequestMethod method, std::string_view url, std::string_view name, const Path &outFile, bool *cancelled, RequestFlags flags)
-	: method_(method), url_(url), name_(name), outfile_(outFile), progress_(cancelled), flags_(flags) {
+Request::Request(RequestMethod method, std::string_view url, std::string_view name, const Path &outFile, RequestFlags flags)
+	: method_(method), url_(url), name_(name), outfile_(outFile), progress_(&cancel_), flags_(flags) {
 	INFO_LOG(Log::HTTP, "HTTP %s request: %.*s (%.*s)", RequestMethodToString(method), (int)url.size(), url.data(), (int)name.size(), name.data());
 
 	progress_.callback = [this](int64_t bytes, int64_t contentLength, bool done) {
@@ -98,7 +98,7 @@ std::shared_ptr<Request> RequestManager::StartDownload(std::string_view url, con
 				if (File::ReadBinaryFileToString(cacheFile, &contents)) {
 					INFO_LOG(Log::HTTP, "Returning cached file for %.*s: %s", STR_VIEW(url), cacheFile.c_str());
 					// All is well, but we've indented a bit much here.
-					std::shared_ptr<Request> dl(new CachedRequest(RequestMethod::GET, url, KeepAfterLast(url, '/'), nullptr, flags, contents));
+					std::shared_ptr<Request> dl(new CachedRequest(RequestMethod::GET, url, KeepAfterLast(url, '/'), flags, contents));
 					newDownloads_.push_back(dl);
 					dl->SetCallback(completionCallback);
 					return dl;

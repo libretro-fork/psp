@@ -243,6 +243,8 @@ add_library(Common STATIC
 	Net/HTTPNaettRequest.h
 	Net/HTTPRequest.cpp
 	Net/HTTPRequest.h
+	Net/Cancel.cpp
+	Net/Cancel.h
 	Net/NetBuffer.cpp
 	Net/NetBuffer.h
 	Net/Resolve.cpp

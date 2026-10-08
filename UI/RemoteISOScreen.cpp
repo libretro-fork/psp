@@ -47,6 +47,7 @@
 #include "Common/TimeUtil.h"
 #include "Core/Config.h"
 #include "Core/System.h"
+#include "Common/Net/Cancel.h"
 #include "Core/WebServer.h"
 #include "UI/RemoteISOScreen.h"
 #include "UI/OnScreenDisplay.h"
@@ -54,7 +55,12 @@
 static const char * const REPORT_HOSTNAME = "report.ppsspp.org";
 static const int REPORT_PORT = 80;
 
-static bool scanCancelled = false;
+// Made before each scan thread starts; a destroyed screen cancels it.
+static std::shared_ptr<net::CancelToken> scanCancel;
+
+static bool ScanCancelled() {
+	return scanCancel && scanCancel->IsCancelled();
+}
 static bool scanAborted = false;
 
 enum class ServerAllowStatus {
@@ -136,14 +142,14 @@ bool RemoteISOConnectScreen::FindServer(std::string &resultHost, int &resultPort
 		SetStatus("Connecting to [URL]...", host, port);
 		// Don't wait as long for a connect - we need a good connection for smooth streaming anyway.
 		// This way if it's down, we'll find the right one faster.
-		if (!http.Connect(1, 10.0, &scanCancelled)) {
+		if (!http.Connect(1, 10.0, scanCancel.get())) {
 			hadTimeouts = true;
 			SetStatus("Could not connect to [URL]", host, port);
 			return false;
 		}
 
 		SetStatus("Loading game list from [URL]...", host, port);
-		net::RequestProgress progress(&scanCancelled);
+		net::RequestProgress progress(scanCancel.get());
 		code = http.GET(http::RequestParams(subdir.c_str()), &result, &progress);
 		http.Disconnect();
 
@@ -194,22 +200,22 @@ bool RemoteISOConnectScreen::FindServer(std::string &resultHost, int &resultPort
 	}
 
 	// Don't scan if in manual mode.
-	if (g_Config.bRemoteISOManual || scanCancelled) {
+	if (g_Config.bRemoteISOManual || ScanCancelled()) {
 		return false;
 	}
 
 	// Start by requesting a list of recent local ips for this network.
 	SetStatus("Looking for peers...", "", 0);
 	if (http.Resolve(REPORT_HOSTNAME, REPORT_PORT)) {
-		if (http.Connect(2, 20.0, &scanCancelled)) {
-			net::RequestProgress progress(&scanCancelled);
+		if (http.Connect(2, 20.0, scanCancel.get())) {
+			net::RequestProgress progress(scanCancel.get());
 			code = http.GET(http::RequestParams("/match/list"), &result, &progress);
 			http.Disconnect();
 		}
 	}
 
-	if (code != 200 || scanCancelled) {
-		if (!scanCancelled) {
+	if (code != 200 || ScanCancelled()) {
+		if (!ScanCancelled()) {
 			SetStatus("Could not load peers, retrying soon...", "", 0);
 		}
 		return false;
@@ -234,7 +240,7 @@ bool RemoteISOConnectScreen::FindServer(std::string &resultHost, int &resultPort
 
 	for (const auto pentry : entries) {
 		JsonGet entry = pentry->value;
-		if (scanCancelled)
+		if (ScanCancelled())
 			return false;
 
 		const char *host = entry.getStringOr("ip", "");
@@ -260,8 +266,8 @@ static bool LoadGameList(const Path &url, std::vector<Path> &games) {
 	browser.SetPath(url);
 	std::vector<File::FileInfo> files;
 	browser.SetUserAgent(StringFromFormat("PPSSPP/%s", PPSSPP_GIT_VERSION));
-	browser.GetListing(files, "iso:cso:chd:pbp:elf:prx:ppdmp:", &scanCancelled);
-	if (scanCancelled) {
+	browser.GetListing(files, "iso:cso:chd:pbp:elf:prx:ppdmp:", scanCancel.get());
+	if (ScanCancelled()) {
 		return false;
 	}
 	for (auto &file : files) {
@@ -456,7 +462,7 @@ void RemoteISOScreen::HandleBrowse(UI::EventParams &e) {
 }
 
 RemoteISOConnectScreen::RemoteISOConnectScreen() {
-	scanCancelled = false;
+	scanCancel = std::make_shared<net::CancelToken>();
 	scanAborted = false;
 
 	scanThread_ = std::thread([](RemoteISOConnectScreen *thiz) {
@@ -467,7 +473,7 @@ RemoteISOConnectScreen::RemoteISOConnectScreen() {
 
 RemoteISOConnectScreen::~RemoteISOConnectScreen() {
 	int maxWait = 5000;
-	scanCancelled = true;
+	scanCancel->Cancel();
 	while (GetStatus() == ScanStatus::SCANNING || GetStatus() == ScanStatus::LOADING) {
 		sleep_ms(1, "remote-iso-scan");
 		if (--maxWait < 0) {

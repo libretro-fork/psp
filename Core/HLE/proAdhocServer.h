@@ -220,6 +220,8 @@ typedef struct SceNetAdhocctlUserNode {
 	// RX Buffer
 	uint8_t rx[1024];
 	uint32_t rxpos;
+	// rxpos at the end of the last pass: a change means another packet may be buffered.
+	uint32_t rxseen;
 } SceNetAdhocctlUserNode;
 
 // Double-Linked Game List
@@ -371,3 +373,6 @@ int proAdhocServerThread(int port); // (int argc, char * argv[])
 //extern int _status;
 extern std::atomic<bool> adhocServerRunning;
 extern std::thread adhocServerThread;
+// Make the wake before starting the thread; wake it after clearing adhocServerRunning.
+void AdhocServerPrepare();
+void AdhocServerWake();

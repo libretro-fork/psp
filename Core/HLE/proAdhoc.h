@@ -39,6 +39,8 @@
 #include "Core/HLE/sceKernelMutex.h"
 #include "Core/HLE/sceUtility.h"
 
+namespace net { class CancelToken; }
+
 #define IsMatch(buf1, buf2)	(memcmp(&buf1, &buf2, sizeof(buf1)) == 0)
 
 // Server Listening Port
@@ -331,9 +333,14 @@ typedef struct AdhocSocket {
 	} data;
 	void *postofficeHandle; // aemu_postoffice mode handle
 	std::thread *connectThread;
+	// Cancelled before a join, so closing doesn't wait out a connect.
+	net::CancelToken *connectCancel;
 	bool connectThreadDone;
 	int connectThreadResult;
 } PACK AdhocSocket;
+
+// Joins a postoffice socket's connect thread (cancelling it first if asked) and frees it.
+void JoinPostofficeConnect(AdhocSocket *sock, bool cancel);
 
 // Gamemode Optional Peer Buffer Data
 typedef struct SceNetAdhocGameModeOptData {
@@ -496,16 +503,12 @@ typedef struct SceNetAdhocMatchingContext {
   //HLEHelperThread *matchingThread;
   int matching_thid;
 
-  // Event Caller Thread
-  std::thread eventThread;
-  //s32_le event_thid;
+  // Event and input loops, run by a CoreTiming tick on the emulator thread.
   bool eventRunning = false;
   bool IsMatchingInCB = false;
-
-  // IO Handler Thread
-  std::thread inputThread;
-  //s32_le input_thid;
   bool inputRunning = false;
+  u64_le inputLastPing = 0;
+  u64_le inputLastHello = 0;
 
   // Event Caller Thread Message Stack
   std::recursive_mutex *eventlock; // s32_le event_stack_lock;
@@ -772,6 +775,9 @@ extern std::atomic<int> metasocket;
 extern SceNetAdhocctlParameter parameter;
 extern SceNetAdhocctlAdhocId product_code;
 extern std::thread friendFinderThread;
+// Make the wake before starting the thread; wake it after changing what it acts on.
+void FriendFinderPrepare();
+void FriendFinderWake();
 extern std::recursive_mutex peerlock;
 extern AdhocSocket* adhocSockets[MAX_SOCKET];
 

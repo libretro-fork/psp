@@ -2938,6 +2938,7 @@ bool TestShaderGenerators();
 bool TestSoftwareGPUJit();
 bool TestIRPassSimplify();
 bool TestThreadManager();
+bool TestNetWait();
 bool TestVFS();
 bool TestZipSlip();
 bool TestLzrc();
@@ -3141,6 +3142,7 @@ TestItem availableTests[] = {
 	TEST_ITEM(Path),
 	TEST_ITEM(AndroidContentURI),
 	TEST_ITEM(ThreadManager),
+	TEST_ITEM(NetWait),
 	TEST_ITEM(WrapText),
 	TEST_ITEM(TinySet),
 	TEST_ITEM(FastVec),

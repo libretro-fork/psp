@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <utility>
 
 #include "Common/Net/HTTPClient.h"
@@ -105,7 +106,7 @@ static void FormatAddr(char *addrbuf, size_t bufsize, const addrinfo *info) {
 	}
 }
 
-bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
+bool Connection::Connect(int maxTries, double timeout, const net::CancelToken *cancel) {
 	if (port_ <= 0) {
 		ERROR_LOG(Log::Net, "Bad port");
 		return false;
@@ -114,9 +115,6 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 
 	for (int tries = maxTries; tries > 0; --tries) {
 		std::vector<uintptr_t> sockets;
-		fd_set fds;
-		int maxfd = 1;
-		FD_ZERO(&fds);
 		for (addrinfo *possible = resolved_; possible != nullptr; possible = possible->ai_next) {
 			if (possible->ai_family != AF_INET && possible->ai_family != AF_INET6)
 				continue;
@@ -156,68 +154,44 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 				}
 			}
 			sockets.push_back(sock);
-			FD_SET(sock, &fds);
-			if (maxfd < sock + 1) {
-				maxfd = sock + 1;
-			}
 		}
 
+		if (cancel && cancel->IsCancelled()) {
+			for (uintptr_t sock : sockets)
+				closesocket(sock);
+			WARN_LOG(Log::Net, "connect: cancelled: %s:%d", host_.c_str(), port_);
+			break;
+		}
 		if (sockets.empty()) {
-			// No need to call 'select' if we don't have any plausible sockets.
-			if (cancelConnect && *cancelConnect) {
-				WARN_LOG(Log::Net, "connect: cancelled (2): %s:%d", host_.c_str(), port_);
-				break;
-			}
-			sleep_ms(1, "connect");
+			// No plausible address this time round; try the next one straight away.
 			continue;
 		}
-		// There is at least 1 socket candidate.
 
-		int selectResult = 0;
-		long timeoutHalfSeconds = floor(2 * timeout);
-		while (timeoutHalfSeconds >= 0 && selectResult == 0) {
-			struct timeval tv{};
-			tv.tv_sec = 0;
-			if (timeoutHalfSeconds > 0) {
-				// Wait up to 0.5 seconds between cancel checks.
-				tv.tv_usec = 500000;
-			} else {
-				// Wait the remaining <= 0.5 seconds.  Possibly 0, but that's okay.
-				tv.tv_usec = (timeout - floor(2 * timeout) / 2) * 1000000.0;
-			}
-			--timeoutHalfSeconds;
-
-			selectResult = select(maxfd, nullptr, &fds, nullptr, &tv);
-			if (cancelConnect && *cancelConnect) {
-				WARN_LOG(Log::HTTP, "connect: cancelled (1): %s:%d", host_.c_str(), port_);
-				break;
-			}
-		}
-		if (selectResult > 0) {
+		// Wait for the first to connect, the timeout, or a cancel - no slicing, a cancel wakes the wait.
+		std::unique_ptr<bool[]> ready(new bool[sockets.size()]());
+		const net::WaitResult wait = net::WaitSockets(sockets.data(), ready.get(), (int)sockets.size(), true, timeout, cancel);
+		if (wait == net::WaitResult::READY) {
 			// Something connected.  Pick the first one that did (if multiple.)
-			for (int sock : sockets) {
-				if ((intptr_t)sock_ == -1 && FD_ISSET(sock, &fds)) {
-					sock_ = sock;
+			for (size_t i = 0; i < sockets.size(); i++) {
+				if ((intptr_t)sock_ == -1 && ready[i]) {
+					sock_ = sockets[i];
 				} else {
-					closesocket(sock);
+					closesocket(sockets[i]);
 				}
 			}
 
 			// Great, now we're good to go.
 			return true;
-		} else {
-			// Fail. Close all the sockets.
-			for (int sock : sockets) {
-				closesocket(sock);
-			}
 		}
 
-		if (cancelConnect && *cancelConnect) {
-			WARN_LOG(Log::Net, "connect: cancelled (2): %s:%d", host_.c_str(), port_);
+		// Fail. Close all the sockets.
+		for (uintptr_t sock : sockets) {
+			closesocket(sock);
+		}
+		if (wait == net::WaitResult::CANCELLED) {
+			WARN_LOG(Log::HTTP, "connect: cancelled: %s:%d", host_.c_str(), port_);
 			break;
 		}
-
-		sleep_ms(1, "connect");
 	}
 
 	// Nothing connected, unfortunately.
@@ -386,7 +360,7 @@ int Client::SendRequestWithData(const char *method, const RequestParams &req, st
 		req.acceptMime,
 		otherHeaders ? otherHeaders : "");
 	buffer.Append(data);
-	bool flushed = buffer.FlushSocket(sock(), headerTimeout_, progress ? progress->cancelled : nullptr);
+	bool flushed = buffer.FlushSocket(sock(), headerTimeout_, progress ? progress->cancel : nullptr);
 	if (!flushed) {
 		return -1;  // TODO error code.
 	}
@@ -395,18 +369,13 @@ int Client::SendRequestWithData(const char *method, const RequestParams &req, st
 
 int Client::ReadResponseHeaders(net::Buffer *readbuf, std::vector<std::string> &responseHeaders, net::RequestProgress *progress, std::string *statusLine) {
 	// Snarf all the data we can into RAM. A little unsafe but hey.
-	static constexpr float CANCEL_INTERVAL = 0.25f;
-	bool ready = false;
-	double endTimeout = time_now_d() + headerTimeout_;
-	while (!ready) {
-		if (progress && progress->cancelled && *progress->cancelled)
-			return -1;
-		ready = fd_util::WaitUntilReady(sock(), CANCEL_INTERVAL, false);
-		if (!ready && time_now_d() > endTimeout) {
-			ERROR_LOG(Log::HTTP, "HTTP headers timed out");
-			return -1;
-		}
-	};
+	const net::WaitResult wait = net::WaitSocket(sock(), false, headerTimeout_, progress ? progress->cancel : nullptr);
+	if (wait == net::WaitResult::TIMEOUT) {
+		ERROR_LOG(Log::HTTP, "HTTP headers timed out");
+		return -1;
+	} else if (wait != net::WaitResult::READY) {
+		return -1;
+	}
 	// Let's hope all the headers are available in a single packet...
 	if (readbuf->Read(sock(), 4096) < 0) {
 		ERROR_LOG(Log::HTTP, "Failed to read HTTP headers :(");
@@ -457,7 +426,6 @@ int Client::ReadResponseHeaders(net::Buffer *readbuf, std::vector<std::string> &
 }
 
 int Client::ReadResponseEntity(net::Buffer *readbuf, const std::vector<std::string> &responseHeaders, Buffer *output, net::RequestProgress *progress) {
-	_dbg_assert_(progress->cancelled);
 
 	bool gzip = false;
 	bool chunked = false;
@@ -531,7 +499,7 @@ int Client::ReadResponseEntity(net::Buffer *readbuf, const std::vector<std::stri
 }
 
 HTTPRequest::HTTPRequest(RequestMethod method, std::string_view url, std::string_view postData, std::string_view postMime, const Path &outfile, RequestFlags flags, net::ResolveFunc customResolve, std::string_view name)
-	: Request(method, url, name, outfile, &cancelled_, flags), postData_(postData), postMime_(postMime), customResolve_(std::move(customResolve)) {
+	: Request(method, url, name, outfile, flags), postData_(postData), postMime_(postMime), customResolve_(std::move(customResolve)) {
 }
 
 HTTPRequest::~HTTPRequest() {
@@ -578,16 +546,16 @@ int HTTPRequest::Perform(const std::string &url) {
 		return -1;
 	}
 
-	if (cancelled_) {
+	if (IsCancelled()) {
 		return -1;
 	}
 
-	if (!client.Connect(2, 20.0, &cancelled_)) {
-		ERROR_LOG(Log::HTTP, "Failed connecting to server or cancelled (=%d).", cancelled_);
+	if (!client.Connect(2, 20.0, &cancel_)) {
+		ERROR_LOG(Log::HTTP, "Failed connecting to server or cancelled (=%d).", (int)IsCancelled());
 		return -1;
 	}
 
-	if (cancelled_) {
+	if (IsCancelled()) {
 		return -1;
 	}
 

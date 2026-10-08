@@ -19,20 +19,12 @@ double from_time_raw_relative(uint64_t raw_time);
 double time_now_unix_utc();
 double time_to_unix_utc(double timeNowSeconds);
 
-// Sleep for milliseconds. Does not necessarily have millisecond granularity, especially on Windows.
-// Requires a "reason" since sleeping generally should be very sparingly used. This
-// can be logged if desired to figure out where we're wasting time.
+#ifndef __LIBRETRO__
+// Sleeps, for the standalone frontends, headless tools and tests. The core never sleeps and
+// doesn't have this, so a sleep can't creep back into it.
 void sleep_ms(int ms, const char *reason);
-// Sleep for microseconds. Does not necessarily have microsecond granularity, especially on Windows.
 void sleep_us(int us, const char *reason);
-// Precise sleep. Can consume a little bit of CPU on Windows at least.
-void sleep_precise(double seconds, const char *reason);
-
-// Random sleep, used for debugging.
-void sleep_random(double minSeconds, double maxSeconds, const char *reason);
-
-// Yield. Signals that this thread is busy-waiting but wants to allow other hyperthreads to run.
-void yield();
+#endif
 
 void GetCurrentTimeFormatted(char formattedTime[13]);
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <string_view>
 #include <cstring>
@@ -10,6 +11,7 @@
 
 #include "Common/File/DirListing.h"
 #include "Common/File/Path.h"
+#include "Common/Net/Cancel.h"
 
 // Abstraction above path that lets you navigate easily and get listings off-thread.
 // "/" is a special path that means the root of the file system. On Windows,
@@ -29,7 +31,7 @@ public:
 	}
 
 	// If called before IsListingReady() returns true, will block (becomes synchronous). Don't do that.
-	bool GetListing(std::vector<File::FileInfo> &fileInfo, const char *filter = nullptr, bool *cancel = nullptr);
+	bool GetListing(std::vector<File::FileInfo> &fileInfo, const char *filter = nullptr, const net::CancelToken *cancel = nullptr);
 
 	bool CanNavigateUp() const;
 	void NavigateUp();
@@ -55,6 +57,7 @@ public:
 
 private:
 	void HandlePath();
+	void CancelPending();
 	void ApplyRestriction();
 
 	Path path_;
@@ -67,6 +70,7 @@ private:
 	std::thread pendingThread_;
 	bool pendingActive_ = false;
 	bool pendingCancel_ = false;
+	std::shared_ptr<net::CancelToken> loadCancel_;
 	bool pendingStop_ = false;
 	bool ready_ = false;
 	bool success_ = true;

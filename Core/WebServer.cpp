@@ -106,8 +106,7 @@ static ServerStatus RetrieveStatus() {
 static bool RegisterServer(int port) {
 	bool success = false;
 	http::Client http(nullptr);
-	bool cancelled = false;
-	net::RequestProgress progress(&cancelled);
+	net::RequestProgress progress(nullptr);
 	Buffer theVoid = Buffer::Void();
 
 	http.SetUserAgent(StringFromFormat("PPSSPP/%s", PPSSPP_GIT_VERSION));

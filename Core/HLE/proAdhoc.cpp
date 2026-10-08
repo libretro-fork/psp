@@ -54,10 +54,11 @@
 #include "Core/HLE/sceNetAdhoc.h"
 #include "Core/Instance.h"
 #include "proAdhoc.h"
+#include "Common/Net/Cancel.h"
 
 #include "Core/HLE/NetAdhocCommon.h"
 
-#include "ext/aemu_postoffice/client/postoffice_client.h"
+#include "ext/aemu_postoffice_client/postoffice_client.h"
 
 #ifdef _WIN32
 #undef errno
@@ -110,6 +111,32 @@ std::atomic<int> metasocket((int)INVALID_SOCKET);
 SceNetAdhocctlParameter parameter;
 SceNetAdhocctlAdhocId product_code;
 std::thread friendFinderThread;
+// Wakes the friend finder's wait when the game side changes something it acts on.
+// Made once before the first start and kept, so a wake never races a free.
+static net::WakeSocket *friendFinderWake;
+
+void FriendFinderPrepare() {
+	if (!friendFinderWake)
+		friendFinderWake = new net::WakeSocket();
+}
+
+void FriendFinderWake() {
+	net::WakeSocket *wake = friendFinderWake;
+	if (wake)
+		wake->Wake();
+}
+
+void JoinPostofficeConnect(AdhocSocket *sock, bool cancel) {
+	if (sock->connectThread != NULL) {
+		if (cancel && sock->connectCancel != NULL)
+			sock->connectCancel->Cancel();
+		sock->connectThread->join();
+		delete sock->connectThread;
+		sock->connectThread = NULL;
+	}
+	delete sock->connectCancel;
+	sock->connectCancel = NULL;
+}
 std::recursive_mutex peerlock;
 AdhocSocket* adhocSockets[MAX_SOCKET];
 bool isOriPort = false;
@@ -435,10 +462,7 @@ void deleteAllAdhocSockets() {
 			if (serverHasRelay) {
 				if (sock->type == SOCK_PTP) {
 					// sync
-					if (sock->connectThread != NULL) {
-						sock->connectThread->join();
-						delete sock->connectThread;
-					}
+					JoinPostofficeConnect(sock, true);
 					void *socket = sock->postofficeHandle;
 					if (socket != NULL) {
 						if (sock->data.ptp.state == ADHOC_PTP_STATE_LISTEN) {
@@ -1403,6 +1427,9 @@ int friendFinder() {
 
 	// Finder Loop. The flag was set by whoever started us, and cleared to stop us.
 	while (friendFinderRunning) {
+		// Bytes buffered before this pass handled a packet.
+		int rxQueued = 0;
+
 		// Acquire Network Lock
 		//_acquireNetworkLock();
 
@@ -1491,6 +1518,7 @@ int friendFinder() {
 			}
 
 			// Handle Packets
+			rxQueued = rxpos;
 			if (rxpos > 0) {
 				// BSSID Packet
 				if (rx[0] == OPCODE_CONNECT_BSSID) {
@@ -1767,12 +1795,31 @@ int friendFinder() {
 				}
 			}
 		}
-		// This delay time should be 100ms when there is an event otherwise 500ms ?
-		sleep_ms(10, "pro-adhoc-poll-2"); // Using 1ms for faster response just like AdhocServer?
+		// A pass handles one packet; another whole one may already be buffered.
+		if (rxpos > 0 && rxpos < rxQueued)
+			continue;
 
-		// Don't do anything if it's paused, otherwise the log will be flooded
-		while (Core_IsStepping() && coreState != CORE_POWERDOWN && friendFinderRunning)
-			sleep_ms(10, "pro-adhoc-paused-poll-2");
+		// Wait for the server, the game side (FriendFinderWake), or the next ping or game mode deadline.
+		uintptr_t sock = (uintptr_t)(intptr_t)-1;
+		bool forWrite = false;
+		double timeout = -1.0;
+		if (g_adhocServerConnected && metasocket != (int)INVALID_SOCKET) {
+			sock = (uintptr_t)(intptr_t)metasocket;
+			const u64 t = (u64)(time_now_d() * 1000000.0);
+			s64 left = PSP_ADHOCCTL_PING_TIMEOUT - static_cast<s64>(t - lastping);
+			// A ping that is due but couldn't go out waits for the socket to take it.
+			forWrite = left <= 0;
+			if (isAdhocctlBusy && adhocctlState == ADHOCCTL_STATE_DISCONNECTED && adhocctlCurrentMode == ADHOCCTL_MODE_GAMEMODE && netAdhocGameModeEntered)
+				left = std::min(left, (s64)netAdhocEnterGameModeTimeout - static_cast<s64>(t - adhocctlStartTime) + 1);
+			timeout = forWrite ? -1.0 : std::max(left, (s64)0) / 1000000.0;
+		}
+		const net::WaitResult wait = net::WaitSocketsOrWake(&sock, nullptr, 1, forWrite, timeout, friendFinderWake);
+		if (wait == net::WaitResult::FAILED && sock == (uintptr_t)(intptr_t)-1) {
+			ERROR_LOG(Log::sceNet, "FriendFinder: nothing to wait on (no wake socket), stopping");
+			break;
+		}
+		if (friendFinderWake)
+			friendFinderWake->Drain();
 	}
 
 	// Groups/Networks should be deallocated isn't?
@@ -2248,9 +2295,17 @@ int initNetwork(SceNetAdhocctlAdhocId *adhoc_id){
 		u64 startTime = (u64)(time_now_d() * 1000000.0);
 		bool done = false;
 		while (!done) {
-			if (coreState == CORE_POWERDOWN) 
+			if (coreState == CORE_POWERDOWN || !friendFinderRunning)
 				return iResult;
 
+			// Writable, the timeout, or a wake to recheck the above.
+			const u64 waited = (u64)(time_now_d() * 1000000.0) - startTime;
+			uintptr_t sock = (uintptr_t)(intptr_t)metasocket;
+			const double left = waited < (u64)adhocDefaultTimeout ? (adhocDefaultTimeout - waited) / 1000000.0 : 0.0;
+			if (net::WaitSocketsOrWake(&sock, nullptr, 1, true, left, friendFinderWake) == net::WaitResult::CANCELLED) {
+				friendFinderWake->Drain();
+				continue;
+			}
 			done = (IsSocketReady((int)metasocket, false, true) > 0);
 			if (done) {
 				// Writable can also mean the attempt failed (refused, say). Then there's no point
@@ -2266,14 +2321,17 @@ int initNetwork(SceNetAdhocctlAdhocId *adhoc_id){
 			socklen_t sinlen = sizeof(sin);
 			memset(&sin, 0, sinlen);
 			// Ensure that the connection really established or not, since "select" alone can't accurately detects it
+			const bool writable = done;
 			done &= (getpeername((int)metasocket, (struct sockaddr*)&sin, &sinlen) != SOCKET_ERROR);
+			// Writable but not connected is a failed attempt, and would stay writable.
+			if (writable && !done)
+				break;
 			u64 now = (u64)(time_now_d() * 1000000.0);
-			if (static_cast<s64>(now - startTime) > adhocDefaultTimeout) {
+			if (static_cast<s64>(now - startTime) >= adhocDefaultTimeout) {
 				if (connectInProgress(errorcode))
 					errorcode = ETIMEDOUT;
 				break;
 			}
-			sleep_ms(10, "pro-adhoc-socket-poll");
 		}
 		if (!done) {
 			ERROR_LOG(Log::sceNet, "Socket error (%i) when connecting to AdhocServer [%s/%s:%u]", errorcode, g_Config.sProAdhocServer.c_str(), ip2str(g_adhocServerIP.in.sin_addr).c_str(), ntohs(g_adhocServerIP.in.sin_port));

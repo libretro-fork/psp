@@ -157,8 +157,7 @@ static int sceNpMatching2ContextStart(int ctxId)
 	//npMatching2Ctx.started = true;
 	Url url("http://static-resource.np.community.playstation.net/np/resource/psp-title/" + std::string(npTitleId.data) + "_00/matching/" + std::string(npTitleId.data) + "_00-matching.xml");
 	http::Client client(&ProcessHostnameWithInfraDNS);
-	bool cancelled = false;
-	net::RequestProgress progress(&cancelled);
+	net::RequestProgress progress(nullptr);
 	if (!client.Resolve(url.Host().c_str(), url.Port())) {
 		return hleLogError(Log::sceNet, SCE_NP_COMMUNITY_SERVER_ERROR_NO_SUCH_TITLE, "HTTP failed to resolve %s", url.Resource().c_str());
 	}

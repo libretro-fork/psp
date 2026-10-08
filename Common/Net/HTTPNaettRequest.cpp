@@ -16,7 +16,7 @@
 namespace http {
 
 HTTPSRequest::HTTPSRequest(RequestMethod method, std::string_view url, std::string_view postData, std::string_view postMime, const Path &outfile, RequestFlags flags, std::string_view name)
-	: Request(method, url, name, outfile, &cancelled_, flags), postData_(postData), postMime_(postMime) {
+	: Request(method, url, name, outfile, flags), postData_(postData), postMime_(postMime) {
 }
 
 HTTPSRequest::~HTTPSRequest() {
@@ -82,7 +82,7 @@ void HTTPSRequest::Start() {
 	// it once it finishes.
 	sink_ = std::make_unique<NaettBodySink>();
 	// In case someone managed to cancel us between construction and here.
-	sink_->cancelled = cancelled_;
+	sink_->cancelled = IsCancelled();
 	sink_->postData = postData_;
 
 	std::vector<naettOption *> options;

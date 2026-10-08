@@ -251,7 +251,6 @@ bool DNSResolve(const std::string &host, const std::string &service, addrinfo **
 	int result = getaddrinfo(host.c_str(), servicep, &hints, res);
 	if (result == EAI_AGAIN) {
 		// Temporary failure.  Since this already blocks, let's just try once more.
-		sleep_ms(1, "dns-resolve-poll");
 		result = getaddrinfo(host.c_str(), servicep, &hints, res);
 	}
 

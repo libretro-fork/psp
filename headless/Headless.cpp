@@ -390,9 +390,7 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 	}
 
 	std::string error_string;
-	while (PSP_InitUpdate(&error_string) == BootState::Booting) {
-		sleep_ms(1, "auto-test");
-	}
+	PSP_InitWait(&error_string);
 
 	if (!PSP_IsInited()) {
 		GitHubActionsPrint("error", "Test init failed for %s", currentTestName.c_str());

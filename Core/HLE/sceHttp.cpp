@@ -92,7 +92,6 @@ HTTPRequest::HTTPRequest(int connectionID, int method, const char *url, u64 cont
 	this->url = url ? url : "";
 	this->contentLength = contentLength;
 
-	//progress_.cancelled = &cancelled_;
 	responseContent_.clear();
 }
 
@@ -121,7 +120,7 @@ int HTTPRequest::getResponseContentLength() {
 }
 
 int HTTPRequest::abortRequest() {
-	cancelled_ = true;
+	cancel_.Cancel();
 	// FIXME: Will sceHttpAbortRequest returns an error if the request was not sent yet?
 	//if (progress_.progress == 0.0f)
 	//	return SCE_HTTP_ERROR_BEFORE_SEND;
@@ -238,11 +237,11 @@ int HTTPRequest::sendRequest(u32 postDataPtr, u32 postDataSize) {
 	}
 
 	// Establish Connection
-	if (!client.Connect(getResolveRetryCount(), getConnectTimeout() / 1000000.0, &cancelled_)) {
+	if (!client.Connect(getResolveRetryCount(), getConnectTimeout() / 1000000.0, &cancel_)) {
 		ERROR_LOG(Log::sceNet, "Failed connecting to server or cancelled.");
 		return -1; // SCE_HTTP_ERROR_ABORTED
 	}
-	if (cancelled_) {
+	if (cancel_.IsCancelled()) {
 		return SCE_HTTP_ERROR_ABORTED;
 	}
 
@@ -259,13 +258,13 @@ int HTTPRequest::sendRequest(u32 postDataPtr, u32 postDataSize) {
 		break;
 	}
 	net::Buffer buffer_;
-	net::RequestProgress progress_(&cancelled_);
+	net::RequestProgress progress_(&cancel_);
 	http::RequestParams req(fileUrl.Resource(), "*/*");
 	const char* postData = Memory::GetCharPointer(postDataPtr);
 	if (postDataSize > 0)
 		NotifyMemInfo(MemBlockFlags::READ, postDataPtr, postDataSize, "HttpSendRequest");
 	int err = client.SendRequestWithData(methodstr.c_str(), req, std::string(postData ? postData : "", postData ? postDataSize : 0), extraHeaders.c_str(), &progress_);
-	if (cancelled_) {
+	if (cancel_.IsCancelled()) {
 		return SCE_HTTP_ERROR_ABORTED;
 	}
 	if (err < 0) {
@@ -274,7 +273,7 @@ int HTTPRequest::sendRequest(u32 postDataPtr, u32 postDataSize) {
 
 	// Retrieve Response's Status Code (and Headers too?)
 	responseCode_ = client.ReadResponseHeaders(&buffer_, responseHeaders_, &progress_, &httpLine_);
-	if (cancelled_) {
+	if (cancel_.IsCancelled()) {
 		return SCE_HTTP_ERROR_ABORTED;
 	}
 
@@ -285,7 +284,7 @@ int HTTPRequest::sendRequest(u32 postDataPtr, u32 postDataSize) {
 		ERROR_LOG(Log::sceNet, "Unable to read HTTP response entity: %d", res);
 	}
 	entity_.TakeAll(&responseContent_);
-	if (cancelled_) {
+	if (cancel_.IsCancelled()) {
 		return SCE_HTTP_ERROR_ABORTED;
 	}
 

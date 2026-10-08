@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 #include <signal.h>
 
 #include <sys/types.h>
@@ -37,6 +38,7 @@
 #include "Common/File/FileUtil.h"
 #include "Common/TimeUtil.h"
 #include "Common/Net/Resolve.h"
+#include "Common/Net/Cancel.h"
 #include "Core/Util/PortManager.h"
 #include "Core/Instance.h"
 #include "Core/Core.h"
@@ -60,6 +62,19 @@ SceNetAdhocctlGameNode * _db_game = NULL;
 // Server Status
 std::atomic<bool> adhocServerRunning(false);
 std::thread adhocServerThread;
+// Made once before the first start and kept, so a wake never races a free.
+static net::WakeSocket *adhocServerWake;
+
+void AdhocServerPrepare() {
+	if (!adhocServerWake)
+		adhocServerWake = new net::WakeSocket();
+}
+
+void AdhocServerWake() {
+	net::WakeSocket *wake = adhocServerWake;
+	if (wake)
+		wake->Wake();
+}
 
 // Crosslink database for cross region Adhoc play
 std::vector<db_crosslink> crosslinks;
@@ -2064,13 +2079,33 @@ int server_loop(int server)
 			user = next;
 		}
 
-		// Prevent needless CPU Overload (1ms Sleep)
-		// !!!! COMMENT NOT REFLECTING REALITY
-		sleep_ms(10, "pro-adhoc-poll");
+		// A pass handles one packet per user; another whole one may already be buffered.
+		bool more = false;
+		std::vector<uintptr_t> socks;
+		socks.push_back((uintptr_t)(intptr_t)server);
+		time_t nextTimeout = 0;
+		const time_t now = time(NULL);
+		for (SceNetAdhocctlUserNode *u = _db_user; u != NULL; u = u->next) {
+			if (u->rxpos > 0 && u->rxpos != u->rxseen)
+				more = true;
+			u->rxseen = u->rxpos;
+			socks.push_back((uintptr_t)(intptr_t)u->stream);
+			const time_t left = u->last_recv + SERVER_USER_TIMEOUT - now;
+			if (nextTimeout == 0 || left < nextTimeout)
+				nextTimeout = left < 1 ? 1 : left;
+		}
+		if (more)
+			continue;
 
-		// Don't do anything if it's paused, otherwise the log will be flooded
-		while (adhocServerRunning && Core_IsStepping() && coreState != CORE_POWERDOWN)
-			sleep_ms(10, "pro-adhot-paused-poll");
+		// Wait for a login, data from a user, the stop wake, or the first user timeout.
+		const double timeout = nextTimeout > 0 ? (double)nextTimeout : -1.0;
+		const net::WaitResult wait = net::WaitSocketsOrWake(socks.data(), nullptr, (int)socks.size(), false, timeout, adhocServerWake);
+		if (wait == net::WaitResult::FAILED) {
+			ERROR_LOG(Log::sceNet, "AdhocServer: wait failed, stopping");
+			break;
+		}
+		if (adhocServerWake)
+			adhocServerWake->Drain();
 	}
 
 	// Free User Database Memory

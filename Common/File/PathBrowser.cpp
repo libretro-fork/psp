@@ -18,7 +18,7 @@
 #include "android/jni/app-android.h"
 #endif
 
-static bool LoadRemoteFileList(const Path &url, std::string_view userAgent, bool *cancel, std::vector<File::FileInfo> &files) {
+static bool LoadRemoteFileList(const Path &url, std::string_view userAgent, const net::CancelToken *cancel, std::vector<File::FileInfo> &files) {
 	_dbg_assert_(url.Type() == PathType::HTTP);
 
 	http::Client http(nullptr);
@@ -43,7 +43,7 @@ static bool LoadRemoteFileList(const Path &url, std::string_view userAgent, bool
 		}
 	}
 
-	if (code != 200 || (cancel && *cancel)) {
+	if (code != 200 || (cancel && cancel->IsCancelled())) {
 		return false;
 	}
 
@@ -113,13 +113,20 @@ static bool LoadRemoteFileList(const Path &url, std::string_view userAgent, bool
 PathBrowser::~PathBrowser() {
 	{
 		std::unique_lock<std::mutex> guard(pendingLock_);
-		pendingCancel_ = true;
+		CancelPending();
 		pendingStop_ = true;
 		pendingCond_.notify_all();
 	}
 	if (pendingThread_.joinable()) {
 		pendingThread_.join();
 	}
+}
+
+// Under pendingLock_.
+void PathBrowser::CancelPending() {
+	pendingCancel_ = true;
+	if (loadCancel_)
+		loadCancel_->Cancel();
 }
 
 void PathBrowser::SetPath(const Path &path) {
@@ -138,7 +145,7 @@ void PathBrowser::RestrictToRoot(const Path &root) {
 void PathBrowser::HandlePath() {
 	if (!path_.empty() && path_.ToString()[0] == '!') {
 		if (pendingActive_) {
-			pendingCancel_ = true;
+			CancelPending();
 			pendingPath_.clear();
 		}
 		ready_ = true;
@@ -173,10 +180,15 @@ void PathBrowser::HandlePath() {
 			lastPath = pendingPath_;
 			if (lastPath.Type() == PathType::HTTP) {
 				std::string userAgentCopy = userAgent_;
+				std::shared_ptr<net::CancelToken> cancel = std::make_shared<net::CancelToken>();
+				if (pendingCancel_)
+					cancel->Cancel();
+				loadCancel_ = cancel;
 				guard.unlock();
 				results.clear();
-				bool tempSuccess = LoadRemoteFileList(lastPath, userAgentCopy, &pendingCancel_, results);
+				bool tempSuccess = LoadRemoteFileList(lastPath, userAgentCopy, cancel.get(), results);
 				guard.lock();
+				loadCancel_.reset();
 				success_ = tempSuccess;
 			} else if (lastPath.empty()) {
 				results.clear();
@@ -204,9 +216,9 @@ void PathBrowser::HandlePath() {
 	});
 }
 
-bool PathBrowser::GetListing(std::vector<File::FileInfo> &fileInfo, const char *extensionFilter, bool *cancel) {
+bool PathBrowser::GetListing(std::vector<File::FileInfo> &fileInfo, const char *extensionFilter, const net::CancelToken *cancel) {
 	std::unique_lock<std::mutex> guard(pendingLock_);
-	while (!ready_ && (!cancel || !*cancel)) {
+	while (!ready_ && (!cancel || !cancel->IsCancelled())) {
 		// In case cancel changes, just sleep. TODO: Replace with condition variable.
 		guard.unlock();
 		sleep_ms(50, "pathbrowser-poll");

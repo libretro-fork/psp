@@ -69,6 +69,8 @@ bool PSP_InitStart(const CoreParameter &coreParam);
 // Check the return value of this - if Booting, keep calling.
 // If Complete or Failed, handle as appropriate, and stop calling.
 BootState PSP_InitUpdate(std::string *error_string);
+// After PSP_InitStart: blocks until the loader thread is done (it never sleeps), then finishes.
+BootState PSP_InitWait(std::string *error_string);
 
 // Blocking wrapper around the two above functions, used for convenience in a couple of places.
 // Should be avoided/removed eventually.

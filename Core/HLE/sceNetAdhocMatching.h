@@ -35,6 +35,8 @@ int NetAdhocMatching_Term();
 
 void DoNetAdhocMatchingInited(PointerWrap &p);
 void DoNetAdhocMatchingThreads(PointerWrap &p);
+// present: the state has the tick's event id (sceNetAdhoc section 10 and up).
+void DoNetAdhocMatchingTick(PointerWrap &p, bool present);
 void ZeroNetAdhocMatchingThreads();
 void SaveNetAdhocMatchingInited();
 void RestoreNetAdhocMatchingInited();
