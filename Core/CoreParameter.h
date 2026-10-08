@@ -94,7 +94,6 @@ struct CoreParameter {
 	// permanently slowed down.
 	int debuggerFpsLimit = 0;
 
-	bool updateRecent = true;
 
 	// Freeze-frame. For nvidia perfhud profiling. Developers only.
 	bool freezeNext = false;

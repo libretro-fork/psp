@@ -13,7 +13,6 @@
 #include <set>
 
 #include "Common/CommonTypes.h"
-#include "Common/UI/IconCache.h"  // for ICON_MAX_AGE_DEFAULT
 #include "Core/Loaders.h"  // for IdentifiedFileType
 
 class Path;
@@ -64,15 +63,11 @@ bool WarnUserIfHardcoreModeActive(bool isSaveStateAction, std::string_view messa
 // Returns the length of the string. If (size_t)-1, there's no message.
 size_t GetRichPresenceMessage(char *buffer, size_t bufSize);
 
-// Returns true if the user has unsaved RAIntegration changes. Should prompt the user to be sure they want to exit.
-bool RAIntegrationDirty();
-
 // The new API is so much nicer that we can use it directly instead of wrapping it. So let's expose the client.
 // Will of course return nullptr if not active.
 rc_client_t *GetClient();
 
 void Initialize();
-void InitializeRAIntegration(void *windowHandle);  // This must be call after the main window exists.
 void UpdateSettings();
 
 bool LoginProblems(std::string *errorString);
@@ -82,8 +77,6 @@ bool HasToken();
 /// With waitForRequests, a client with requests in flight is kept alive until they complete (see Idle()).
 /// Pass false only when pending requests are about to be cancelled, as at app exit.
 bool Shutdown(bool waitForRequests = true);
-
-void DownloadImageIfMissing(std::string_view url, double maxAge = ICON_MAX_AGE_DEFAULT);
 
 /// Called once a frame at vsync time on the CPU thread, during gameplay.
 void FrameUpdate();

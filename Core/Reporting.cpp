@@ -133,7 +133,6 @@ namespace Reporting
 	static int CalculateCRCThread() {
 		SetCurrentThreadName("ReportCRC");
 
-		AndroidJNIThreadContext jniContext;
 
 		IdentifiedFileType type;
 

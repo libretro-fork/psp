@@ -2,8 +2,6 @@
 
 These rules apply to this repository by default.
 
-Ignore the folder ai_instructions in the root directory, it's old stuff from contributors.
-
 ## Detailed guides
 
 The rules below are the short version. These docs hold the detail, look them up when the task calls
@@ -11,7 +9,7 @@ for it:
 
 | Doc | When you need it |
 |---|---|
-| [docs/building.md](docs/building.md) | Build commands for every target (VS/MSBuild, CMake, UWP, legacy Android NDK, libretro), unit tests, pspautotests |
+| [docs/building.md](docs/building.md) | Build commands for the libretro core and the headless tools, unit tests, pspautotests |
 | [docs/debugging.md](docs/debugging.md) | Driving the WebSocket debugger and PPSSPPHeadless from a script, measuring a commercial game with headless, comparing binaries' speed (`Tools/headless_bench.py`), breakpoint reliability per CPU backend, debugging a game that works on hardware |
 | [docs/DebuggerThreading.md](docs/DebuggerThreading.md) | `Core_RunOnCPUThread` / `g_frameMutex` / shutdown-lock rules - required reading before touching debugger code |
 | [docs/HLEModules.md](docs/HLEModules.md) | Adding an HLE module or function, and the seven build files a new source file goes in |
@@ -43,9 +41,8 @@ for it:
    If you're already on a topic branch, just keep working on it.
 5. **Never assume a file's line endings - preserve whatever is on disk.** Which ending a file has
    depends on where it was checked out: on Windows everything is auto-checked-out as CRLF, while a
-   Linux checkout leaves files as they are stored, so the same file (`.vcxproj`, `.vcxproj.filters`,
-   `android/jni/Android.mk`, `libretro/Makefile.common`, this file, much of the source) is CRLF in one
-   working copy and LF in another. Don't hardcode either, and don't "fix" a file's endings to match
+   Linux checkout leaves files as they are stored, so the same file (`libretro/Makefile.common`, this
+   file, much of the source) is CRLF in one working copy and LF in another. Don't hardcode either, and don't "fix" a file's endings to match
    what a doc claims. If you patch one with a script, read *and* write with `newline=''`, which keeps
    whatever was there; reading with Python's default universal-newline translation and writing with
    `newline=''` silently converts the whole file, turning a two-line addition into a 5000-line diff.
@@ -102,42 +99,23 @@ for it:
 
 ## Build and validation
 
-- Linux/Mac: `./b.sh --debug` for a full configure+build; after that, `cd build ; make -j32; cd ..`.
-- Windows: always build through `Windows/PPSSPP.sln`, even if a stray CMake-generated `build/` directory
-  exists at the repo root. Drive it with `MSBuild.exe` (found via `vswhere.exe`) rather than the GUI:
-
-```powershell
-$installPath = & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-$msbuild = "$installPath\MSBuild\Current\Bin\MSBuild.exe"
-& $msbuild "Windows\PPSSPP.sln" /t:UnitTest /p:Configuration=Debug /p:Platform=<platform> /m
-```
-
-- **`<platform>` is whatever the machine is - look it up, don't assume.** It is `ARM64` or `x64`, and
-  the build lands in `Windows\<platform>\<configuration>\` to match, so building one and running the
-  other is easy to do without noticing. On Windows-on-ARM an x64 build runs anyway, under emulation,
-  which is what makes it easy to miss: it works, but it is slower than the native build, it is not
-  the code ARM users get, and any benchmark from it measures the emulator. Get the host from
-  `python -c "import platform; print(platform.machine())"`, not `$PROCESSOR_ARCHITECTURE`, which
-  describes the *shell* and says `AMD64` from an emulated one. The binaries say which they are too -
-  `UnitTest.exe` prints an `ABI:` line at startup.
-- Kill leftover `PPSSPPHeadless.exe`/`PPSSPP*.exe` instances before building - one holding the exe makes
-  the link fail with `LNK1168`, which looks like a build problem and isn't.
-- **A stale binary lies consistently.** After a `git stash` cycle that touched a header, do a
-  `/t:Rebuild`; when bisecting a behavioural change, confirm the binary actually changed before you
-  believe the result.
+- The libretro core: `make -C libretro -j32` (see `libretro/Makefile` for `platform=`), or
+  `./b.sh --libretro`.
+- The headless tools: `./b.sh --headless --unittest PPSSPPHeadless PPSSPPUnitTest`; after that,
+  `cd build ; make -j32; cd ..`.
+- **A stale binary lies consistently.** The libretro Makefile doesn't track header dependencies, so
+  after a header change (or a `git stash` cycle that touched one) build it clean; when bisecting a
+  behavioural change, confirm the binary actually changed before you believe the result.
 - **If a savestate fails to load, first suspect the branch, not the loader.** Either your branch is
   behind the build that made the state (rebase it on `origin/master` and rebuild), or the state was
   made on a branch that hasn't been merged yet. Only once you've ruled out both is it a savestate
   compatibility bug.
 
-UWP, the legacy Android NDK build and the libretro core have their own build systems.
-
 ## Testing
 
 After a chunk of work (not after every edit), run both suites:
 
-- C++ unit tests: build the `UnitTest` project and run `Windows/<platform>/Debug/UnitTest.exe all`
-  (Linux/Mac: configure with `-DUNITTEST=ON`, run `build/PPSSPPUnitTest all`). Tests are listed in
+- C++ unit tests: configure with `-DUNITTEST=ON` and run `build/PPSSPPUnitTest all`. Tests are listed in
   `availableTests` in `unittest/UnitTest.cpp`; pass names instead of `all` to run a subset.
 - pspautotests (HLE coverage) - run them **exactly the way CI does**:
 
@@ -175,26 +153,18 @@ took minutes with a Debug build, software rendering and a 300MB log, and about a
 check that a game renders, `--screenshot-save=FILE.png` beats grepping the log. (pspautotests through
 `test.py` are different: they have their own per-test timeouts and use `--graphics=software` like CI.)
 
-New unit tests are added to `availableTests`; large ones go in their own file in `unittest/`, which has
-to be listed in **three** build files, not two: `CMakeLists.txt`, `unittest/UnitTests.vcxproj` (and its
-`.filters`), and `android/jni/Android.mk`, which builds a unit test executable of its own. Miss the last
-one and it builds everywhere you can easily try it, and fails on Android CI.
+New unit tests are added to `availableTests`; large ones go in their own file in `unittest/`, listed in
+`CMakeLists.txt`.
 
 ## Multiplatform considerations
 
-The emulator has multiple platform-specific entry points. Some of these will be merged or removed in the future, but are all
-still there. To verify that a change works, technically we need to compile for all these systems, but in practice we'll
-just compile locally and test the platform we are currently on, and let CI handle the cross platform considerations.
+The libretro core is the frontend; the headless tools are the test and debugging hosts. The core
+builds for many platforms through `libretro/Makefile` and `libretro/Makefile.common`, so compile for
+more than the one you're on, and let CI handle the rest.
 
-System_-prefixed wrapper functions implement kind of a platform wrapper for some functionality, and are implemented in
-the following list of files for each system. If we change one, we need to change them all.
-
-Windows/main.cpp
-ios/main.cpp
-SDL/SDLMain.cpp
-UWP/PPSSPP_UWPMain.cpp
-android/jni/app-android.cpp
-libretro/libretro.cpp
+System_-prefixed wrapper functions implement a platform wrapper for some functionality, and are
+implemented in `libretro/libretro.cpp`, `headless/Headless.cpp` and `unittest/UnitTest.cpp`. If we
+change one, we need to change them all.
 
 ## Reverse-engineering the firmware
 
@@ -216,8 +186,7 @@ Two things to know before trusting what you read there:
 ## Command-line parsing
 
 All command-line parsing for both the main app and headless builds belongs in `Core/CmdLine.cpp` /
-`Core/CmdLine.h` (`CommandLineOptions`), not in the platform entry points (`Windows/main.cpp`,
-`headless/Headless.cpp`, `UI/NativeApp.cpp`, etc.). Don't re-parse `argv` manually in those files - add
+`Core/CmdLine.h` (`CommandLineOptions`), not in `headless/Headless.cpp`. Don't re-parse `argv` manually in those files - add
 a field to `CommandLineOptions`, and push it into `g_Config` from `ApplyToConfig()` so every platform
 gets it for free. How to declare one: [docs/command-line.md](docs/command-line.md).
 
@@ -246,10 +215,9 @@ HLE module implementations live in `Core/HLE/sce<ModuleName>.cpp` / `.h`, as a `
 calls are append-only - see Core Safety Checks above, which is what breaks old savestates silently
 if ignored.
 
-Also: a new `.cpp`/`.c` file has to be added to **seven** build files (CMake, Core.vcxproj + filters,
-the two UWP projects, `android/jni/Android.mk`, `libretro/Makefile.common`); headers to the first five.
-Full details, the format-string legend and the UWP build command are in
-[docs/HLEModules.md](docs/HLEModules.md).
+Also: a new `.cpp`/`.c` file has to be added to both build files (the CMake lists and
+`libretro/Makefile.common`); headers to the CMake lists. Full details and the format-string legend are
+in [docs/HLEModules.md](docs/HLEModules.md).
 
 ## Translated UI strings (assets/lang)
 
@@ -264,8 +232,8 @@ translating yourself and let `Tools/langtool` do the file surgery. The workflow 
 ## Debugging
 
 PPSSPP has a JSON/WebSocket debugger and automation API (read/write memory, breakpoints, stepping, GPU
-state, input injection, log tailing), served at `/debugger` on the Remote ISO port and enabled with
-`--debugger=PORT` on both the application and headless builds. `Tools/wsdbg/` is a CLI client for it.
+state, input injection, log tailing), served at `/debugger` and enabled with `--debugger=PORT` on the
+headless build. `Tools/wsdbg/` is a CLI client for it.
 
 Read [docs/WebSocketDebugger.md](docs/WebSocketDebugger.md) before changing the interface, and update
 it when you add a command.

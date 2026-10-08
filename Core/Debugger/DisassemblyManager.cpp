@@ -997,7 +997,6 @@ bool GetDisasmAddressText(u32 address, char *dest, size_t bufSize, bool abbrevia
 
 // Utilify function from the old debugger.
 std::string DisassembleRange(u32 start, u32 size, bool displaySymbols, MIPSDebugInterface *debugger) {
-	CoreShutdownLock coreLock = Core_LockAgainstShutdown();
 	std::string result;
 
 	// gather all branch targets without labels

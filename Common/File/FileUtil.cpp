@@ -33,7 +33,7 @@
 
 #include "ppsspp_config.h"
 
-#include "android/jni/app-android.h"
+#include "Common/File/AndroidStorage.h"
 
 #include <cstring>
 #include <ctime>
@@ -58,7 +58,6 @@
 #include <direct.h>		// getcwd
 #if PPSSPP_PLATFORM(UWP)
 #include <fileapifromapp.h>
-#include "UWP/UWPHelpers/StorageManager.h"
 #endif
 #else
 #include <sys/param.h>
@@ -1168,9 +1167,7 @@ bool OpenFileInEditor(const Path &fileName) {
 	}
 
 #if PPSSPP_PLATFORM(WINDOWS)
-#if PPSSPP_PLATFORM(UWP)
-	OpenFile(fileName.ToString());
-#else
+#if !PPSSPP_PLATFORM(UWP)
 	ShellExecuteW(nullptr, L"open", fileName.ToWString().c_str(), nullptr, nullptr, SW_SHOW);
 #endif
 #elif !defined(MOBILE_DEVICE)

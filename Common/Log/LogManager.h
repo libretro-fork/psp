@@ -47,7 +47,6 @@ enum class LogOutput {
 	DebugString = (1 << 1),
 	RingBuffer = (1 << 2),
 	File = (1 << 3),
-	WinConsole = (1 << 4),
 	Printf = (1 << 5),
 	ExternalCallback = (1 << 6),
 };
@@ -81,8 +80,6 @@ private:
 };
 
 class Section;
-class ConsoleListener;
-
 typedef void (*LogCallback)(const LogMessage &message, void *userdata);
 extern bool *g_bLogEnabledSetting;
 
@@ -145,11 +142,6 @@ public:
 		return g_log[(size_t)type].level;
 	}
 
-#if PPSSPP_PLATFORM(WINDOWS)
-	ConsoleListener *GetConsoleListener() const {
-		return consoleLog_;
-	}
-#endif
 
 	const RingbufferLog &GetRingbuffer() const {
 		return ringLog_;
@@ -201,9 +193,6 @@ private:
 	bool initialized_ = false;
 	bool channelsChangedByDebugger_ = false;
 
-#if PPSSPP_PLATFORM(WINDOWS)
-	ConsoleListener *consoleLog_ = nullptr;
-#endif
 	// Stdio logging
 	void StdioLog(const LogMessage &message);
 	std::mutex stdioLock_;

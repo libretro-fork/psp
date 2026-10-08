@@ -1230,7 +1230,6 @@ void PSPSaveDialog::StartIOThread() {
 	ioThread = std::thread([this]() {
 		SetCurrentThreadName("SaveIO");
 
-		AndroidJNIThreadContext jniContext;
 		this->ExecuteIOAction();
 	});
 }

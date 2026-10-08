@@ -13,18 +13,12 @@
 [submodule "ext/SPIRV-Cross"]
 	path = ext/SPIRV-Cross
 	url = https://github.com/KhronosGroup/SPIRV-Cross.git
-[submodule "ext/discord-rpc"]
-	path = ext/discord-rpc
-	url = https://github.com/discordapp/discord-rpc.git
 [submodule "ext/rapidjson"]
 	path = ext/rapidjson
 	url = https://github.com/Tencent/rapidjson.git
 [submodule "ext/miniupnp"]
 	path = ext/miniupnp
 	url = https://github.com/miniupnp/miniupnp.git
-[submodule "SDL/macOS"]
-	path = SDL/macOS
-	url = https://github.com/hrydgard/ppsspp-mac-sdl
 [submodule "ppsspp-debugger"]
 	path = assets/debugger
 	url = https://github.com/unknownbrackets/ppsspp-debugger.git
@@ -41,18 +35,12 @@
 [submodule "ext/OpenXR-SDK"]
 	path = ext/OpenXR-SDK
 	url = https://github.com/KhronosGroup/OpenXR-SDK.git
-[submodule "ios/MoltenVK"]
-	path = ios/MoltenVK
-	url = https://github.com/hrydgard/ppsspp-moltenvk.git
 [submodule "ext/lua"]
 	path = ext/lua
 	url = https://github.com/hrydgard/ppsspp-lua.git
 [submodule "ext/freetype"]
 	path = ext/freetype
 	url = https://github.com/hrydgard/freetype.git
-[submodule "ext/nanosvg"]
-	path = ext/nanosvg
-	url = https://github.com/hrydgard/nanosvg.git
 [submodule "frametests"]
 	path = frametests
 	url = https://github.com/hrydgard/ppsspp-frametest-ci.git

@@ -587,7 +587,6 @@ static void __IoAsyncEndCallback(SceUID threadID, SceUID prevCallbackId) {
 static void __IoManagerThread() {
 	SetCurrentThreadName("IO");
 	INFO_LOG(Log::sceIo, "Entering __IoManagerThread");
-	AndroidJNIThreadContext jniContext;
 	while (ioManagerThreadEnabled) {
 		ioManager.RunEventsUntil(CoreTiming::GetTicks(currentMIPS) + msToCycles(1000));
 	}

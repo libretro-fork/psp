@@ -33,10 +33,6 @@
 #include <io.h>
 #include "Common/CommonWindows.h"
 #endif
-#if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP) && !defined(__LIBRETRO__)
-#define HAVE_CONSOLE_LISTENER
-#include "Common/Log/ConsoleListener.h"
-#endif
 
 #include "Common/TimeUtil.h"
 #include "Common/Thread/ThreadUtil.h"
@@ -182,22 +178,12 @@ LogManager::LogManager() {
 	if (IsDebuggerPresent()) {
 		outputs_ |= LogOutput::DebugString;
 	}
-#ifdef HAVE_CONSOLE_LISTENER
-	if (!consoleLog_) {
-		consoleLog_ = new ConsoleListener();
-	}
-	outputs_ |= LogOutput::WinConsole;
-#endif
 #endif
 }
 
 LogManager::~LogManager() {
 	Shutdown();
 
-#ifdef HAVE_CONSOLE_LISTENER
-	delete consoleLog_;
-	consoleLog_ = nullptr;
-#endif
 }
 
 void LogManager::SetFileLogPath(const Path &filename) {
@@ -359,13 +345,6 @@ void LogManager::LogLine(LogLevel level, Log type, const char *file, int line, c
 		PrintfLog(message);
 	}
 
-#ifdef HAVE_CONSOLE_LISTENER
-	if (outputs_ & LogOutput::WinConsole) {
-		if (consoleLog_) {
-			consoleLog_->Log(message);
-		}
-	}
-#endif
 
 	if (outputs_ & LogOutput::ExternalCallback) {
 		// Held across the dispatch on purpose: RemoveExternalLogCallback() takes the same lock, so a

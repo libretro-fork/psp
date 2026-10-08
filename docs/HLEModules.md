@@ -26,24 +26,6 @@ small examples to copy from). A module is a `const HLEFunction <name>[]` table o
   savestate after such a change resolves those later entries to the *wrong* function. Adding an all-new table (a new
   module, including a new alias-module `..._driver[]` variant of an existing one) is unaffected, since no old
   savestate could reference indices into a table that didn't exist yet - only *existing* tables need this care.
-- Remember to add any new `.cpp`/`.c` file to **seven** places: `Core/CMakeLists.txt`, `Core/Core.vcxproj`,
-  `Core/Core.vcxproj.filters`, `UWP/CoreUWP/CoreUWP.vcxproj`, `UWP/CoreUWP/CoreUWP.vcxproj.filters`,
-  `android/jni/Android.mk`, and `libretro/Makefile.common`. New `.h` files need the first five (everything except
-  `Android.mk`/`Makefile.common`, which are plain compiled-source lists so headers don't go in them). Double check
-  each by hand against how an existing neighboring file (e.g. `sceVaudio.cpp`) is listed. Forgetting the UWP entries
-  is easy to miss - the CMake and MSBuild (`Core.vcxproj`) builds both succeed silently, and it only surfaces as a
-  UWP-only build failure (this has happened for real: `Core/MIPS/InterpreterDispatch.cpp` landed without its UWP
-  entries, and the omission wasn't caught until someone actually built the UWP project). Note: New files in the
-  unittest project have to be updated in the unittest part in android/jni/Android.mk.
-
-  Both the CMakeLists.txt change (via a Linux/Mac build) and the `Core.vcxproj`/UWP changes (via MSBuild on Windows)
-  can actually be build-tested, not just eyeballed - see [Building and testing](building.md) for the main Windows solution,
-  and for UWP specifically:
-  ```powershell
-  $installPath = & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-  $msbuild = "$installPath\MSBuild\Current\Bin\MSBuild.exe"
-  & $msbuild "UWP\PPSSPP_UWP.sln" /t:CoreUWP /p:Configuration=Debug /p:Platform=x64 /m
-  ```
-  (only `android/jni/Android.mk` and `libretro/Makefile.common` genuinely can't be build-tested here - see
-  [Building and testing](building.md) for what verification is possible for those.)
-
+- Remember to add any new `.cpp`/`.c` file to both `Core/CMakeLists.txt` and `libretro/Makefile.common`, and
+  new `.h` files to `Core/CMakeLists.txt`. Double check each against how an existing neighboring file (e.g.
+  `sceVaudio.cpp`) is listed, and build both the CMake and the Makefile build.

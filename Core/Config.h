@@ -463,7 +463,7 @@ public:
 	float fTiltAnalogDeadzoneRadius;
 	float fTiltInverseDeadzone;  // An inverse deadzone for the output, counteracting excessive deadzones applied by games. See #17483.
 	bool bTiltCircularDeadzone;
-	// Type of tilt input currently selected: Defined in TiltEventProcessor.h
+	// Type of tilt input currently selected.
 	// 0 - no tilt, 1 - analog stick, 2 - D-Pad, 3 - Action Buttons (Tri, Cross, Square, Circle)
 	int iTiltInputType;
 	bool bTiltInputEnabled;

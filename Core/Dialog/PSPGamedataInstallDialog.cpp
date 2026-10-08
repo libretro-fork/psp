@@ -28,7 +28,6 @@
 #include "Core/FileSystems/MetaFileSystem.h"
 #include "Core/Dialog/PSPGamedataInstallDialog.h"
 #include "Common/Data/Text/I18n.h"
-#include "UI/OnScreenDisplay.h"
 
 std::string saveBasePath = "ms0:/PSP/SAVEDATA/";
 

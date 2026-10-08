@@ -29,12 +29,7 @@
 #include "Common/System/System.h"
 
 #include "Common/CommonWindows.h"
-#if PPSSPP_PLATFORM(WINDOWS)
-#if PPSSPP_API(ANY_GL)
-#include "Windows/GPU/WindowsGLContext.h"
-#endif
-#include "Windows/GPU/D3D11Context.h"
-#else
+#if !PPSSPP_PLATFORM(WINDOWS)
 #include <csignal>
 #endif
 #include "Common/CPUDetect.h"
@@ -292,24 +287,10 @@ static GraphicsContext *CreateGraphicsContext(GPUCore gpuCore, std::string **dev
 	default:
 		return nullptr;
 	}
-#elif PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
-	switch (gpuCore) {
-#if PPSSPP_API(ANY_GL)
-	case GPUCORE_GLES:
-		*deviceSetting = nullptr;
-		return new WindowsGLContext();
-#endif
-	case GPUCORE_DIRECTX11:
-		*deviceSetting = &g_Config.sD3D11Device;
-		return new D3D11Context();
-	case GPUCORE_SOFTWARE:
-	default:
-		return nullptr;
-	}
 #elif defined(HEADLESS_NO_SDL)
-	// A HEADLESS_CROSS build (see CMakeLists.txt): the loongarch64 and riscv64 cross-compilation
-	// sysroots have no SDL3, and a build for another architecture than the host's has no matching
-	// one either. These still run fine with --graphics=software, which needs no graphics context.
+	// No SDL3 (see CMakeLists.txt): the loongarch64 and riscv64 cross-compilation sysroots, a build
+	// for another architecture than the host's, and Windows. These run fine with --graphics=software,
+	// which needs no graphics context.
 	*deviceSetting = nullptr;
 	return nullptr;
 #elif PPSSPP_PLATFORM(ANDROID)
@@ -318,7 +299,7 @@ static GraphicsContext *CreateGraphicsContext(GPUCore gpuCore, std::string **dev
 	*deviceSetting = nullptr;
 	return nullptr;
 #else
-#error The Headless build is not supported on this platform. Please use SDL (Mac/Linux) or Windows (non-UWP).
+#error The Headless build is not supported on this platform. Please use SDL (Mac/Linux) or HEADLESS_NO_SDL.
 	return nullptr;
 #endif
 }
@@ -1182,7 +1163,7 @@ int main(int argc, const char* argv[]) {
 			fprintf(stderr, "--debugger: breaking at the entry point, waiting for a client to "
 				"resume the CPU (cpu.resume). Use --debugger-run to start running instead.\n");
 		}
-		StartWebServer(WebServerFlags::DEBUGGER);
+		StartWebServer();
 		// We break at start and wait for a debugger to drive us, so coming up without one just
 		// hangs until the timeout. Better to say why and bail - see WebServerSetRequireExactPort().
 		if (!WebServerWaitForStartup()) {

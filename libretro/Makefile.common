@@ -241,16 +241,6 @@ SOURCES_CXX += \
 	$(EXTDIR)/basis_universal/basisu_transcoder.cpp
 
 SOURCES_CXX += \
-	$(EXTDIR)/imgui/imgui.cpp \
-	$(EXTDIR)/imgui/imgui_demo.cpp \
-	$(EXTDIR)/imgui/imgui_draw.cpp \
-	$(EXTDIR)/imgui/imgui_extras.cpp \
-	$(EXTDIR)/imgui/imgui_impl_thin3d.cpp \
-	$(EXTDIR)/imgui/imgui_impl_platform.cpp \
-	$(EXTDIR)/imgui/imgui_tables.cpp \
-	$(EXTDIR)/imgui/imgui_widgets.cpp
-
-SOURCES_CXX += \
 	$(COMMONDIR)/Crypto/md5.cpp \
 	$(COMMONDIR)/Crypto/sha1.cpp \
 	$(COMMONDIR)/Crypto/sha256.cpp
@@ -330,7 +320,6 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Net/Resolve.cpp \
 	$(COMMONDIR)/Net/Sinks.cpp \
 	$(COMMONDIR)/Net/URL.cpp \
-	$(COMMONDIR)/Render/ManagedTexture.cpp \
 	$(COMMONDIR)/Render/DrawBuffer.cpp \
 	$(COMMONDIR)/Render/TextureAtlas.cpp \
 	$(COMMONDIR)/Serialize/Serializer.cpp \
@@ -338,7 +327,6 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Thread/ParallelLoop.cpp \
 	$(COMMONDIR)/Thread/ParkingLot.cpp \
 	$(COMMONDIR)/Thread/ThreadManager.cpp \
-	$(COMMONDIR)/UI/IconCache.cpp \
 	$(COMMONDIR)/System/Display.cpp \
 	$(COMMONDIR)/System/Request.cpp \
 	$(COMMONDIR)/System/OSD.cpp \
@@ -347,7 +335,6 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Buffer.cpp \
 	$(COMMONDIR)/ExceptionHandlerSetup.cpp \
 	$(COMMONDIR)/FakeCPUDetect.cpp \
-	$(COMMONDIR)/GhidraClient.cpp \
 	$(COMMONDIR)/Log.cpp \
 	$(COMMONDIR)/Log/LogManager.cpp \
 	$(COMMONDIR)/OSVersion.cpp \
@@ -487,8 +474,7 @@ SOURCES_CXX += $(COMMONDIR)/MemArenaDarwin.cpp \
 	       $(EXTDIR)/glslang/glslang/OSDependent/Unix/ossource.cpp
 else ifeq ($(PLATFORM_EXT), android)
 SOURCES_CXX += $(COMMONDIR)/MemArenaAndroid.cpp \
-	       $(EXTDIR)/glslang/glslang/OSDependent/Unix/ossource.cpp \
-		   $(COMMONDIR)/Render/Text/draw_text_android.cpp
+	       $(EXTDIR)/glslang/glslang/OSDependent/Unix/ossource.cpp
 else
 COREFLAGS += -DVK_USE_PLATFORM_XLIB_KHR
 SOURCES_CXX += $(COMMONDIR)/MemArenaPosix.cpp \
@@ -526,7 +512,6 @@ SOURCES_CXX += \
 	       $(COREDIR)/AVIDump.cpp \
 	       $(COREDIR)/Config.cpp \
 	       $(COREDIR)/ConfigSettings.cpp \
-	       $(COREDIR)/ControlMapper.cpp \
 	       $(COREDIR)/Core.cpp \
 	       $(COREDIR)/WaveFile.cpp \
 	       $(COREDIR)/KeyMap.cpp \
@@ -721,12 +706,10 @@ SOURCES_CXX += \
 	       $(COREDIR)/System.cpp \
 	       $(COREDIR)/Util/AtracTrack.cpp \
 	       $(COREDIR)/Util/BlockAllocator.cpp \
-	       $(COREDIR)/Util/MemStick.cpp \
 	       $(COREDIR)/Util/PPGeDraw.cpp \
 	       $(COREDIR)/Util/KL4E.cpp \
 	       $(COREDIR)/Util/PSARUnpack.cpp \
 	       $(COREDIR)/Util/PkgUnpack.cpp \
-	       $(COREDIR)/Util/RecentFiles.cpp \
 	       $(COREDIR)/Util/AudioFormat.cpp \
 	       $(COREDIR)/Util/PathUtil.cpp \
 	       $(COREDIR)/Util/PortManager.cpp \

@@ -28,8 +28,6 @@ set(GPU_GLES
 )
 
 set(GPU_VULKAN
-	Vulkan/DebugVisVulkan.cpp
-	Vulkan/DebugVisVulkan.h
 	Vulkan/DrawEngineVulkan.cpp
 	Vulkan/DrawEngineVulkan.h
 	Vulkan/FramebufferManagerVulkan.cpp

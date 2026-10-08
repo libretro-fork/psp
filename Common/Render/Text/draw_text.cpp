@@ -16,7 +16,6 @@
 #include "Common/Render/Text/draw_text.h"
 #include "Common/Render/Text/draw_text_win.h"
 #include "Common/Render/Text/draw_text_cocoa.h"
-#include "Common/Render/Text/draw_text_android.h"
 #include "Common/Render/Text/draw_text_sdl.h"
 #include "Common/Render/Text/draw_text_uwp.h"
 #include "Common/StringUtils.h"
@@ -311,8 +310,6 @@ TextDrawer *TextDrawer::Create(Draw::DrawContext *draw) {
 	}
 #elif PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
 	drawer = new TextDrawerCocoa(draw);
-#elif PPSSPP_PLATFORM(ANDROID)
-	drawer = new TextDrawerAndroid(draw);
 #elif USE_SDL3_TTF
 	drawer = new TextDrawerSDL(draw);
 #endif

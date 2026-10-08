@@ -38,7 +38,6 @@
 #include "Core/System.h"
 #include "Core/ELF/PBPReader.h"
 #include "Core/ELF/ParamSFO.h"
-#include "Core/Util/GameManager.h"
 
 // TODO: This is just part of a VolDescriptor, see ISOFileSystem.cpp.
 struct PVD {

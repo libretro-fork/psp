@@ -16,29 +16,6 @@ const char *GetCurrentThreadName();
 // exactly what it is is badly specified and not useful for anything.
 int GetCurrentThreadIdForDebug();
 
-typedef void (*AttachDetachFunc)();
-
-void RegisterAttachDetach(AttachDetachFunc attach, AttachDetachFunc detach);
-
-// When you know that a thread potentially will make JNI calls, call this after setting its name.
-void AttachThreadToJNI();
-
-// Call when leaving threads. On Android, calls DetachCurrentThread.
-// Threads that use scoped storage I/O end up attached as JNI threads, and will thus
-// need this in order to follow the rules correctly. Some devices seem to enforce this.
-void DetachThreadFromJNI();
-
-// Utility to call the above two functions.
-class AndroidJNIThreadContext {
-public:
-	AndroidJNIThreadContext() {
-		AttachThreadToJNI();
-	}
-	~AndroidJNIThreadContext() {
-		DetachThreadFromJNI();
-	}
-};
-
 // Helper to detect if a type is std::atomic
 template <typename T>
 struct is_atomic : std::false_type {};

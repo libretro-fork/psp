@@ -23,9 +23,6 @@
 #include "Common/CommonWindows.h"
 #include <ShlObj.h>
 #include <string>
-#if !PPSSPP_PLATFORM(UWP)
-#include "Windows/W32Util/ShellUtil.h"
-#endif
 #endif
 
 #include <mutex>
@@ -75,12 +72,10 @@
 #include "Core/PSPLoaders.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/SaveState.h"
-#include "Core/Util/RecentFiles.h"
 #include "Common/ExceptionHandlerSetup.h"
 #include "GPU/GPUCommon.h"
 #include "GPU/Debugger/Playback.h"
 #include "GPU/Debugger/RecordFormat.h"
-#include "UI/DiscordIntegration.h"
 
 enum CPUThreadState {
 	CPU_THREAD_NOT_RUNNING,
@@ -601,10 +596,6 @@ static bool CPU_Init(FileLoader *fileLoader, IdentifiedFileType type, std::strin
 		return false;
 	}
 
-	if (g_CoreParameter.updateRecent) {
-		g_recentFiles.Add(g_CoreParameter.fileToStart.ToString());
-	}
-
 	// Update things that depend on game-specific config here.
 
 	// Compat settings can override the software renderer, take care of that here.
@@ -618,12 +609,6 @@ static bool CPU_Init(FileLoader *fileLoader, IdentifiedFileType type, std::strin
 }
 
 void CPU_Shutdown(bool success) {
-	// Held across the whole teardown, not just Memory::Shutdown() further down. Everything below
-	// frees state the debugger UIs read from other threads - kernel objects, the symbol map, the
-	// memory map - and this is the lock they take to be sure none of it goes away mid-read. See
-	// Core_LockAgainstShutdown(); it's recursive, so the nested acquire in Memory::Shutdown() is fine.
-	CoreShutdownLock coreLock = Core_LockAgainstShutdown();
-
 	UninstallExceptionHandler();
 
 	GPURecord::Replay_Unload();
@@ -745,7 +730,6 @@ bool PSP_InitStart(const CoreParameter &coreParam) {
 	g_loadingThread = std::thread([errorString]() {
 		SetCurrentThreadName("ExecLoader");
 
-		AndroidJNIThreadContext jniContext;
 
 		NOTICE_LOG(Log::Boot, "PPSSPP %s", PPSSPP_GIT_VERSION);
 

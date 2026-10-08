@@ -28,14 +28,10 @@ set(CommonVR
 set(CommonNonLibretro)
 if(NOT LIBRETRO)
 	list(APPEND CommonNonLibretro
-		File/PathBrowser.cpp
-		File/PathBrowser.h
 		Net/HTTPServer.cpp
 		Net/HTTPServer.h
 		Net/WebsocketServer.cpp
 		Net/WebsocketServer.h
-		Log/ConsoleListener.cpp
-		Log/ConsoleListener.h
 	)
 endif()
 
@@ -262,12 +258,8 @@ add_library(Common STATIC
 	Render/TextureAtlas.h
 	Render/DrawBuffer.cpp
 	Render/DrawBuffer.h
-	Render/ManagedTexture.cpp
-	Render/ManagedTexture.h
 	Render/Text/draw_text.cpp
 	Render/Text/draw_text.h
-	Render/Text/draw_text_android.cpp
-	Render/Text/draw_text_android.h
 	Render/Text/draw_text_win.cpp
 	Render/Text/draw_text_win.h
 	Render/Text/draw_text_uwp.cpp
@@ -292,36 +284,6 @@ add_library(Common STATIC
 	Thread/ThreadUtil.h
 	Thread/ThreadManager.cpp
 	Thread/ThreadManager.h
-	UI/AsyncImageFileView.cpp
-	UI/AsyncImageFileView.h
-	UI/Root.cpp
-	UI/Root.h
-	UI/Screen.cpp
-	UI/Screen.h
-	UI/ScreenManager.cpp
-	UI/ScreenManager.h
-	UI/UI.cpp
-	UI/UI.h
-	UI/Context.cpp
-	UI/Context.h
-	UI/IconCache.cpp
-	UI/IconCache.h
-	UI/UIScreen.cpp
-	UI/UIScreen.h
-	UI/Notice.cpp
-	UI/Notice.h
-	UI/Tween.cpp
-	UI/Tween.h
-	UI/View.cpp
-	UI/View.h
-	UI/ViewGroup.cpp
-	UI/ViewGroup.h
-	UI/ScrollView.cpp
-	UI/ScrollView.h
-	UI/TabHolder.cpp
-	UI/TabHolder.h
-	UI/PopupScreens.cpp
-	UI/PopupScreens.h
 	BitScan.h
 	BitSet.h
 	Buffer.h
@@ -335,8 +297,6 @@ add_library(Common STATIC
 	FakeCPUDetect.cpp
 	ExceptionHandlerSetup.cpp
 	ExceptionHandlerSetup.h
-	GhidraClient.h
-	GhidraClient.cpp
 	Log.h
 	Log.cpp
 	Log/LogManager.cpp
@@ -376,10 +336,6 @@ target_link_libraries(Common Ext::Snappy cpu_features)
 
 if(SDL_LIB_TARGET AND TARGET SDL3::Headers)
 	target_link_libraries(Common SDL3::Headers)
-endif()
-
-if(NOT LIBRETRO)
-	target_link_libraries(Common imgui)
 endif()
 
 if(ARM64)

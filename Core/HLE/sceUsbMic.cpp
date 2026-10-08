@@ -31,14 +31,6 @@
 #include "Core/CoreTiming.h"
 #include "Core/MemMapHelpers.h"
 
-#if defined(_WIN32) && !PPSSPP_PLATFORM(UWP) && !defined(__LIBRETRO__)
-#define HAVE_WIN32_MICROPHONE
-#endif
-
-#ifdef HAVE_WIN32_MICROPHONE
-#include "Common/CommonWindows.h"
-#include "Windows/CaptureDevice.h"
-#endif
 
 int eventMicBlockingResume = -1;
 
@@ -325,10 +317,7 @@ static int sceUsbMicWaitInputEnd() {
 }
 
 int Microphone::startMic(void *param) {
-#ifdef HAVE_WIN32_MICROPHONE
-	if (winMic)
-		winMic->sendMessage({ CAPTUREDEVICE_COMMAND::START, param });
-#elif PPSSPP_PLATFORM(ANDROID)
+#if   PPSSPP_PLATFORM(ANDROID)
 	std::vector<u32> *micParam = static_cast<std::vector<u32>*>(param);
 	int sampleRate = micParam->at(0);
 	int channels = micParam->at(1);
@@ -340,10 +329,7 @@ int Microphone::startMic(void *param) {
 }
 
 int Microphone::stopMic() {
-#ifdef HAVE_WIN32_MICROPHONE
-	if (winMic)
-		winMic->sendMessage({ CAPTUREDEVICE_COMMAND::STOP, nullptr });
-#elif PPSSPP_PLATFORM(ANDROID)
+#if   PPSSPP_PLATFORM(ANDROID)
 	System_MicrophoneCommand("stopRecording");
 #endif
 	micState = 0;
@@ -351,10 +337,7 @@ int Microphone::stopMic() {
 }
 
 bool Microphone::isHaveDevice() {
-#ifdef HAVE_WIN32_MICROPHONE
-	// Only the app creates winMic, headless doesn't.
-	return winMic && winMic->getDeviceCounts() >= 1;
-#elif PPSSPP_PLATFORM(ANDROID)
+#if   PPSSPP_PLATFORM(ANDROID)
 	return System_AudioRecordingIsAvailable();
 #endif
 	return false;
@@ -407,11 +390,6 @@ void Microphone::flushAudioData() {
 }
 
 std::vector<std::string> Microphone::getDeviceList() {
-#ifdef HAVE_WIN32_MICROPHONE
-	if (winMic) {
-		return winMic->getDeviceList();
-	}
-#endif
 	return std::vector<std::string>();
 }
 

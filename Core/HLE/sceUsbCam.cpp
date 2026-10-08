@@ -35,14 +35,6 @@
 #include "ext/jpge/jpgd.h"
 #include "ext/jpge/jpge.h"
 
-#if defined(_WIN32) && !PPSSPP_PLATFORM(UWP) && !defined(__LIBRETRO__)
-#define HAVE_WIN32_CAMERA
-#endif
-
-#ifdef HAVE_WIN32_CAMERA
-#include "Common/CommonWindows.h"
-#include "Windows/CaptureDevice.h"
-#endif
 
 Camera::Config *config;
 
@@ -365,15 +357,7 @@ void Register_sceUsbCam()
 }
 
 std::vector<std::string> Camera::getDeviceList() {
-#ifdef HAVE_WIN32_CAMERA
-	if (winCamera) {
-		return winCamera->getDeviceList();
-	} else {
-		return std::vector<std::string>();
-	}
-#else
 	return System_GetCameraDeviceList();
-#endif
 }
 
 int Camera::startCapture() {
@@ -382,16 +366,7 @@ int Camera::startCapture() {
 	INFO_LOG(Log::HLE, "%s resolution: %dx%d", __FUNCTION__, width, height);
 
 	config->mode = Camera::Mode::Video;
-	#ifdef HAVE_WIN32_CAMERA
-		if (winCamera) {
-			if (winCamera->isShutDown()) {
-				delete winCamera;
-				winCamera = new WindowsCaptureDevice(CAPTUREDEVICE_TYPE::VIDEO);
-			}
-			void* resolution = static_cast<void*>(new std::vector<int>({ width, height }));
-			winCamera->sendMessage({ CAPTUREDEVICE_COMMAND::START, resolution });
-		}
-	#elif PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+	#if   PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
 		char command[40] = {0};
 		snprintf(command, sizeof(command), "startVideo_%dx%d", width, height);
 		System_CameraCommand(command);
@@ -402,11 +377,7 @@ int Camera::startCapture() {
 
 int Camera::stopCapture() {
 	INFO_LOG(Log::HLE, "%s", __FUNCTION__);
-	#ifdef HAVE_WIN32_CAMERA
-		if (winCamera) {
-			winCamera->sendMessage({ CAPTUREDEVICE_COMMAND::STOP, nullptr });
-		}
-	#elif PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
+	#if   PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
 		System_CameraCommand("stopVideo");
 	#else
 		ERROR_LOG(Log::HLE, "%s not implemented", __FUNCTION__);

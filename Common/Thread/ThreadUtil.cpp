@@ -8,8 +8,6 @@
 
 #elif defined(__ANDROID__)
 
-#include "android/jni/app-android.h"
-
 #define TLS_SUPPORTED
 
 #endif
@@ -23,31 +21,6 @@
 #include "Common/Log.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/Data/Encoding/Utf8.h"
-
-AttachDetachFunc g_attach;
-AttachDetachFunc g_detach;
-
-void AttachThreadToJNI() {
-	if (g_attach) {
-		g_attach();
-	} else {
-#if PPSSPP_PLATFORM(ANDROID)
-		// Not relevant on other platforms.
-		ERROR_LOG(Log::System, "Couldn't attach thread - g_attach not set");
-#endif
-	}
-}
-
-void DetachThreadFromJNI() {
-	if (g_detach) {
-		g_detach();
-	}
-}
-
-void RegisterAttachDetach(AttachDetachFunc attach, AttachDetachFunc detach) {
-	g_attach = attach;
-	g_detach = detach;
-}
 
 #if (PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(LINUX)) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE

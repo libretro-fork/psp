@@ -54,7 +54,6 @@
 #include "Core/HW/Display.h"
 #include "Core/Util/PPGeDraw.h"
 #include "Core/RetroAchievements.h"
-#include "Core/ControlMapper.h"
 
 #include "GPU/GPU.h"
 #include "GPU/GPUState.h"
@@ -503,9 +502,6 @@ void hleEnterVblank(u64 userdata, int cyclesLate) {
 
 	// Trigger VBlank interrupt handlers.
 	__TriggerInterrupt(PSP_INTR_IMMEDIATE | PSP_INTR_ONLY_IF_ENABLED | PSP_INTR_ALWAYS_RESCHED, PSP_VBLANK_INTR, PSP_INTR_SUB_ALL);
-
-	// We use the emulation timebase here, for auto movements to be smooth as seen from the game.
-	g_controlMapper.UpdateAutoMovements(CoreTiming::GetGlobalTimeUs() / 1000000.0);
 
 	numVBlanksSinceFlip++;
 

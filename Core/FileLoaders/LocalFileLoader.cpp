@@ -25,7 +25,7 @@
 #include "Core/FileLoaders/LocalFileLoader.h"
 
 #if PPSSPP_PLATFORM(ANDROID)
-#include "android/jni/app-android.h"
+#include "Common/File/AndroidStorage.h"
 #endif
 
 #ifdef _WIN32

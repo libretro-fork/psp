@@ -42,7 +42,6 @@ static void EmuThreadFunc(GraphicsContext *graphicsContext, Application *applica
 
 	g_emuThreadState = EmuThreadState::RUNNING;
 
-	AndroidJNIThreadContext context;
 
 	// This normally calls NativeInitGraphics()
 	if (!application->InitGraphics(graphicsContext)) {

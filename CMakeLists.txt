@@ -131,40 +131,6 @@ if(OPENXR AND NOT ARMV7_DEVICE)
 	message("OpenXR enabled")
 endif()
 
-if(GOLD)
-	add_compile_definitions(GOLD)
-	message("Gold Build")
-	if(IOS_APP_STORE)
-		message("WARNING: Gold build for iOS is deprecated")
-	endif()
-else()
-	message("Non-gold Build")
-endif()
-
-if(USE_IAP)
-	if(GOLD)
-		message(FATAL_ERROR "USE_IAP and GOLD can't be enabled together")
-	endif()
-	if(NOT IOS_APP_STORE)
-		message(FATAL_ERROR "USE_IAP can only be enabled in app store builds")
-	endif()
-	message("USE_IAP for iOS enabled")
-	add_compile_definitions(USE_IAP)
-endif()
-
-if(IOS_APP_STORE)
-	add_compile_definitions(PPSSPP_PLATFORM_IOS_APP_STORE)
-	add_compile_definitions(GLES_SILENCE_DEPRECATION)
-	# Set a global default to not generate schemes for each target.
-	# Makes using XCode sligthly more sane.
-	set(CMAKE_XCODE_GENERATE_SCHEME NO)
-	set(CMAKE_XCODE_SCHEME_ENABLE_GPU_API_VALIDATION FALSE)
-	set(CMAKE_XCODE_SCHEME_ENABLE_GPU_FRAME_CAPTURE_MODE DISABLED)
-	message("iOS App Store build")
-elseif(IOS)
-	message("iOS sideload build")
-endif()
-
 # User-editable options (go into CMakeCache.txt)
 # :: Processors
 option(ARMV7 "Set to ON if targeting an ARMv7 processor" ${ARMV7_DEVICE})
@@ -185,7 +151,7 @@ option(USE_VULKAN_DISPLAY_KHR "Enable or disable full screen display of Vulkan" 
 option(MOBILE_DEVICE "Set to ON when targeting a mobile device" ${MOBILE_DEVICE})
 option(HEADLESS "Set to OFF to not generate the PPSSPPHeadless target" ${HEADLESS})
 # Set by b.sh for the loongarch64/riscv64 cross builds, whose sysroots have no SDL3.
-option(HEADLESS_CROSS "Set to ON for a headless-only cross build (no SDL frontend)" ${HEADLESS_CROSS})
+option(HEADLESS_CROSS "Set to ON for a headless build without SDL" ${HEADLESS_CROSS})
 option(ATLAS_TOOL "Set to OFF to not generate the ATLAS_TOOL target" ${ATLAS_TOOL})
 option(UNITTEST "Set to ON to generate the unittest target" ${UNITTEST})
 option(SIMULATOR "Set to ON when targeting an x86 simulator of an ARM platform" ${SIMULATOR})
@@ -193,7 +159,6 @@ option(LIBRETRO "Set to ON to generate the libretro target" OFF)
 # :: Options
 option(USE_LIBNX "Set to ON to build for Switch(libnx)" OFF)
 option(USE_FFMPEG "Build with FFMPEG support" ON)
-option(USE_DISCORD "Build with Discord support" ON)
 option(USE_MINIUPNPC "Build with miniUPnPc support" ON)
 option(USE_SYSTEM_SNAPPY "Dynamically link against system snappy" ${USE_SYSTEM_SNAPPY})
 option(USE_SYSTEM_FFMPEG "Dynamically link against system FFMPEG" ${USE_SYSTEM_FFMPEG})
@@ -205,8 +170,6 @@ option(USE_ASAN "Use address sanitizer" OFF)
 option(USE_UBSAN "Use undefined behaviour sanitizer" OFF)
 option(USE_CCACHE "Use ccache if detected" ON)
 option(USE_NO_MMAP "Disable mmap usage" OFF)
-option(USE_IAP "IAP enabled" OFF)
-option(GOLD "Gold build" OFF)
 
 if(USE_CCACHE)
 	include(ccache)
@@ -327,7 +290,7 @@ set(SDL_LIB_TARGET "")
 set(SDL_TTF_LIB_TARGET "")
 set(FONTCONFIG_LIB_TARGET "")
 
-if(NOT LIBRETRO AND NOT IOS AND NOT HEADLESS_CROSS AND NOT ANDROID)
+if(NOT LIBRETRO AND NOT IOS AND NOT HEADLESS_CROSS AND NOT ANDROID AND NOT WIN32)
 	find_package(SDL3 QUIET)
 	if(NOT SDL3_FOUND)
 		if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (EXISTS "/usr/bin/apt" OR EXISTS "/usr/bin/apt-get" OR EXISTS "/etc/debian_version"))
@@ -701,187 +664,13 @@ if(USE_FFMPEG)
 	endif()
 endif(USE_FFMPEG)
 
-set(targetExtra)
-set(targetExtraLibs)
-
-if(IOS OR MACOSX)
-	list(APPEND targetExtra
-		Common/Render/Text/draw_text_cocoa.mm
-		Common/Render/Text/draw_text_cocoa.h)
-endif()
-
-if(ANDROID)
-	list(APPEND AndroidJniSource
-		android/jni/app-android.cpp
-		android/jni/AndroidAudio.cpp
-		android/jni/AndroidAudio.h
-		android/jni/OpenSLContext.cpp
-		android/jni/OpenSLContext.h
-	)
-	# No target
-elseif(IOS AND NOT LIBRETRO)
-	list(APPEND targetExtra
-		ios/main.mm
-		ios/AppDelegate.mm
-		ios/AppDelegate.h
-		ios/SceneDelegate.mm
-		ios/SceneDelegate.h
-		ios/Controls.h
-		ios/Controls.mm
-		ios/ViewControllerCommon.h
-		ios/ViewControllerCommon.mm
-		ios/ViewController.mm
-		ios/ViewController.h
-		ios/ViewControllerMetal.mm
-		ios/ViewControllerMetal.h
-		ios/iOSCoreAudio.mm
-		ios/iOSCoreAudio.h
-		ios/IAPManager.mm
-		ios/IAPManager.h
-		ios/CameraHelper.mm
-		ios/CameraHelper.h
-		ios/LocationHelper.mm
-		ios/LocationHelper.h
-		ios/PPSSPPUIApplication.h
-		ios/PPSSPPUIApplication.mm
-		ios/SmartKeyboardMap.cpp
-		ios/SmartKeyboardMap.hpp
-		ios/iCade/iCadeReaderView.h
-		ios/iCade/iCadeReaderView.m
-		ios/iCade/iCadeState.h
-		Common/Battery/AppleBatteryClient.m
-	)
-
-	list(APPEND targetExtraLibs "-framework Foundation -framework MediaPlayer -framework AudioToolbox -framework CoreGraphics -framework CoreMotion -framework QuartzCore -framework UIKit -framework GLKit -framework OpenAL -framework AVFoundation -framework CoreLocation -framework CoreText -framework CoreVideo -framework CoreMedia -framework CoreServices -framework Metal -framework IOSurface -framework Photos" )
-	if(EXISTS "${CMAKE_IOS_SDK_ROOT}/System/Library/Frameworks/GameController.framework")
-		list(APPEND targetExtraLibs "-weak_framework GameController")
-	endif()
-	if(EXISTS "${CMAKE_IOS_SDK_ROOT}/System/Library/Frameworks/PhotosUI.framework")
-		list(APPEND targetExtraLibs "-weak_framework PhotosUI")
-	endif()
-
-	if(NOT ICONV_LIBRARY)
-		list(APPEND targetExtraLibs iconv)
-	endif()
-
-	# TODO: Enable arc globally?
-	set_source_files_properties(ios/AppDelegate.mm
-		ios/SceneDelegate.mm
-		ios/ViewControllerCommon.mm
-		ios/ViewController.mm
-		ios/ViewControllerMetal.mm
-		ios/iOSCoreAudio.mm
-		ios/IAPManager.mm
-		ios/PPSSPPUIApplication.mm
-		ios/iCade/iCadeReaderView.m
-		ios/main.mm
-		ios/CameraHelper.mm
-		ios/LocationHelper.mm
-		ios/Controls.mm
-		Core/Util/DarwinFileSystemServices.mm
-		Common/Battery/AppleBatteryClient.m
-		Common/Render/Text/draw_text_cocoa.mm
-		PROPERTIES COMPILE_FLAGS -fobjc-arc)
-
-	set(TargetBin PPSSPP)
-elseif(IOS AND LIBRETRO)
-	list(APPEND targetExtraLibs "-framework GLKit")
-elseif(WIN32)
-	# Don't care about SDL.
-	set(TargetBin PPSSPPWindows)
-elseif(LIBRETRO)
-elseif(HEADLESS_CROSS)
-	# The loongarch64/riscv64 cross builds only build PPSSPPHeadless, and there's no
-	# SDL3 available in those sysroots, so skip the desktop SDL frontend entirely.
-	# Note this is deliberately not keyed off the target architecture: a native build
-	# on such a machine can have SDL3 and should still get the normal frontend.
-	# Headless.cpp keys its no-window path off this too, so the same option serves for
-	# any headless-only build without SDL (an x86_64 build on an arm64 Mac, say).
+if(LIBRETRO)
+elseif(HEADLESS_CROSS OR WIN32 OR ANDROID OR IOS)
+	# No SDL3 here: the headless tools run with --graphics=software only.
 	add_definitions(-DHEADLESS_NO_SDL)
 else()
-	if(GOLD)
-		set(TargetBin PPSSPPGold)
-	else()
-		set(TargetBin PPSSPPSDL)
-	endif()
-	# Require SDL
+	# The headless tools create their GL contexts with SDL.
 	add_compile_definitions(SDL)
-	list(APPEND targetExtra
-		SDL/SDLJoystick.h
-		SDL/SDLJoystick.cpp
-		SDL/SDLMain.cpp
-		SDL/SDLUtil.cpp
-		SDL/SDLGLGraphicsContext.cpp
-	)
-	if(SDL_TTF_LIB_TARGET)
-		list(APPEND targetExtraLibs ${SDL_TTF_LIB_TARGET})
-	endif()
-	if(FONTCONFIG_LIB_TARGET)
-		list(APPEND targetExtraLibs ${FONTCONFIG_LIB_TARGET})
-	endif()
-	if(APPLE)
-		list(APPEND targetExtra
-			SDL/SDLCocoaMetalLayer.h
-			SDL/SDLCocoaMetalLayer.mm
-			SDL/CocoaBarItems.mm
-			SDL/CocoaBarItems.h
-			SDL/PPSSPPAboutViewController.m
-			SDL/PPSSPPAboutViewController.h
-			SDL/MacCameraHelper.mm
-			Common/Battery/AppleBatteryClient.m
-			UI/PSPNSApplicationDelegate.mm
-			UI/PSPNSApplicationDelegate.h)
-
-		set_source_files_properties(
-			Core/Util/DarwinFileSystemServices.mm
-			UI/PSPNSApplicationDelegate.mm
-			SDL/SDLCocoaMetalLayer.mm
-			SDL/CocoaBarItems.mm
-			SDL/PPSSPPAboutViewController.m
-			SDL/MacCameraHelper.mm
-			Common/Battery/AppleBatteryClient.m
-			Common/Render/Text/draw_text_cocoa.mm
-			PROPERTIES COMPILE_FLAGS -fobjc-arc)
-		list(APPEND targetExtraLibs ${COCOA_LIBRARY} ${QUARTZ_CORE_LIBRARY} ${IOKIT_LIBRARY} "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
-		list(APPEND targetExtraLibs ${SDL_LIB_TARGET})
-	else()
-		list(APPEND targetExtra
-			Common/Render/Text/draw_text_sdl.cpp
-			Common/Render/Text/draw_text_sdl.h
-		)
-		list(APPEND targetExtraLibs ${SDL_LIB_TARGET})
-	endif()
-
-	if(USING_EGL AND NOT APPLE)
-		list(APPEND targetExtraLibs pthread)
-	endif()
-endif()
-
-if(NOT LIBRETRO)
-	# add_compile_definitions() only affects targets created after the call, and
-	# add_subdirectory() snapshots the parent's directory-scope state at the point it's
-	# invoked, so this has to happen here rather than inside UI/CMakeLists.txt - see the
-	# commit that fixed this same issue for miniUPnPc in Core/CMakeLists.txt.
-	if(USE_DISCORD AND NOT IOS)
-		add_compile_definitions(USE_DISCORD=1)
-	endif()
-	add_subdirectory(UI)
-endif()
-
-if(ANDROID)
-	if(ARM)
-		list(APPEND NativeAppSource android/jni/ArmEmitterTest.cpp)
-	elseif(ARM64)
-		list(APPEND NativeAppSource android/jni/Arm64EmitterTest.cpp)
-	endif()
-
-	if (NOT LIBRETRO)
-		list(APPEND targetExtra ${NativeAppSource})
-	endif()
-endif()
-
-if (IOS AND NOT LIBRETRO)
-	list(APPEND targetExtra ${NativeAppSource})
 endif()
 
 if(LINUX AND NOT ANDROID)
@@ -907,128 +696,6 @@ add_subdirectory(Common)
 
 add_subdirectory(GPU)
 add_subdirectory(Core)
-
-if(ANDROID AND NOT LIBRETRO)
-	add_library(ppsspp_jni SHARED ${AndroidJniSource})
-	target_link_libraries(ppsspp_jni Core log EGL OpenSLES)
-	if(TARGET ppsspp_ui)
-		target_link_libraries(ppsspp_jni ppsspp_ui)
-	endif()
-	if(OPENXR AND NOT ARMV7_DEVICE)
-		# Common/VR/*.cpp (part of Common, always linked in via core) calls directly into
-		# the OpenXR loader, so ppsspp_jni needs this too - not just ${TargetBin}, which is
-		# what openxr_loader was previously only being linked into.
-		target_link_libraries(ppsspp_jni openxr_loader)
-	endif()
-	if(ARM64)
-		# Support 16kb page size on Android
-		target_link_options(ppsspp_jni PRIVATE "-Wl,-z,max-page-size=16384")
-	endif()
-endif()
-
-set(WindowsFiles
-	Windows/WindowsAudio.cpp
-	Windows/WindowsAudio.h
-	Windows/WASAPIContext.cpp
-	Windows/WASAPIContext.h
-	Windows/Debugger/BreakpointWindow.cpp
-	Windows/Debugger/BreakpointWindow.h
-	Windows/Debugger/DumpMemoryWindow.cpp
-	Windows/Debugger/DumpMemoryWindow.h
-	Windows/Debugger/CtrlDisAsmView.cpp
-	Windows/Debugger/CtrlDisAsmView.h
-	Windows/Debugger/CtrlMemView.cpp
-	Windows/Debugger/CtrlMemView.h
-	Windows/Debugger/CtrlRegisterList.cpp
-	Windows/Debugger/CtrlRegisterList.h
-	Windows/Debugger/DebuggerShared.cpp
-	Windows/Debugger/DebuggerShared.h
-	Windows/Debugger/Debugger_Disasm.cpp
-	Windows/Debugger/Debugger_Disasm.h
-	Windows/Debugger/Debugger_MemoryDlg.cpp
-	Windows/Debugger/Debugger_MemoryDlg.h
-	Windows/Debugger/Debugger_Lists.cpp
-	Windows/Debugger/Debugger_Lists.h
-	Windows/Debugger/Debugger_VFPUDlg.cpp
-	Windows/Debugger/Debugger_VFPUDlg.h
-	Windows/Debugger/WatchItemWindow.cpp
-	Windows/Debugger/WatchItemWindow.h
-	Windows/Debugger/EditSymbolsWindow.cpp
-	Windows/Debugger/EditSymbolsWindow.h
-	Windows/GEDebugger/CtrlDisplayListView.cpp
-	Windows/GEDebugger/SimpleGLWindow.cpp
-	Windows/GEDebugger/TabState.cpp
-	Windows/GEDebugger/VertexPreview.cpp
-	Windows/GEDebugger/CtrlDisplayListView.h
-	Windows/GEDebugger/SimpleGLWindow.h
-	Windows/GEDebugger/TabState.h
-	Windows/GEDebugger/GEDebugger.cpp
-	Windows/GEDebugger/TabDisplayLists.cpp
-	Windows/GEDebugger/TabVertices.cpp
-	Windows/GEDebugger/GEDebugger.h
-	Windows/GEDebugger/TabDisplayLists.h
-	Windows/GEDebugger/TabVertices.h
-	Windows/BufferLock.h
-	Windows/CaptureDevice.cpp
-	Windows/CaptureDevice.h
-	Windows/DinputDevice.cpp
-	Windows/DinputDevice.h
-	Windows/Hid/HidCommon.h
-	Windows/Hid/HidCommon.cpp
-	Windows/Hid/HidInputDevice.h
-	Windows/Hid/HidInputDevice.cpp
-	Windows/Hid/DualSense.h
-	Windows/Hid/DualSense.cpp
-	Windows/Hid/DualShock.h
-	Windows/Hid/DualShock.cpp
-	Windows/Hid/SwitchPro.h
-	Windows/Hid/SwitchPro.cpp
-	Windows/GPU/D3D11Context.cpp
-	Windows/GPU/D3D11Context.h
-	Windows/GPU/WindowsGLContext.cpp
-	Windows/InputBox.cpp
-	Windows/InputBox.h
-	Windows/InputDevice.cpp
-	Windows/InputDevice.h
-	Windows/W32Util/ContextMenu.h
-	Windows/W32Util/ContextMenu.h
-	Windows/W32Util/DialogManager.cpp
-	Windows/W32Util/DialogManager.h
-	Windows/W32Util/Misc.cpp
-	Windows/W32Util/Misc.h
-	Windows/W32Util/ShellUtil.cpp
-	Windows/W32Util/ShellUtil.h
-	Windows/W32Util/TabControl.cpp
-	Windows/W32Util/TabControl.h
-	Windows/W32Util/IatHook.h
-	Windows/W32Util/ContextMenu.h
-	Windows/W32Util/ContextMenu.cpp
-	Windows/W32Util/DarkMode.h
-	Windows/W32Util/DarkMode.cpp
-	Windows/W32Util/UAHMenuBar.h
-	Windows/W32Util/UAHMenuBar.cpp
-	Windows/MainWindow.cpp
-	Windows/MainWindow.h
-	Windows/MainWindowMenu.cpp
-	Windows/MainWindowMenu.h
-	Windows/RawInput.cpp
-	Windows/RawInput.h
-	Windows/TouchInputHandler.cpp
-	Windows/TouchInputHandler.h
-	Windows/XinputDevice.cpp
-	Windows/XinputDevice.h
-	Windows/main.cpp
-	Windows/main.h
-	Windows/ppsspp.rc
-	Windows/resource.h
-	Windows/stdafx.cpp
-	Windows/stdafx.h
-)
-
-if(WIN32)
-	#setup_target_project(${TargetBin} Windows)
-	list(APPEND NativeAppSource ${WindowsFiles})
-endif()
 
 set(BigFontAssets
 	assets/font_atlas.zim
@@ -1081,17 +748,16 @@ if(HEADLESS)
 		list(APPEND HeadlessSource
 			headless/SDLHeadlessGLGraphicsContext.cpp
 			headless/SDLHeadlessGLGraphicsContext.h
-			# TODO: Break these out into a library instead of cross linking like this.
-			SDL/SDLUtil.cpp
-			SDL/SDLUtil.h
+			headless/SDLUtil.cpp
+			headless/SDLUtil.h
 		)
 	endif()
 	if(APPLE)
 		list(APPEND HeadlessSource
 			Common/Render/Text/draw_text_cocoa.mm
 			Common/Render/Text/draw_text_cocoa.h
-			SDL/SDLCocoaMetalLayer.h
-			SDL/SDLCocoaMetalLayer.mm
+			headless/SDLCocoaMetalLayer.h
+			headless/SDLCocoaMetalLayer.mm
 		)
 		set_source_files_properties(Common/Render/Text/draw_text_cocoa.mm
 			PROPERTIES COMPILE_FLAGS -fobjc-arc)
@@ -1105,15 +771,6 @@ if(HEADLESS)
 		list(APPEND HeadlessSource
 			headless/WindowsHeadlessHost.cpp
 			headless/WindowsHeadlessHost.h
-			Windows/GPU/D3D11Context.cpp
-			Windows/GPU/D3D11Context.h
-			Windows/GPU/WindowsGLContext.cpp
-			Windows/W32Util/ShellUtil.cpp
-			Windows/W32Util/ShellUtil.h
-			Windows/CaptureDevice.cpp
-			Windows/CaptureDevice.h
-			Windows/W32Util/Misc.cpp
-			Windows/W32Util/Misc.h
 		)
 	endif()
 	add_executable(PPSSPPHeadless ${HeadlessSource})
@@ -1173,12 +830,6 @@ if(UNITTEST)
 			Common/Render/Text/draw_text_sdl.h
 		)
 	endif()
-	if(WIN32)
-		target_sources(PPSSPPUnitTest PRIVATE
-			Windows/CaptureDevice.cpp
-			Windows/CaptureDevice.h
-		)
-	endif()
 	target_link_libraries(PPSSPPUnitTest ${COCOA_LIBRARY} ${QUARTZ_CORE_LIBRARY} ${IOKIT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT} Common Core)
 	if(SDL_LIB_TARGET)
 		target_link_libraries(PPSSPPUnitTest ${SDL_LIB_TARGET})
@@ -1231,281 +882,10 @@ if(LIBRETRO)
 	add_subdirectory(libretro)
 endif()
 
-if(TargetBin)
-	if(APPLE)
-		if(NOT IOS)
-			if(GOLD)
-				set(ICON_PATH_ABS ${CMAKE_CURRENT_SOURCE_DIR}/icons/ppsspp_gold.icns)
-				set(MACOSX_BUNDLE_ICON_FILE ppsspp_gold.icns)
-				set(MACOSX_BUNDLE_BUNDLE_NAME "PPSSPP Gold")
-				set(MACOSX_BUNDLE_GUI_IDENTIFIER org.ppsspp.ppssppgold)
-			else()
-				set(ICON_PATH_ABS ${CMAKE_CURRENT_SOURCE_DIR}/icons/ppsspp.icns)
-				set(MACOSX_BUNDLE_ICON_FILE ppsspp.icns)
-				set(MACOSX_BUNDLE_BUNDLE_NAME "PPSSPP")
-				set(MACOSX_BUNDLE_GUI_IDENTIFIER org.ppsspp.ppsspp)
-			endif()
-			set_source_files_properties(${ICON_PATH_ABS} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-		endif()
-
-		# TODO: there must a native way to copy these.
-		# Now this is very prone to errors when changes occur.
-		# Also better to have assets under Resources dir for OS X.
-		file(GLOB_RECURSE FLASH0_FILES assets/flash0/*)
-		file(GLOB_RECURSE LANG_FILES assets/lang/*)
-		file(GLOB_RECURSE SHADER_FILES assets/shaders/*)
-		file(GLOB_RECURSE THEME_FILE assets/themes/*)
-		file(GLOB_RECURSE DEBUGGER_FILES assets/debugger/*)
-		file(GLOB_RECURSE WEB_UPLOAD_FILES assets/upload/*)
-
-		if(NOT IOS)
-			set_source_files_properties(${BigFontAssets} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets")
-			set_source_files_properties(${NativeAssets} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets")
-			set_source_files_properties(${UIImages} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets/ui_images")
-			set_source_files_properties(${FLASH0_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets/flash0/font")
-			set_source_files_properties(${LANG_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets/lang")
-			set_source_files_properties(${SHADER_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets/shaders")
-			set_source_files_properties(${THEME_FILE} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets/themes")
-			set_source_files_properties(${DEBUGGER_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets/debugger")
-			set_source_files_properties(${WEB_UPLOAD_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/assets/upload")
-		endif()
-
-		if(IOS)
-			set(AssetCatalog "${CMAKE_SOURCE_DIR}/ios/assets.xcassets")
-			add_executable(${TargetBin} MACOSX_BUNDLE ${NativeAssets} ${BigFontAssets} ${UIImages} ${AssetCatalog} ${SHADER_FILES} ${THEME_FILE} ${DEBUGGER_FILES} ${WEB_UPLOAD_FILES} ${FLASH0_FILES} ${LANG_FILES} ${NativeAppSource} "ios/Settings.bundle" "ios/Launch Screen.storyboard")
-			if(NOT IOS_APP_STORE)
-				file(INSTALL "${CMAKE_SOURCE_DIR}/ext/vulkan/iOS/Frameworks/libMoltenVK.dylib" DESTINATION "${CMAKE_BINARY_DIR}/PPSSPP.app/Frameworks/")
-			endif()
-		else()
-			add_executable(${TargetBin} MACOSX_BUNDLE ${ICON_PATH_ABS} ${NativeAssets} ${BigFontAssets} ${UIImages} ${SHADER_FILES} ${THEME_FILE} ${DEBUGGER_FILES} ${WEB_UPLOAD_FILES} ${FLASH0_FILES} ${LANG_FILES} ${NativeAppSource})
-			file(INSTALL "${CMAKE_SOURCE_DIR}/ext/vulkan/macOS/Frameworks/libMoltenVK.dylib" DESTINATION "${CMAKE_BINARY_DIR}/${TargetBin}.app/Contents/Frameworks/")
-		endif()
-	elseif(WIN32)
-		add_executable(${TargetBin} WIN32 ${NativeAppSource})
-		if(NOT MSVC)
-			target_compile_options(${TargetBin} PRIVATE $<$<CXX_COMPILER_ID:Clang>:-Wno-c++11-narrowing>)
-		endif()
-		target_link_libraries(${TargetBin} avrt comctl32 dinput8 dwmapi hid ksuser mfplat setupapi uxtheme version)
-		set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${TargetBin})
-	else()
-		add_executable(${TargetBin} ${NativeAppSource})
-	endif()
-	if(targetExtra)
-		target_sources(${TargetBin} PRIVATE ${targetExtra})
-	endif()
-	if(ANDROID AND ARM64)
-		target_link_options(${TargetBin} PRIVATE "-Wl,-z,max-page-size=16384")
-	endif()
-	if(TARGET ppsspp_ui)
-		target_link_libraries(${TargetBin} ${CMAKE_THREAD_LIBS_INIT} ${targetExtraLibs} ppsspp_ui)
-	else()
-		target_link_libraries(${TargetBin} ${CMAKE_THREAD_LIBS_INIT} ${targetExtraLibs} Core)
-	endif()
-endif()
-
-if(TargetBin)
-	if(ANDROID)
-		target_link_libraries(${TargetBin} log EGL OpenSLES)
-	elseif(WIN32)
-		target_link_libraries(${TargetBin} ws2_32 winmm)
-	elseif(${CMAKE_SYSTEM_NAME} MATCHES "^(DragonFly|FreeBSD|NetBSD)$")
-		target_link_libraries(${TargetBin} execinfo)
-	endif()
-endif()
-
 # installs
 if(NOT ANDROID)
 	file(INSTALL ${BigFontAssets} DESTINATION assets)
 	file(INSTALL ${NativeAssets} DESTINATION assets)
 	file(INSTALL ${UIImages} DESTINATION assets/ui_images)
 	file(INSTALL assets/flash0 DESTINATION assets)
-endif()
-# packaging and code signing
-if(IOS AND NOT LIBRETRO)
-	if(IOS_APP_STORE)
-		set(DEPLOYMENT_TARGET 13.0)
-	else()
-		set(DEPLOYMENT_TARGET 11.0)
-	endif()
-	file(GLOB IOSAssets ios/assets/*.png)
-	list(REMOVE_ITEM IOSAssets ${CMAKE_CURRENT_SOURCE_DIR}/ios/assets/Default-568h@2x.png)
-	list(REMOVE_ITEM IOSAssets ${CMAKE_CURRENT_SOURCE_DIR}/ios/assets/Default-568h@3x.png)
-	file(INSTALL ${IOSAssets} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/assets)
-	file(GLOB IOSAssets ios/assets/Default-568h@*.png)
-	file(INSTALL ${IOSAssets} DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-	if(IOS_DEBUG)
-		file(INSTALL pspautotests DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/assets)
-	endif()
-	set(RSRC_XIB_FILES "Launch Screen.storyboard" ${CMAKE_CURRENT_SOURCE_DIR}/ios/assets.xcassets)
-
-	set_source_files_properties(${RSRC_XIB_FILES}
-		PROPERTIES MACOSX_PACKAGE_LOCATION Resources
-	)
-
-	#This breaks in modern XCode. Not sure when it worked...
-	#if(CMAKE_GENERATOR STREQUAL "Xcode")
-	#	set(APP_DIR_NAME "$(TARGET_BUILD_DIR)/$(FULL_PRODUCT_NAME)")
-	#else()
-	set(APP_DIR_NAME "$<TARGET_FILE_DIR:PPSSPP>")
-	#endif()
-
-	set(MACOSX_DEPLOYMENT_TARGET ${DEPLOYMENT_TARGET})
-	set(PRODUCT_NAME "PPSSPP")
-	set(BUNDLE_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/PPSSPP-Info.plist")
-	set(BUNDLE_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/ios/App.entitlements")
-	if(GOLD)
-		if(IOS_APP_STORE)
-			set(BUNDLE_IDENTIFIER "org.ppsspp.ppsspp-gold")
-		else()
-			set(BUNDLE_IDENTIFIER "org.ppsspp.ppssppgold")
-		endif()
-		set(ICON_NAME "PPSSPPGold")
-		set(DISPLAY_NAME "PPSSPP Gold")
-	else()
-		if(IOS_APP_STORE)
-			set(BUNDLE_IDENTIFIER "org.ppsspp.ppsspp-free")
-		else()
-			set(BUNDLE_IDENTIFIER "org.ppsspp.ppsspp")
-		endif()
-		set(ICON_NAME "AppIcon")
-		set(DISPLAY_NAME "PPSSPP")
-	endif()
-	if(IOS_APP_STORE)
-		message(STATUS "DevTeam: ${DEVELOPMENT_TEAM_ID} Icon: ${ICON_NAME} Target: ${TargetBin} Gold: ${GOLD} IAP: ${USE_IAP}")
-		message(STATUS "CURRENT_BINARY_DIR: ${CMAKE_CURRENT_BINARY_DIR}")
-
-		# This is for injecting the version into the plist, and also copying resources.
-		# Should find a different way to do both these things.
-		add_custom_command(TARGET ${TargetBin} POST_BUILD
-			COMMAND echo "Creating ${APP_DIR_NAME} for app store build"
-			COMMAND echo "CURRENT_BINARY_DIR: ${CMAKE_CURRENT_BINARY_DIR}"
-			COMMAND echo "BINARY_DIR: ${CMAKE_BINARY_DIR}"
-			COMMAND mkdir -p \"${APP_DIR_NAME}\"
-				# This tar command seems to be responsible for copying assets. I thought we had another step that did that..
-				# Prepend -v to the extracting command to see the files copied.
-			COMMAND tar -c -C ${CMAKE_CURRENT_BINARY_DIR} --exclude .DS_Store --exclude .git assets *.png | tar -x -C \"${APP_DIR_NAME}\"
-				# This updates the version in the plist.
-			COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/ios/iosbundle.sh" \"${APP_DIR_NAME}\" "${CMAKE_CURRENT_BINARY_DIR}"
-		)
-
-		# Can't figure out properly using .xcframework from CMake, so just linking directly to the .a file.
-		target_link_libraries(${TargetBin}
-			"${CMAKE_CURRENT_SOURCE_DIR}/ios/MoltenVK/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
-		)
-		# https://stackoverflow.com/questions/40664125/cmake-and-code-signing-in-xcode-8-for-ios-projects
-		target_compile_options(${TargetBin} PRIVATE
-			$<$<CONFIG:Release>:-g -gline-tables-only>
-		)
-		target_compile_options(${TargetBin} PRIVATE
-			$<$<CONFIG:RelWithDebInfo>:-g>
-		)
-		set_target_properties(${TargetBin} PROPERTIES
-			XCODE_GENERATE_SCHEME YES  # Avoid the scheme bloat in XCode by only setting it to YES for this target.
-			RESOURCE "ios/Launch Screen.storyboard"
-			RESOURCE "ios/Settings.bundle"
-			RESOURCE "ios/assets.xcassets"
-			XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER ${BUNDLE_IDENTIFIER}
-			XCODE_ATTRIBUTE_PRODUCT_NAME ${PRODUCT_NAME}
-			XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME ${ICON_NAME}
-			BUILD_WITH_INSTALL_RPATH YES
-			MACOSX_BUNDLE_INFO_PLIST ${BUNDLE_PLIST}
-			# Some sources say we should generate the PLIST. There's stuff in it that
-			# I don't know how to generate, though.
-			#XCODE_ATTRIBUTE_GENERATE_INFOPLIST_FILE "YES"
-			#XCODE_ATTRIBUTE_INFOPLIST_KEY_UIRequiredDeviceCapabilities arm64
-			XCODE_ATTRIBUTE_INFOPLIST_KEY_UIFileSharingEnabled YES
-			XCODE_EMBED_FRAMEWORKS_REMOVE_HEADERS_ON_COPY YES
-			XCODE_EMBED_FRAMEWORKS_CODE_SIGN_ON_COPY YES
-			XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET ${DEPLOYMENT_TARGET}
-			XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
-			XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
-			XCODE_ATTRIBUTE_ENABLE_BITCODE NO
-			XCODE_ATTRIBUTE_DEVELOPMENT_TEAM ${DEVELOPMENT_TEAM_ID}
-			XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
-			XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
-			XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS YES
-
-			XCODE_ATTRIBUTE_DEBUG_INFORMATION_FORMAT "dwarf-with-dsym"
-			XCODE_ATTRIBUTE_DEPLOYMENT_POSTPROCESSING[variant=Release] "YES"
-			XCODE_ATTRIBUTE_STRIP_INSTALLED_PRODUCT[variant=Release] "YES"
-
-			XCODE_ATTRIBUTE_SKIP_INSTALL NO
-			XCODE_ATTRIBUTE_INSTALL_PATH "$(LOCAL_APPS_DIR)"
-		)
-	else()
-		# This is for injecting the version into the plist.
-		add_custom_command(TARGET PPSSPP POST_BUILD
-			COMMAND echo "Creating ${APP_DIR_NAME} for sideload build"
-			COMMAND mkdir -p \"${APP_DIR_NAME}\"
-			COMMAND tar -c -C ${CMAKE_CURRENT_BINARY_DIR} --exclude .DS_Store --exclude .git assets *.png | tar -x -C \"${APP_DIR_NAME}\"
-			COMMAND /bin/bash "${CMAKE_SOURCE_DIR}/ios/macbundle.sh" \"${APP_DIR_NAME}\"
-		)
-
-		set_target_properties(${TargetBin} PROPERTIES
-			MACOSX_BUNDLE_INFO_PLIST ${BUNDLE_PLIST}
-			XCODE_GENERATE_SCHEME YES
-			RESOURCE "ios/Launch Screen.storyboard"
-			RESOURCE "ios/Settings.bundle"
-			RESOURCE "ext/vulkan/iOS/Frameworks"
-			XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME ${ICON_NAME}
-			XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET ${DEPLOYMENT_TARGET}
-			XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
-			XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
-			XCODE_ATTRIBUTE_ENABLE_BITCODE NO
-			XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-"
-		)
-	endif()
-	add_custom_command(TARGET PPSSPP POST_BUILD
-		COMMAND plutil -replace CFBundleDisplayName -string "${DISPLAY_NAME}" "${APP_DIR_NAME}/Info.plist"
-		COMMAND plutil -replace CFBundleIdentifier -string "${BUNDLE_IDENTIFIER}" "${APP_DIR_NAME}/Info.plist"
-	)
-endif()
-
-if(MACOSX AND NOT IOS)
-	if(GOLD)
-		set_target_properties(${TargetBin} PROPERTIES
-			MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macOS/InfoGold.plist"
-		)
-	else()
-		set_target_properties(${TargetBin} PROPERTIES
-			MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/macOS/Info.plist"
-		)
-	endif()
-endif()
-
-if(UNIX AND NOT ANDROID AND NOT APPLE)
-	configure_file(
-		"${CMAKE_SOURCE_DIR}/ppsspp.desktop.in"
-		"${CMAKE_BINARY_DIR}/ppsspp.desktop"
-		@ONLY
-	)
-	install(
-		TARGETS ${TargetBin}
-		DESTINATION "${CMAKE_INSTALL_BINDIR}"
-	)
-	install(
-		DIRECTORY "${CMAKE_BINARY_DIR}/assets"
-		DESTINATION "${CMAKE_INSTALL_DATADIR}/ppsspp"
-		PATTERN ".git*" EXCLUDE
-		PATTERN "mime" EXCLUDE
-		PATTERN "lang/README.md" EXCLUDE
-	)
-	install(
-		FILES "${CMAKE_BINARY_DIR}/ppsspp.desktop"
-		DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications"
-		RENAME ${TargetBin}.desktop
-	)
-	install(
-		DIRECTORY "${CMAKE_SOURCE_DIR}/icons/hicolor"
-		DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons"
-	)
-	install(
-		FILES "${CMAKE_SOURCE_DIR}/icons/icon-512.svg"
-		DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps"
-		RENAME "ppsspp.svg"
-	)
-	install(
-		FILES "${CMAKE_SOURCE_DIR}/assets/mime/ppsspp.xml"
-		DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/mime/packages"
-	)
 endif()

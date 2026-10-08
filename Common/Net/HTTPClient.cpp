@@ -580,7 +580,6 @@ std::string HTTPRequest::RedirectLocation(const std::string &baseUrl) const {
 void HTTPRequest::Do() {
 	SetCurrentThreadName("HTTPDownload::Do");
 
-	AndroidJNIThreadContext jniContext;
 	resultCode_ = 0;
 
 	std::string downloadURL = url_;

@@ -40,10 +40,6 @@ do
 			TARGET_OS=riscv64
 			CROSS_STUB_CC=riscv64-linux-gnu-gcc-14
 			;;
-		--android) CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=android/android.toolchain.cmake ${CMAKE_ARGS}"
-			TARGET_OS=Android
-			PACKAGE=1
-			;;
 		--simulator) echo "Simulator mode enabled"
 			CMAKE_ARGS="-DSIMULATOR=ON ${CMAKE_ARGS}"
 			;;
@@ -86,9 +82,6 @@ do
 			;;
 		--sanitizeub) echo "Enabling ub-sanitizer if available"
 			CMAKE_ARGS="-DUSE_UBSAN=ON ${CMAKE_ARGS}"
-			;;
-		--gold) echo "Gold build enabled"
-			CMAKE_ARGS="-DGOLD=ON ${CMAKE_ARGS}"
 			;;
 		--alderlake) echo "Alderlake opt"
 			CMAKE_ARGS="-DCMAKE_C_FLAGS=\"-march=alderlake\" -DCMAKE_CPP_FLAGS=\"-march=alderlake\""

@@ -208,44 +208,10 @@ void Core_ReenterDispatcher();  // If you've done things that mess with caches, 
 // even while it's fully running.
 void Core_RunOnCPUThread(std::function<void()> func);
 
-// Held while the core is being torn down (CPU_Shutdown) or its memory map reinitialized. Take it on
-// any thread other than the CPU thread before reading core state - emulated memory, the symbol map,
-// kernel objects - so none of it can be freed mid-read. Recursive, so nesting is fine.
-//
-// It is not a lock on memory *access*: it doesn't stop the CPU thread mutating anything, only stop
-// it going away. If you also need a stable snapshot, take g_frameMutex first - see the ordering
-// rule in AGENTS.md.
-class CoreShutdownLock {
-public:
-	CoreShutdownLock();
-	~CoreShutdownLock();
-};
-CoreShutdownLock Core_LockAgainstShutdown();
-
-// Drains the queue Core_RunOnCPUThread() feeds. Normally called from the top of every
-// Core_RunLoopUntil() iteration, but that function is only reached while a game is actually
-// loaded/running (via EmuScreen) - so NativeFrame() (UI/NativeApp.cpp) also calls this directly,
-// just before it calls into the screen manager's render(), so queued work doesn't hang forever
-// waiting for a CPU loop that isn't running (e.g. from the main menu with no game loaded).
-// Called from the CPU thread only - which is whatever thread NativeFrame() itself runs on.
+// Drains the queue Core_RunOnCPUThread() feeds. Called from the top of every Core_RunLoopUntil()
+// iteration, on the CPU thread only.
 void Core_ProcessCPUQueue();
 
-
-// Guards CPU-thread-owned debugger state (breakpoints, symbol map, registers, memory, etc.)
-// against concurrent unsynchronized reads from other threads' paint handlers.
-//
-// Held by NativeFrame() for the span where it actually touches that state: running the CPU
-// (Core_RunLoopUntil(), including draining Core_RunOnCPUThread()'s queue), processing breakpoints,
-// and running the ImGui debugger. Not held for the rest of NativeFrame (input handling, present/
-// vsync waits, frame pacing, etc).
-//
-// A paint handler on another thread (e.g. a legacy Win32 debugger window) that wants to read that
-// state directly - without the overhead/latency of routing through Core_RunOnCPUThread(), which
-// would be too heavy for something called on every WM_PAINT - should hold this lock for the
-// duration of the read instead. Since WM_PAINT only fires reactively rather than every frame, and
-// NativeFrame's locked span is normally just a couple of milliseconds, this should rarely block
-// for long.
-extern std::mutex g_frameMutex;
 
 extern volatile CoreState coreState;
 extern volatile bool coreStatePending;

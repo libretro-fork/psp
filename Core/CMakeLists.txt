@@ -159,8 +159,6 @@ if(NOT LIBRETRO)
 		WebServer.h
 		EmuThread.cpp
 		EmuThread.h
-		TiltEventProcessor.cpp
-		TiltEventProcessor.h
 		Debugger/DisassemblyManager.cpp
 		Debugger/DisassemblyManager.h
 		Debugger/WebSocket.cpp
@@ -209,18 +207,10 @@ if(NOT LIBRETRO)
 		Debugger/WebSocket/SteppingSubscriber.h
 		Debugger/WebSocket/WebSocketUtils.cpp
 		Debugger/WebSocket/WebSocketUtils.h
-		HW/GranularMixer.cpp
-		HW/GranularMixer.h
-		HW/StereoResampler.cpp
-		HW/StereoResampler.h
 		MIPS/MIPSAsm.cpp
 		MIPS/MIPSAsm.h
 		MIPS/fake/FakeJit.cpp
 		MIPS/fake/FakeJit.h
-		Util/GameManager.cpp
-		Util/GameManager.h
-		Util/VideoPlayer.cpp
-		Util/VideoPlayer.h
 	)
 endif()
 
@@ -310,8 +300,6 @@ add_library(Core STATIC
 	ConfigSettings.cpp
 	ConfigSettings.h
 	ConfigValues.h
-	ControlMapper.cpp
-	ControlMapper.h
 	Core.cpp
 	Core.h
 	Compatibility.cpp
@@ -687,8 +675,6 @@ add_library(Core STATIC
 	Util/AtracTrack.h
 	Util/AudioFormat.cpp
 	Util/AudioFormat.h
-	Util/MemStick.cpp
-	Util/MemStick.h
 	Util/GameDB.cpp
 	Util/GameDB.h
 	Util/PathUtil.cpp
@@ -705,8 +691,6 @@ add_library(Core STATIC
 	Util/PSARUnpack.h
 	Util/PkgUnpack.cpp
 	Util/PkgUnpack.h
-	Util/RecentFiles.cpp
-	Util/RecentFiles.h
 	${CMAKE_SOURCE_DIR}/ext/disarm.cpp
 	${CMAKE_SOURCE_DIR}/ext/disarm.h
 	${CMAKE_SOURCE_DIR}/ext/riscv-disas.cpp
@@ -769,11 +753,6 @@ elseif(BUILD_BUNDLED_FFMPEG)
 		swresample
 		swscale
 	)
-endif()
-
-# Discord integration
-if(USE_DISCORD AND NOT IOS AND NOT LIBRETRO)
-	target_link_libraries(Core discord-rpc)
 endif()
 
 # The other half of the miniUPnPc integration above: that half sets up the compile definitions

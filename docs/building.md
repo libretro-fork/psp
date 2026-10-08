@@ -5,67 +5,30 @@ Agent-oriented notes on the various build systems and test suites. This is the l
 
 ## Build and Validation
 
-To verify that things build on Linux/Mac, use ./b.sh --debug. For Windows, use the Visual Studio solution in the Windows subdirectory
-(`Windows/PPSSPP.sln`) - always build through it, even if a stray CMake-generated `build/` directory exists at the repo root (e.g.
-left over from WSL/MSYS2 experimentation); that directory is not the supported Windows build path and may not have a working
-compiler toolchain wired up.
-
-An agent can drive the VS solution non-interactively with `MSBuild.exe` instead of opening the `devenv` GUI. Locate it via
-`vswhere.exe` (same tool/gotchas as described in the libretro section below) and build a specific project with `/t:`, e.g.:
-
-```powershell
-$installPath = & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-$msbuild = "$installPath\MSBuild\Current\Bin\MSBuild.exe"
-& $msbuild "Windows\PPSSPP.sln" /t:UnitTest /p:Configuration=Debug /p:Platform=<platform> /m
-```
-
-(swap `/t:UnitTest` for `/t:PPSSPPWindows` or another project name as needed; drop it entirely to build the whole solution).
-
-On an ARM64 host, use `$installPath\MSBuild\Current\Bin\arm64\MSBuild.exe` instead. The MSBuild in
-`Bin\` itself runs emulated and picks the 32-bit x86-hosted compiler (`bin\HostX86\arm64\CL.exe`),
-which can't always map the precompiled headers into its address space. Builds then fail
-intermittently, every file of a project at line 1, with `C3859: Failed to create virtual memory for
-PCH` and `C1076: compiler limit: internal heap limit reached`. That looks like running out of
-memory, but lowering `/m` or `CL_MPCount` doesn't help, and `/p:PreferredToolArchitecture=arm64`
-has no effect. The build log's `CL.exe` path shows which host compiler ran.
-
-`<platform>` is `ARM64` or `x64` - whichever the machine actually is, so look it up rather than
-picking a default. The output directory follows it (`Windows\<platform>\<configuration>\`), which
-makes building one and running the other an easy mistake. It is easiest to make on Windows-on-ARM,
-where an x64 build runs anyway under emulation: everything appears to work, but it is slower than
-the native build and any performance measurement from it describes the emulator rather than the
-code. `platform.machine()` in Python reports the host; `$PROCESSOR_ARCHITECTURE` reports the shell,
-which is `AMD64` in an emulated shell even on an ARM64 machine.
+The supported targets are the libretro core and the headless tools (PPSSPPHeadless and the unit
+tests). For the core, `make -C libretro -j32` (`platform=` picks the target, see `libretro/Makefile`)
+or `./b.sh --libretro`; for the headless tools, `./b.sh --headless --unittest PPSSPPHeadless
+PPSSPPUnitTest`.
 
 In addition to the pspautotests runner (test.py), there is a separate binary with C++ unit tests
 in the /unittest subdirectory. After substantial changes (at the end of a chunk of work, not
 necessarily after every edit), run these too:
 
-- Windows: build the `UnitTest` project (unittest/UnitTests.vcxproj), then run `Windows/<platform>/Debug/UnitTest.exe all` (`<platform>` being `ARM64` or `x64`, whichever you built)
-- Linux/Mac: configure with `-DUNITTEST=ON`, then run `build/PPSSPPUnitTest all`
+- Configure with `-DUNITTEST=ON`, then run `build/PPSSPPUnitTest all`
 
 This runs all tests in `availableTests` in unittest/UnitTest.cpp. You can run one or more
-specific tests by passing their names instead of `all` (space-separated, e.g. `UnitTest.exe
+specific tests by passing their names instead of `all` (space-separated, e.g. `PPSSPPUnitTest
 CmdLine Path Utf8`); no arguments lists the available tests.
 
-After a `git stash`/`git stash pop` that touches a **header**, do a `/t:Rebuild` rather than trusting
-the incremental build. Stashing rewrites files with timestamps that can leave objects looking newer
-than the header they were compiled against, so adding or removing a class member produces a binary
-where translation units disagree on the object layout. That shows up as `UnitTest.exe` segfaulting
-before it prints anything, for every test including ones unrelated to the change - which looks like
-a catastrophic code bug and is not one. If a build starts crashing inexplicably right after a stash
-cycle, rebuild before investigating anything else.
+After a header change, or a `git stash`/`git stash pop` that touches a header, build the libretro core
+clean: its Makefile doesn't track header dependencies, so adding or removing a class member produces a
+binary where translation units disagree on the object layout. That shows up as crashes that look like
+a catastrophic code bug and are not one.
 
 More generally, **when you are bisecting a behavioural change, confirm the binary actually changed
 before you believe the result** - check the executable's mtime, or have the code you just added log
 something you can grep for. A stale binary is indistinguishable from a real regression, and it lies
-consistently, so a bisect on top of one produces a confident, entirely fictional answer. This cost
-several hours once: a link that silently failed left a stale `PPSSPPHeadless.exe` in place, every
-subsequent "revert this and retest" step reported the same failure, and a change was blamed that a
-later clean rebuild proved innocent. The `LNK1168: cannot open ... for writing` case (a still-running
-instance holding the exe, see [Debugging](debugging.md)) is the most common way to get there, which
-is why killing leftover processes before building is worth doing unconditionally rather than only
-when a build complains.
+consistently, so a bisect on top of one produces a confident, entirely fictional answer.
 
 Known environment-specific issue: in at least one sandboxed dev environment, the `Jit` test
 (`unittest/JitHarness.cpp`) hangs indefinitely specifically during the `CPUCore::JIT_IR`
@@ -73,44 +36,14 @@ phase - confirmed unrelated to source changes (reproduces identically on unmodif
 and not a memory-access fault (`Memory::HandleFault` is never entered). Root cause wasn't
 pinned down further (would need a native debugger attached to the hung process, not available
 in that environment) but is very likely specific to that sandbox rather than a real PPSSPP
-bug, since CI runs the equivalent of `UnitTest.exe all` on every commit across multiple
+bug, since CI runs `PPSSPPUnitTest all` on every commit across multiple
 platforms without apparent issue. If `all`/`Jit` hangs in your environment, run every other
 test by name instead (skip `Jit`) to still get real coverage.
-
-## UWP build
-
-UWP has its own solution, `UWP\PPSSPP_UWP.sln`. Build the app with `/t:PPSSPP_UWP` (or a single
-library such as `/t:CoreUWP`), same MSBuild setup as above:
-
-```powershell
-& $msbuild "UWP\PPSSPP_UWP.sln" /t:PPSSPP_UWP /p:Configuration=Debug /p:Platform=<platform> /m
-```
-
-## Android assets
-
-The APK's `assets/` directory is the repo-root `assets/` directory, wired up by
-`assets.directories.add("../assets")` in `android/build.gradle.kts`. There's no copy step, so a file dropped
-in `assets/` ships as-is. `ndk-build` doesn't read assets at all, and nothing populates `android/assets/` -
-if you have one, it's a leftover from the old Ant/Eclipse build and is ignored.
-
-## Legacy Android build (android/jni)
-
-There is a legacy Android build using the raw NDK build system (`android/jni/Android.mk` + `ndk-build`), separate from the
-gradle build in `android/`. It's hooked up on CI (see `.github/workflows/build.yml`, the `android` matrix entries) and is
-useful for quick test builds (it can build `ppsspp_headless` and the unit tests for Android). You do not need to build it
-by default, but if you want to test-build it locally:
-
-- The NDK path is hardcoded in `android/ab.cmd` (Windows) or passed via the `NDK` env var to `android/ab.sh` (POSIX).
-  It should match the `ndkVersion` in `android/build.gradle.kts`. The scripts just run ndk-build with a core count
-  derived from the machine (nproc / %NUMBER_OF_PROCESSORS%).
-- Example (POSIX): `cd android && NDK=/path/to/ndk ./ab.sh APP_ABI=arm64-v8a HEADLESS=1`
-- The `ppsspp_headless` executable ends up in `android/libs/<abi>/`.
 
 ## libretro core build (Windows)
 
 Canonical instructions are in `libretro/README_WINDOWS.txt` - read that first, this is a summary plus
-agent-specific gotchas. The libretro core (`ppsspp_libretro.dll`) is built with a real `make`, not the
-Visual Studio solution, even on Windows - it uses `cl.exe`/`link.exe` as the compiler/linker (via
+agent-specific gotchas. The libretro core (`ppsspp_libretro.dll`) is built with a real `make` - it uses `cl.exe`/`link.exe` as the compiler/linker (via
 `platform=windows_msvc2019_desktop_x64`), but orchestrated through GNU Make running inside an MSYS2
 shell (a plain MSYS2 install, not "Git Bash" - typically at `C:\msys64`, needs `pacman -S make`).
 
@@ -152,16 +85,12 @@ main functions (and also stub out most of the System_ functions as needed). Take
 when making cross platform changes.
 
 New unit tests are added by listing them in availableTests in unittest.cpp. If they are large, put them in
-separate files in the unittest subdirectory. A new file has to be listed in three build files, not two:
-`CMakeLists.txt`, `unittest/UnitTests.vcxproj` (and its `.filters`), and `android/jni/Android.mk`, which
-builds a unit test executable of its own. The Android one is the easiest to forget, since missing it builds
-fine everywhere you are likely to try it and only fails on Android CI.
+separate files in the unittest subdirectory, listed in `CMakeLists.txt`.
 
-A unit test is often the first thing to call a given function from outside its own .cpp, which makes the
-`ppsspp_unittest` target in the legacy Android build (`android/jni/Android.mk`, see above) the strictest check
-we have: MSVC links an `inline` function defined in a .cpp anyway, clang correctly does not. So a test can
-build and pass on Windows and fail to link only on Android CI, with an undefined symbol pointing at a header
-line. Fix it by dropping the bogus `inline` from the definition, not by avoiding the call.
+A unit test is often the first thing to call a given function from outside its own .cpp: MSVC links an
+`inline` function defined in a .cpp anyway, clang correctly does not, so a test can link on one and not the
+other, with an undefined symbol pointing at a header line. Fix it by dropping the bogus `inline` from the
+definition, not by avoiding the call.
 
 The compilers also disagree about floating point contraction, which matters for any test asserting that a JIT
 is bit-identical to its C++ reference. Clang folds `a * b + c` into a single fused multiply-add by default;
@@ -185,9 +114,6 @@ passing, ~314 of them) and `tests_next` (work-in-progress tests that are *expect
 `-g` runs only `tests_good`; with no flag you get `tests_next + tests_good` and around a hundred failures that mean
 nothing is wrong. Don't go hunting those, and don't report them as regressions - the only meaningful result from
 `-g` is `0 tests failed`. (`-b` runs only `tests_next`; `-m` prefix-filters whichever list is selected.)
-
-Note the runner prints a debug-CRT "Detected memory leaks!" dump after the summary line on Windows debug builds.
-That's normal and not a test failure - read the `N tests passed, N tests failed` line, which comes before it.
 
 See docs/pspautotests.md for a workflow for running pspautotests and improving PPSSPP with the results.
 

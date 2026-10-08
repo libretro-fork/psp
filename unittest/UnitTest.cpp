@@ -101,16 +101,12 @@
 #include "Core/Util/BlockAllocator.h"
 #include "Core/Debugger/Breakpoints.h"
 #include "Core/Debugger/SymbolMap.h"
-#include "Common/UI/Root.h"
-#include "Common/UI/View.h"
-#include "Common/UI/ViewGroup.h"
 #include "Core/Debugger/MemBlockInfo.h"
 #include "Core/FileLoaders/CachingFileLoader.h"
 #include "Core/FileSystems/FileSystem.h"
 #include "Core/FileSystems/ISOFileSystem.h"
 #include "Core/MemMap.h"
 #include "Core/KeyMap.h"
-#include "Core/ControlMapper.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/Util/PathUtil.h"
 #include "Core/MIPS/MIPSVFPUUtils.h"
@@ -156,7 +152,6 @@ void NativeFrame(GraphicsContext *graphicsContext) {}
 void NativeResized() {}
 
 bool System_MakeRequest(SystemRequestType type, int requestId, const std::string &param1, const std::string &param2, int64_t param3, int64_t param4) { return false; }
-// Pulled in via Core/WebServer.cpp's OpenWebDebugger(), which CmdLine.cpp now references.
 void System_LaunchUrl(LaunchUrlType urlType, std::string_view url) {}
 void System_InputBoxGetString(const std::string &title, const std::string &defaultValue, std::function<void(bool, const std::string &)> cb) { cb(false, ""); }
 void System_AskForPermission(SystemPermission permission) {}
@@ -2485,77 +2480,6 @@ bool TestInputMapping() {
 	return true;
 }
 
-// Records what the ControlMapper tells us, so a test can check it.
-class TestControlListener : public ControlListener {
-public:
-	void OnVKey(VirtKey vkey, bool down) override {
-		vkeyDown[vkey] = down;
-	}
-	void UpdatePSPButtons(uint32_t buttonMask, uint32_t changedMask) override {
-		buttons = (buttons & ~changedMask) | buttonMask;
-	}
-	uint32_t buttons = 0;
-	std::map<VirtKey, bool> vkeyDown;
-};
-
-static bool SendKey(ControlMapper *mapper, int keyCode, bool down) {
-	KeyInput key{};
-	key.deviceId = DEVICE_ID_PAD_0;
-	key.keyCode = (InputKeyCode)keyCode;
-	key.flags = down ? KeyInputFlags::DOWN : KeyInputFlags::UP;
-	return mapper->Key(key);
-}
-
-// A mapping shouldn't fire when a longer mapping sharing an input with it is held. See #20621.
-bool TestComboSuppression() {
-	using KeyMap::MultiInputMapping;
-
-	InputMapping a(DEVICE_ID_PAD_0, NKCODE_BUTTON_1);
-	InputMapping b(DEVICE_ID_PAD_0, NKCODE_BUTTON_2);
-
-	KeyMap::ClearAllMappings();
-	KeyMap::SetInputMapping(CTRL_CIRCLE, MultiInputMapping(a), true);
-	KeyMap::SetInputMapping(CTRL_SQUARE, MultiInputMapping(b), true);
-	MultiInputMapping combo(a);
-	combo.mappings.push_back(b);
-	KeyMap::SetInputMapping(VIRTKEY_PAUSE, combo, true);
-
-	TestControlListener listener;
-	ControlMapper mapper;
-	mapper.AddListener(&listener);
-
-	// A on its own presses Circle.
-	SendKey(&mapper, NKCODE_BUTTON_1, true);
-	EXPECT_EQ_INT((int)(listener.buttons & CTRL_CIRCLE), (int)CTRL_CIRCLE);
-	EXPECT_FALSE(listener.vkeyDown[VIRTKEY_PAUSE]);
-
-	// Adding B completes the combo, so Circle lets go and Square never presses.
-	SendKey(&mapper, NKCODE_BUTTON_2, true);
-	EXPECT_TRUE(listener.vkeyDown[VIRTKEY_PAUSE]);
-	EXPECT_EQ_INT((int)(listener.buttons & CTRL_CIRCLE), 0);
-	EXPECT_EQ_INT((int)(listener.buttons & CTRL_SQUARE), 0);
-
-	// Letting go of B ends the combo, and since A is still held, Circle comes back.
-	SendKey(&mapper, NKCODE_BUTTON_2, false);
-	EXPECT_FALSE(listener.vkeyDown[VIRTKEY_PAUSE]);
-	EXPECT_EQ_INT((int)(listener.buttons & CTRL_CIRCLE), (int)CTRL_CIRCLE);
-	EXPECT_EQ_INT((int)(listener.buttons & CTRL_SQUARE), 0);
-
-	// And releasing A leaves nothing pressed.
-	SendKey(&mapper, NKCODE_BUTTON_1, false);
-	EXPECT_EQ_INT((int)(listener.buttons & (CTRL_CIRCLE | CTRL_SQUARE)), 0);
-
-	// B on its own still presses Square - suppression only applies while the combo is held.
-	SendKey(&mapper, NKCODE_BUTTON_2, true);
-	EXPECT_EQ_INT((int)(listener.buttons & CTRL_SQUARE), (int)CTRL_SQUARE);
-	EXPECT_FALSE(listener.vkeyDown[VIRTKEY_PAUSE]);
-	SendKey(&mapper, NKCODE_BUTTON_2, false);
-
-	mapper.RemoveListener(&listener);
-	KeyMap::ClearAllMappings();
-	return true;
-}
-
 bool TestEscapeMenuString() {
 	char c;
 	std::string temp = UnescapeMenuString("&File", &c);
@@ -3034,69 +2958,6 @@ bool TestFatShortNames() {
 	return true;
 }
 
-// Tab/Shift+Tab focus navigation walks the view hierarchy in declaration order rather than by
-// geometry, so what it does is entirely determined by CollectTabOrder - which is worth pinning
-// down, since the interesting cases (nesting, hidden tabs, disabled items) are all structural.
-bool TestUITabOrder() {
-	using namespace UI;
-
-	LinearLayout root(ORIENT_VERTICAL);
-
-	// A label is not a tab stop, but the item after it is.
-	root.Add(new TextView("label"));
-	Choice *a = root.Add(new Choice("a"));
-
-	// Nested groups are flattened in place, in order.
-	LinearLayout *inner = root.Add(new LinearLayout(ORIENT_HORIZONTAL));
-	Choice *b = inner->Add(new Choice("b"));
-	Choice *disabled = inner->Add(new Choice("disabled"));
-	disabled->SetEnabled(false);
-
-	// A hidden subtree is skipped whole - this is how the inactive tabs of a TabHolder,
-	// which are V_GONE rather than removed, stay out of the way.
-	LinearLayout *hidden = root.Add(new LinearLayout(ORIENT_VERTICAL));
-	hidden->SetVisibility(V_GONE);
-	hidden->Add(new Choice("hidden"));
-
-	root.Add(new Spacer());
-	Choice *c = root.Add(new Choice("c"));
-	Choice *invisible = root.Add(new Choice("invisible"));
-	invisible->SetVisibility(V_INVISIBLE);
-
-	std::vector<View *> order;
-	root.CollectTabOrder(&order);
-	EXPECT_EQ_INT((int)order.size(), 3);
-	EXPECT_TRUE(order[0] == a);
-	EXPECT_TRUE(order[1] == b);
-	EXPECT_TRUE(order[2] == c);
-
-	// Tab walks forwards and wraps at the end, Shift+Tab does the reverse.
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, a, FocusMove::NEXT) == b);
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, b, FocusMove::NEXT) == c);
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, c, FocusMove::NEXT) == a);
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, c, FocusMove::PREV) == b);
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, b, FocusMove::PREV) == a);
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, a, FocusMove::PREV) == c);
-
-	// A view that has gone away (or was never a stop) doesn't stall navigation - it starts
-	// from whichever end we're heading towards.
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, disabled, FocusMove::NEXT) == a);
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, disabled, FocusMove::PREV) == c);
-	EXPECT_TRUE(FindTabOrderNeighbor(&root, nullptr, FocusMove::NEXT) == a);
-
-	// With a single stop, both directions land back on it, and with none there's nothing to do.
-	LinearLayout one(ORIENT_VERTICAL);
-	Choice *only = one.Add(new Choice("only"));
-	EXPECT_TRUE(FindTabOrderNeighbor(&one, only, FocusMove::NEXT) == only);
-	EXPECT_TRUE(FindTabOrderNeighbor(&one, only, FocusMove::PREV) == only);
-
-	LinearLayout empty(ORIENT_VERTICAL);
-	empty.Add(new TextView("just a label"));
-	EXPECT_TRUE(FindTabOrderNeighbor(&empty, nullptr, FocusMove::NEXT) == nullptr);
-
-	return true;
-}
-
 bool TestTextureReplacer();
 
 TestItem availableTests[] = {
@@ -3148,7 +3009,6 @@ TestItem availableTests[] = {
 	TEST_ITEM(FastVec),
 	TEST_ITEM(SmallDataConvert),
 	TEST_ITEM(InputMapping),
-	TEST_ITEM(ComboSuppression),
 	TEST_ITEM(EscapeMenuString),
 	TEST_ITEM(VFS),
 	TEST_ITEM(Substitutions),
@@ -3171,7 +3031,6 @@ TestItem availableTests[] = {
 	TEST_ITEM(GEMath),
 	TEST_ITEM(Demangle),
 	TEST_ITEM(TextureReplacer),
-	TEST_ITEM(UITabOrder),
 	TEST_ITEM(FatShortNames),
 };
 

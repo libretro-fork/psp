@@ -3,7 +3,7 @@
 #include "ppsspp_config.h"
 
 #if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
-#include "SDL/SDLCocoaMetalLayer.h"
+#include "headless/SDLCocoaMetalLayer.h"
 #endif
 
 #include "Common/GPU/MiscTypes.h"
@@ -11,7 +11,7 @@
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/GPU/GraphicsContext.h"
 
-#include "SDL/SDLUtil.h"
+#include "headless/SDLUtil.h"
 
 bool DetermineVulkanWindowSystem(SDL_Window *window, WindowDesc *desc, std::string *errorMessage) {
 	_dbg_assert_(window);

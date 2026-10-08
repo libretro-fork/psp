@@ -12,9 +12,6 @@
 // md5_hash(PSP_GAME/EBOOT.BIN)
 // hash = md5_finalize()
 
-// To test RAIntegration, get the DLL here: https://github.com/RetroAchievements/RAIntegration/releases
-// Then just place it next to PPSSPP and enable RAIntegration in PPSSPP achivement settings, then restart it.
-
 #include <algorithm>
 #include <map>
 #include <set>
@@ -23,7 +20,6 @@
 
 #include "ext/rcheevos/include/rcheevos.h"
 #include "ext/rcheevos/include/rc_client.h"
-#include "ext/rcheevos/include/rc_client_raintegration.h"
 #include "ext/rcheevos/include/rc_api_user.h"
 #include "ext/rcheevos/include/rc_api_info.h"
 #include "ext/rcheevos/include/rc_api_request.h"
@@ -49,7 +45,6 @@
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/StringUtils.h"
-#include "Common/UI/IconCache.h"
 #include "Core/ELF/ParamSFO.h"
 
 #include "Core/MemMap.h"
@@ -60,13 +55,7 @@
 #include "Core/FileSystems/ISOFileSystem.h"
 #include "Core/RetroAchievements.h"
 
-#if RC_CLIENT_SUPPORTS_RAINTEGRATION
 
-#include "Windows/MainWindow.h"
-
-#endif
-
-static const char *const RAINTEGRATION_FILENAME = "RAIntegration.dll";
 
 static bool HashISOFile(ISOFileSystem *fs, const std::string filename, md5_context *md5) {
 	int handle = fs->OpenFile(filename, FILEACCESS_READ);
@@ -154,8 +143,6 @@ static const char * const RA_TOKEN_SECRET_NAME = "retroachievements";
 
 static Achievements::Statistics g_stats;
 
-const std::string g_gameIconCachePrefix = "game:";
-const std::string g_iconCachePrefix = "badge:";
 
 Path g_gamePath;
 std::string s_game_hash;
@@ -186,10 +173,6 @@ static std::map<uint32_t, TrackedClient> g_trackedClients;
 static uint32_t g_nextClientId = 1;
 constexpr double RETIRED_CLIENT_TIMEOUT = 60.0;
 
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-// The main window, once InitializeRAIntegration has been called, so Initialize can load the DLL again.
-static void *g_raIntegrationWindow;
-#endif
 static const std::string g_RAImageID = "I_RETROACHIEVEMENTS_LOGO";
 constexpr double LOGIN_ATTEMPT_INTERVAL_S = 10.0;
 
@@ -279,22 +262,6 @@ bool IsActive() {
 	return GetGameID() != 0;
 }
 
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-
-static void raintegration_write_memory_handler(uint32_t address, uint8_t *buffer, uint32_t num_bytes, rc_client_t *client) {
-	// convert_retroachievements_address_to_real_address
-	const uint32_t realAddress = address + PSP_MEMORY_OFFSET;
-	if (!Memory::IsValidRange(realAddress, num_bytes)) {
-		ERROR_LOG(Log::Achievements, "RAIntegration write memory: Bad address range %08x-%08x (%d bytes) (%08x was passed in)", realAddress, realAddress + num_bytes, num_bytes, address);
-		return;
-	}
-
-	// We checked the pointer above, this is ok.
-	uint8_t *writePtr = Memory::GetPointerWriteUnchecked(realAddress);
-	memcpy(writePtr, buffer, num_bytes);
-}
-
-#endif
 
 static uint32_t read_memory_callback(uint32_t address, uint8_t *buffer, uint32_t num_bytes, rc_client_t *client) {
 	// Achievements are traditionally defined relative to the base of main memory of the emulated console.
@@ -317,9 +284,6 @@ static uint32_t read_memory_callback(uint32_t address, uint8_t *buffer, uint32_t
 }
 
 static void destroy_client(rc_client_t *client) {
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-	rc_client_unload_raintegration(client);
-#endif
 	rc_client_destroy(client);
 }
 
@@ -417,14 +381,9 @@ static void event_handler_callback(const rc_client_event_t *event, rc_client_t *
 		const rc_client_game_t *gameInfo = rc_client_get_game_info(g_rcClient);
 
 		std::string setTitle = gameInfo->title;
-		std::string badgeUrl = http::RemoveHttpsIfNeeded(gameInfo->badge_url);
 		if (event->type == RC_CLIENT_EVENT_SUBSET_COMPLETED) {
-			const rc_client_subset_t *subset = event->subset;
-			setTitle = subset->title;
-			badgeUrl = http::RemoveHttpsIfNeeded(subset->badge_url);
+			setTitle = event->subset->title;
 		}
-
-		DownloadImageIfMissing(badgeUrl);
 
 		std::string_view completedMessage = rc_client_get_hardcore_enabled(g_rcClient) ? "Mastered %1" : "Completed %1";
 		std::string title = ApplySafeSubstitutions(ac->T(completedMessage), setTitle);
@@ -436,7 +395,7 @@ static void event_handler_callback(const rc_client_event_t *event, rc_client_t *
 
 		// TODO: Make a fancier message for hardcore completed, etc.
 		// Also, differentiate subset vs game completed?
-		g_OSD.Show(OSDType::MESSAGE_INFO, title, message, badgeUrl, 10.0f);
+		g_OSD.Show(OSDType::MESSAGE_INFO, title, message, "", 10.0f);
 
 		System_PostUIMessage(UIMessage::REQUEST_PLAY_SOUND, "achievement_unlocked");
 
@@ -621,95 +580,6 @@ static void login_token_callback(int result, const char *error_message, rc_clien
 	g_isLoggingIn = false;
 }
 
-bool RAIntegrationDirty() {
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-	return rc_client_raintegration_has_modifications(g_rcClient);
-#else
-	return false;
-#endif
-}
-
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-
-static void raintegration_get_game_name_handler(char *buffer, uint32_t buffer_size, rc_client_t *client) {
-	snprintf(buffer, buffer_size, "%s", g_gamePath.GetFilename().c_str());
-}
-
-static void raintegration_write_memory_handler(uint32_t address, uint8_t *buffer, uint32_t num_bytes, rc_client_t *client);
-
-static void raintegration_event_handler(const rc_client_raintegration_event_t *event, rc_client_t *client) {
-	switch (event->type) {
-	case RC_CLIENT_RAINTEGRATION_EVENT_MENUITEM_CHECKED_CHANGED:
-		// The checked state of one of the menu items has changed and should be reflected in the UI.
-		// Call the handy helper function if the menu was created by rc_client_raintegration_rebuild_submenu.
-		System_RunCallbackInWndProc([](void *vhWnd, void *userdata) {
-			auto menuItem = reinterpret_cast<const rc_client_raintegration_menu_item_t *>(userdata);
-			rc_client_raintegration_update_menu_item(g_rcClient, menuItem);
-		}, reinterpret_cast<void *>(reinterpret_cast<int64_t>(event->menu_item)));
-		break;
-	case RC_CLIENT_RAINTEGRATION_EVENT_PAUSE:
-		// The toolkit has hit a breakpoint and wants to pause the emulator. Do so.
-		Core_Break(BreakReason::RABreak);
-		break;
-	case RC_CLIENT_RAINTEGRATION_EVENT_HARDCORE_CHANGED:
-		// Hardcore mode has been changed (either directly by the user, or disabled through the use of the tools).
-		// The frontend doesn't necessarily need to know that this value changed, they can still query it whenever
-		// it's appropriate, but the event lets the frontend do things like enable/disable rewind or cheats.
-		g_Config.bAchievementsHardcoreMode = rc_client_get_hardcore_enabled(client);
-		break;
-	case RC_CLIENT_RAINTEGRATION_EVENT_MENU_CHANGED:
-		System_RunCallbackInWndProc([](void *vhWnd, void *userdata) {
-			HWND hWnd = reinterpret_cast<HWND>(vhWnd);
-			rc_client_raintegration_rebuild_submenu(g_rcClient, GetMenu(hWnd));
-		}, nullptr);
-		break;
-	default:
-		ERROR_LOG(Log::Achievements, "Unsupported RAIntegration event %u\n", event->type);
-		break;
-	}
-}
-
-static void load_integration_callback(int result, const char *error_message, rc_client_t *client, void *userdata) {
-	auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
-
-	// If DLL not present, do nothing. User can still play without the toolkit.
-	switch (result) {
-	case RC_OK:
-	{
-		// DLL was loaded correctly.
-		g_OSD.Show(OSDType::MESSAGE_SUCCESS, ApplySafeSubstitutions(ac->T("%1 loaded."), RAINTEGRATION_FILENAME));
-
-		rc_client_raintegration_set_console_id(g_rcClient, RC_CONSOLE_PSP);
-		rc_client_raintegration_set_event_handler(g_rcClient, &raintegration_event_handler);
-		rc_client_raintegration_set_write_memory_function(g_rcClient, &raintegration_write_memory_handler);
-		rc_client_raintegration_set_get_game_name_function(g_rcClient, &raintegration_get_game_name_handler);
-
-		System_RunCallbackInWndProc([](void *vhWnd, void *userdata) {
-			HWND hWnd = reinterpret_cast<HWND>(vhWnd);
-			rc_client_raintegration_rebuild_submenu(g_rcClient, GetMenu(hWnd));
-		}, nullptr);
-		break;
-	}
-	case RC_MISSING_VALUE:
-		// This is fine, proceeding to login.
-		g_OSD.Show(OSDType::MESSAGE_WARNING, ApplySafeSubstitutions(ac->T("RAIntegration is enabled, but %1 was not found."), RAINTEGRATION_FILENAME));
-		break;
-	case RC_ABORTED:
-		// This is fine(-ish), proceeding to login.
-		g_OSD.Show(OSDType::MESSAGE_WARNING, ApplySafeSubstitutions("Wrong version of %1?", RAINTEGRATION_FILENAME));
-		break;
-	default:
-		g_OSD.Show(OSDType::MESSAGE_ERROR, StringFromFormat("RAIntegration init failed: %s", error_message));
-		// Bailing.
-		return;
-	}
-
-	// Things are ready to load a game. If the DLL was initialized, calling rc_client_begin_load_game will be redirected
-	// through the DLL so the toolkit has access to the game data. Similarly, things like rc_create_leaderboard_list will
-	// be redirected through the DLL to reflect any local changes made by the user.
-	TryLoginByToken(true);
-}
-#endif
 
 void Initialize() {
 	if (!g_Config.bAchievementsEnable) {
@@ -746,57 +616,7 @@ void Initialize() {
 	rc_client_set_encore_mode_enabled(g_rcClient, g_Config.bAchievementsEncoreMode ? 1 : 0);
 	rc_client_set_unofficial_enabled(g_rcClient, g_Config.bAchievementsUnofficial ? 1 : 0);
 
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-	if (!g_Config.bAchievementsEnableRAIntegration) {
-		TryLoginByToken(true);
-	} else if (g_raIntegrationWindow) {
-		// Re-enabled after startup. WinMain only calls InitializeRAIntegration once, and Shutdown
-		// unloaded the DLL, so load it again (it logs in when loaded). It builds menus, so do it on the window's thread.
-		System_RunCallbackInWndProc([](void *hWnd, void *) {
-			InitializeRAIntegration(hWnd);
-		}, nullptr);
-	}
-#else
 	TryLoginByToken(true);
-#endif
-}
-
-void InitializeRAIntegration(void *windowHandle) {
-#ifdef RC_CLIENT_SUPPORTS_RAINTEGRATION
-	g_raIntegrationWindow = windowHandle;
-	if (g_rcClient && g_Config.bAchievementsEnableRAIntegration) {
-		wchar_t szFilePath[MAX_PATH];
-		GetModuleFileNameW(NULL, szFilePath, MAX_PATH);
-		for (int64_t i = wcslen(szFilePath) - 1; i > 0; i--) {
-			if (szFilePath[i] == '\\') {
-				szFilePath[i] = '\0';
-				break;
-			}
-		}
-		HWND hWnd = (HWND)windowHandle;
-		if (!hWnd) {
-			ERROR_LOG(Log::Achievements, "RAIntegration is enabled, but no main window handle was found.");
-			return;
-		}
-
-		// RAIntegration writes its cache and local achievement data next to the executable. If we
-		// can't write there - the usual case being an install under Program Files - it takes the
-		// emulator down with it as soon as it loads a set, so refuse to load it at all. See #21260.
-		const Path &exeDir = File::GetExeDirectory();
-		if (!File::IsDirectoryWritable(exeDir)) {
-			auto ac = GetI18NCategory(I18NCat::ACHIEVEMENTS);
-			ERROR_LOG(Log::Achievements, "Not loading RAIntegration, '%s' is not writable", exeDir.c_str());
-			g_OSD.Show(OSDType::MESSAGE_ERROR, ac->T("RAIntegrationNotWritable",
-				"RAIntegration needs to write next to PPSSPP.exe, which this install doesn't allow. Use the portable .zip version instead."), "", g_RAImageID, 10.0f);
-			// Carry on without the toolkit - plain achievements still work.
-			TryLoginByToken(true);
-			return;
-		}
-
-		rc_client_begin_load_raintegration(g_rcClient, szFilePath, hWnd, "PPSSPP", PPSSPP_GIT_VERSION, &load_integration_callback, hWnd);
-		return;
-	}
-#endif
 }
 
 bool HasToken() {
@@ -1061,25 +881,6 @@ bool HasAchievementsOrLeaderboards() {
 	return IsActive();
 }
 
-void DownloadImageIfMissing(std::string_view url, double maxAge) {
-	// On Linux for example, we currently have no way of doing a HTTPS request.
-	if (g_iconCache.MarkPending(url)) {
-		INFO_LOG(Log::Achievements, "Downloading image: %.*s", STR_VIEW(url));
-		g_DownloadManager.StartDownload(url, Path(), http::RequestFlags::Default, nullptr, "", [maxAge](http::Request &download) {
-			std::string data;
-			if (download.ResultCode() == 200) {
-				download.buffer().TakeAll(&data);
-			}
-			if (data.empty()) {
-				WARN_LOG(Log::Achievements, "Failed to download image (%d): %s", download.ResultCode(), download.url().c_str());
-				g_iconCache.MarkFailed(download.url());
-				return;
-			}
-			g_iconCache.InsertIcon(download.url(), IconFormat::PNG, std::move(data), maxAge);
-		});
-	}
-}
-
 Statistics GetStatistics() {
 	return g_stats;
 }
@@ -1135,9 +936,6 @@ void identify_and_load_callback(int result, const char *error_message, rc_client
 		// Successful! Show a message that we're active.
 		const rc_client_game_t *gameInfo = rc_client_get_game_info(client);
 
-		std::string imageUrl = http::RemoveHttpsIfNeeded(gameInfo->badge_url);
-		DownloadImageIfMissing(imageUrl);
-
 		GameRegion region = DetectGameRegionFromID(g_paramSFO.GetDiscID());
 		auto ga = GetI18NCategory(I18NCat::GAME);
 		std::string_view regionStr = ga->T(GameRegionToString(region));
@@ -1148,7 +946,7 @@ void identify_and_load_callback(int result, const char *error_message, rc_client
 			title += ")";
 		}
 		// TODO: Detect current subset.
-		g_OSD.Show(OSDType::MESSAGE_INFO, title, GetGameAchievementSummary(0), imageUrl, 5.0f);
+		g_OSD.Show(OSDType::MESSAGE_INFO, title, GetGameAchievementSummary(0), "", 5.0f);
 		break;
 	}
 	case RC_NO_GAME_LOADED:

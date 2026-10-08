@@ -36,39 +36,6 @@ extern std::string g_externalDir;
 
 // Note that we don't use string_view much here because NewStringUTF doesn't have a size parameter.
 
-#if PPSSPP_PLATFORM(ANDROID) && !defined(__LIBRETRO__)
-
-#include <jni.h>
-
-void Android_StorageSetActivity(jobject nativeActivity);
-
-bool Android_IsContentUri(std::string_view uri);
-int Android_OpenContentUriFd(std::string_view uri, const Android_OpenContentUriMode mode);
-StorageError Android_CreateDirectory(const std::string &parentTreeUri, const std::string &dirName);
-StorageError Android_CreateFile(const std::string &parentTreeUri, const std::string &fileName);
-StorageError Android_MoveFile(const std::string &fileUri, const std::string &srcParentUri, const std::string &destParentUri);
-StorageError Android_CopyFile(const std::string &fileUri, const std::string &destParentUri);
-
-// WARNING: This is very powerful, it will delete directories recursively!
-StorageError Android_RemoveFile(const std::string &fileUri);
-
-StorageError Android_RenameFileTo(const std::string &fileUri, const std::string &newName);
-bool Android_GetFileInfo(const std::string &fileUri, File::FileInfo *info);
-bool Android_FileExists(const std::string &fileUri);
-int64_t Android_ComputeRecursiveDirectorySize(const std::string &fileUri);
-int64_t Android_GetFreeSpaceByContentUri(const std::string &uri);
-int64_t Android_GetFreeSpaceByFilePath(const std::string &filePath);
-bool Android_IsExternalStoragePreservedLegacy();
-const char *Android_ErrorToString(StorageError error);
-
-// TODO: prefix doesn't do anything yet.
-std::vector<File::FileInfo> Android_ListContentUri(const std::string &uri, const std::string &prefix, bool *exists);
-
-// Don't need to add these below, they're only used from app-android.cpp.
-void Android_RegisterStorageCallbacks(JNIEnv * env, jobject obj);
-void Android_UnregisterStorageCallbacks(JNIEnv * env);
-
-#else
 
 // Stub out the Android Storage wrappers, so that we can avoid ifdefs everywhere.
 
@@ -95,4 +62,3 @@ inline std::vector<File::FileInfo> Android_ListContentUri(const std::string &uri
 	return std::vector<File::FileInfo>();
 }
 
-#endif

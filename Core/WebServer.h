@@ -17,51 +17,21 @@
 
 #pragma once
 
-#include <vector>
-#include "Common/Common.h"
+// The headless tools' debugger server: the WebSocket debugger and its web UI, on
+// g_Config.iRemoteISOPort.
 
-class Path;
-
-enum class WebServerFlags {
-	NONE = 0,
-	DISCS = 1,
-	DEBUGGER = 2,
-	FILE_UPLOAD = 4,
-
-	ALL = 1 | 2 | 4,
-};
-ENUM_CLASS_BITOPS(WebServerFlags);
-
-bool StartWebServer(WebServerFlags flags);
-bool StopWebServer(WebServerFlags flags);
-bool WebServerStopping(WebServerFlags flags);
-bool WebServerStopped(WebServerFlags flags);
-bool WebServerRunning(WebServerFlags flags);
+bool StartWebServer();
 void ShutdownWebServer();
+bool WebServerRunning();
 
-// By default, if g_Config.iRemoteISOPort is taken we quietly fall back to any free port - fine for
-// the "Local Server Port" preference, where the user just wants the thing to come up. It's the
-// wrong behavior for --debugger=PORT: an automation client was told to connect to that exact port,
-// so landing on a different one leaves it connecting to nothing (or, worse, to some other PPSSPP
-// instance that got there first). Set this to make the bind failure fatal instead.
+// By default, if the port is taken we quietly fall back to any free port. That's the wrong
+// behavior for --debugger=PORT: an automation client was told to connect to that exact port,
+// so landing on a different one leaves it connecting to nothing (or, worse, to some other
+// PPSSPP instance that got there first). Set this to make the bind failure fatal instead.
 void WebServerSetRequireExactPort(bool require);
 
 // Blocks until the server thread has either started listening or given up, and returns whether
 // it's actually listening. Only meaningful right after StartWebServer().
 bool WebServerWaitForStartup();
 
-bool RemoteISOFileSupported(const std::string &filename);
-void WebServerSetUploadPath(const Path &path);
 int WebServerPort();
-
-// Will start the webserver if not running.
-void OpenWebDebugger();
-
-struct UploadProgress {
-	s64 totalBytes = 0;
-	s64 uploadedBytes = 0;
-	s64 currentFileSize = 0;
-	std::string filename;
-};
-
-std::vector<UploadProgress> GetUploadsInProgress();

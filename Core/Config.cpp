@@ -54,7 +54,6 @@
 #include "Core/KeyMap.h"
 #include "Core/HLE/sceUtility.h"
 #include "Core/Instance.h"
-#include "Core/Util/RecentFiles.h"
 #include "Core/Util/PathUtil.h"
 
 #include "GPU/Common/FramebufferManagerCommon.h"
@@ -1352,11 +1351,6 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 		}
 	}
 
-	if (iMaxRecent > 0) {
-		g_recentFiles.Load(recent, iMaxRecent);
-		g_recentFiles.Clean();
-	}
-
 	// Time tracking
 	Section *playTime = iniFile.GetOrCreateSection("PlayTime");
 	playTimeTracker_.Load(playTime);
@@ -1456,7 +1450,6 @@ bool Config::Save(const char *saveReason) {
 
 		PreSaveCleanup();
 
-		g_recentFiles.Clean();
 		IniFile iniFile;
 		if (!iniFile.Load(iniFilename_)) {
 			WARN_LOG(Log::Config, "Likely saving config for first time - couldn't read ini '%s'", iniFilename_.c_str());
@@ -1482,10 +1475,6 @@ bool Config::Save(const char *saveReason) {
 				meta.settings[j].WriteToIniSection(configBlock, section);
 			}
 		}
-
-		Section *recent = iniFile.GetOrCreateSection("Recent");
-		recent->Set("MaxRecent", iMaxRecent);
-		g_recentFiles.Save(recent, iMaxRecent);
 
 		Section *pinnedPaths = iniFile.GetOrCreateSection("PinnedPaths");
 		pinnedPaths->Clear();
@@ -1784,7 +1773,6 @@ void Config::RestoreDefaults(RestoreSettingsBits whatToRestore, bool log) {
 		}
 
 		if (whatToRestore & RestoreSettingsBits::RECENT) {
-			g_recentFiles.Clear();
 			currentDirectory = defaultCurrentDirectory;
 		}
 	}

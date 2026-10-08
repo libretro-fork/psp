@@ -39,7 +39,7 @@
 #include "Core/Config.h"
 #include "Core/System.h"
 #include "GPU/GPUState.h"
-#include "SDL/SDLUtil.h"
+#include "headless/SDLUtil.h"
 
 const bool WINDOW_VISIBLE = false;
 
