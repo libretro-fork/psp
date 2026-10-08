@@ -54,25 +54,25 @@ static BOOL __stdcall DelFile(const void* name) {
 
 zip_win32_file_operations_t ops_utf16 = {
 	utf16_allocate_tempname,
-	utf16_create_file,
+	(zip_win32_create_file_t)utf16_create_file,
 	DelFile,
-	GetFileAttributesW,
+	(zip_win32_get_file_attributes_t)GetFileAttributesW,
 	GetFileAttr,
 	utf16_make_tempname,
-	MoveFileExW,
-	SetFileAttributesW,
+	(zip_win32_move_file_t)MoveFileExW,
+	(zip_win32_set_file_attributes_t)SetFileAttributesW,
 	utf16_strdup
 };
 #else
 zip_win32_file_operations_t ops_utf16 = {
     utf16_allocate_tempname,
-    utf16_create_file,
-    DeleteFileW,
-    GetFileAttributesW,
-    GetFileAttributesExW,
+    (zip_win32_create_file_t)utf16_create_file,
+    (zip_win32_delete_file_t)DeleteFileW,
+    (zip_win32_get_file_attributes_t)GetFileAttributesW,
+    (zip_win32_get_file_attributes_ex_t)GetFileAttributesExW,
     utf16_make_tempname,
-    MoveFileExW,
-    SetFileAttributesW,
+    (zip_win32_move_file_t)MoveFileExW,
+    (zip_win32_set_file_attributes_t)SetFileAttributesW,
     utf16_strdup
 };
 #endif

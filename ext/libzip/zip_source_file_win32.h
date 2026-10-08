@@ -47,15 +47,24 @@
 
 #include "zip_source_file.h"
 
+/* The A/W entry points are stored behind const void * name types and need
+ * an explicit cast; GCC 14 rejects the implicit conversion. */
+typedef HANDLE (__stdcall *zip_win32_create_file_t)(const void *name, DWORD access, DWORD share_mode, PSECURITY_ATTRIBUTES security_attributes, DWORD creation_disposition, DWORD file_attributes, HANDLE template_file);
+typedef BOOL (__stdcall *zip_win32_delete_file_t)(const void *name);
+typedef DWORD (__stdcall *zip_win32_get_file_attributes_t)(const void *name);
+typedef BOOL (__stdcall *zip_win32_get_file_attributes_ex_t)(const void *name, GET_FILEEX_INFO_LEVELS info_level, void *information);
+typedef BOOL (__stdcall *zip_win32_move_file_t)(const void *from, const void *to, DWORD flags);
+typedef BOOL (__stdcall *zip_win32_set_file_attributes_t)(const void *name, DWORD attributes);
+
 struct zip_win32_file_operations {
     char *(*allocate_tempname)(const char *name, size_t extra_chars, size_t *lengthp);
-    HANDLE (__stdcall *create_file)(const void *name, DWORD access, DWORD share_mode, PSECURITY_ATTRIBUTES security_attributes, DWORD creation_disposition, DWORD file_attributes, HANDLE template_file);
-    BOOL (__stdcall *delete_file)(const void *name);
-    DWORD (__stdcall *get_file_attributes)(const void *name);
-    BOOL (__stdcall *get_file_attributes_ex)(const void *name, GET_FILEEX_INFO_LEVELS info_level, void *information);
+    zip_win32_create_file_t create_file;
+    zip_win32_delete_file_t delete_file;
+    zip_win32_get_file_attributes_t get_file_attributes;
+    zip_win32_get_file_attributes_ex_t get_file_attributes_ex;
     void (*make_tempname)(char *buf, size_t len, const char *name, zip_uint32_t i);
-    BOOL (__stdcall *move_file)(const void *from, const void *to, DWORD flags);
-    BOOL (__stdcall *set_file_attributes)(const void *name, DWORD attributes);
+    zip_win32_move_file_t move_file;
+    zip_win32_set_file_attributes_t set_file_attributes;
     char *(*string_duplicate)(const char *string);
 };
 

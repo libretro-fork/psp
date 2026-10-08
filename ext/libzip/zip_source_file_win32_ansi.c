@@ -38,13 +38,13 @@ static void ansi_make_tempname(char *buf, size_t len, const char *name, zip_uint
 
 zip_win32_file_operations_t ops_ansi = {
     ansi_allocate_tempname,
-    CreateFileA,
-    DeleteFileA,
-    GetFileAttributesA,
-    GetFileAttributesExA,
+    (zip_win32_create_file_t)CreateFileA,
+    (zip_win32_delete_file_t)DeleteFileA,
+    (zip_win32_get_file_attributes_t)GetFileAttributesA,
+    (zip_win32_get_file_attributes_ex_t)GetFileAttributesExA,
     ansi_make_tempname,
-    MoveFileExA,
-    SetFileAttributesA,
+    (zip_win32_move_file_t)MoveFileExA,
+    (zip_win32_set_file_attributes_t)SetFileAttributesA,
     strdup
 };
 
