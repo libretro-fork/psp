@@ -22,7 +22,6 @@
 #endif
 
 #include <algorithm>
-#include <mutex>
 
 #include "Common/CommonTypes.h"
 #include "Common/MemArena.h"

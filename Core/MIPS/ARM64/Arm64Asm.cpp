@@ -72,7 +72,6 @@ static const bool enableDisasm = false;
 // x27 : MIPS state (Could eliminate by placing the MIPS state right at the memory base)
 // x28 : Memory base pointer.
 
-extern volatile CoreState coreState;
 
 void ShowPC(u32 downcount, void *membase, void *jitbase) {
 	static int count = 0;

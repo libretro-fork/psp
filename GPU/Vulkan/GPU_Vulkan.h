@@ -19,7 +19,6 @@
 
 #include <string>
 #include <vector>
-#include <thread>
 
 #include "Common/File/Path.h"
 

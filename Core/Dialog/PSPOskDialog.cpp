@@ -799,15 +799,15 @@ int PSPOskDialog::NativeKeyboard() {
 	std::shared_ptr<NativeInput> native = native_;
 	PSPOskNativeStatus status;
 	std::string value;
-	{
-		std::lock_guard<std::mutex> guard(native->mutex);
-		status = native->status;
-		if (status == PSPOskNativeStatus::IDLE) {
-			native->status = PSPOskNativeStatus::WAITING;
-		} else if (status == PSPOskNativeStatus::SUCCESS || status == PSPOskNativeStatus::FAILURE) {
-			value = std::move(native->value);
-			native->status = PSPOskNativeStatus::DONE;
-		}
+	status = native->Status();
+	if (status == PSPOskNativeStatus::IDLE) {
+		native->SetStatus(PSPOskNativeStatus::WAITING);
+	} else if (status == PSPOskNativeStatus::SUCCESS || status == PSPOskNativeStatus::FAILURE) {
+		value = std::move(native->value);
+		native->SetStatus(PSPOskNativeStatus::DONE);
+	} else if (status == PSPOskNativeStatus::FILLING) {
+		// A callback is writing the answer; treat it as still waiting.
+		status = PSPOskNativeStatus::WAITING;
 	}
 
 	if (status == PSPOskNativeStatus::IDLE) {
@@ -821,21 +821,11 @@ int PSPOskDialog::NativeKeyboard() {
 		System_InputBoxGetString(NON_EPHEMERAL_TOKEN, ::ConvertUCS2ToUTF8(titleText), ::ConvertUCS2ToUTF8(defaultText), false,
 			[native](std::string_view value, int) {
 				// Success callback
-				std::lock_guard<std::mutex> guard(native->mutex);
-				if (native->status != PSPOskNativeStatus::WAITING) {
-					return;
-				}
-				native->value = value;
-				native->status = PSPOskNativeStatus::SUCCESS;
+				native->Answer(PSPOskNativeStatus::SUCCESS, value);
 			},
 			[native](int responseValue) {
 				// Failure callback
-				std::lock_guard<std::mutex> guard(native->mutex);
-				if (native->status != PSPOskNativeStatus::WAITING) {
-					return;
-				}
-				native->value.clear();
-				native->status = PSPOskNativeStatus::FAILURE;
+				native->Answer(PSPOskNativeStatus::FAILURE, std::string_view());
 			}
 		);
 	} else if (status == PSPOskNativeStatus::SUCCESS) {
@@ -1099,10 +1089,8 @@ void PSPOskDialog::DoState(PointerWrap &p)
 	if (p.mode == p.MODE_READ) {
 		// A box still open can answer into the loaded state (the next Update would only open
 		// another). One that finished before mustn't block the next.
-		// Hold a reference, so the guard doesn't outlive the mutex it unlocks when native_ is replaced.
-		std::shared_ptr<NativeInput> native = native_;
-		std::lock_guard<std::mutex> guard(native->mutex);
-		if (native->status != PSPOskNativeStatus::WAITING) {
+		const PSPOskNativeStatus status = native_->Status();
+		if (status != PSPOskNativeStatus::WAITING && status != PSPOskNativeStatus::FILLING) {
 			native_ = std::make_shared<NativeInput>();
 		}
 	}

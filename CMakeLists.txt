@@ -331,6 +331,8 @@ if(APPLE)
 endif()
 
 include_directories("${CMAKE_SOURCE_DIR}")
+# Common headers use libretro-common (retro_atomic.h and friends), so every target needs it.
+include_directories(libretro/libretro-common/include)
 
 if(ANDROID_LEGACY)
 	add_compile_definitions(ANDROID_LEGACY)

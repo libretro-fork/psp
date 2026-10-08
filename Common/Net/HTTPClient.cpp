@@ -21,6 +21,7 @@
 #include "Common/Data/Encoding/Compression.h"
 #include "Common/Net/NetBuffer.h"
 #include "Common/Log.h"
+#include "Common/Thread/Thread.h"
 
 namespace net {
 
@@ -511,7 +512,7 @@ HTTPRequest::~HTTPRequest() {
 }
 
 void HTTPRequest::Start() {
-	thread_ = std::thread([this] { Do(); });
+	thread_ = Thread([this] { Do(); });
 }
 
 void HTTPRequest::Join() {
@@ -527,7 +528,7 @@ void HTTPRequest::SetFailed(int code) {
 
 	failed_ = true;
 	progress_.Update(0, 0, true);
-	completed_ = true;
+	retro_atomic_store_release_int(&completed_, 1);
 }
 
 int HTTPRequest::Perform(const std::string &url) {
@@ -625,7 +626,7 @@ void HTTPRequest::Do() {
 
 	// Set this last to ensure no race conditions when checking Done. Users must always check
 	// Done before looking at the result code.
-	completed_ = true;
+	retro_atomic_store_release_int(&completed_, 1);
 }
 
 std::string RemoveHttpsIfNeeded(std::string_view url) {

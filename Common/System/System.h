@@ -5,7 +5,6 @@
 #include <vector>
 #include <functional>
 #include <cstdint>
-#include <mutex>
 
 // Platform integration
 

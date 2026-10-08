@@ -1801,19 +1801,10 @@ ReplacedTexture *TextureCacheCommon::FindReplacement(TexCacheEntry *entry, int *
 }
 
 void TextureCacheCommon::PollReplacement(TexCacheEntry *entry, int *w, int *h, int *d) {
-	double waitBudget = replacementFrameBudgetSeconds_ - replacementTimeThisFrame_;
-	// Note: Don't avoid the Poll call if budget is 0, we do meaningful things there.
-	// Poll also handles negative budgets.
-
 	double replaceStart = time_now_d();
 
-	// Unless the mode is set to Instant (where the user explicitly wants to wait for each texture),
-	// it's just a waste of time to wait here really. OK, we might get a texture one frame early but
-	// we wasted a lot of time waiting, likely slowing down our framerate.
-	if (g_Config.iReplacementTextureLoadSpeed != ReplacementTextureLoadSpeed::INSTANT) {
-		waitBudget = 0.0;
-	}
-	if (entry->replacedTexture->Poll(waitBudget)) {
+	// Only Instant waits for each texture to load; the others pick it up on a later frame.
+	if (entry->replacedTexture->Poll(g_Config.iReplacementTextureLoadSpeed == ReplacementTextureLoadSpeed::INSTANT)) {
 		if (entry->replacedTexture->State() == ReplacementState::ACTIVE) {
 			entry->replacedTexture->GetSize(0, w, h);
 			// Consider it already "scaled.".

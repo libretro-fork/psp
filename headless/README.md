@@ -54,7 +54,7 @@ PPSSPPHeadless file.elf|file.prx|file.ppdmp [...] [options]
 | `-i`                            | Use interpreter CPU core.                                  |
 | `--ir`                          | Use IR interpreter CPU core.                               |
 | `-j`                            | Use JIT CPU core (default).                                |
-| `--debugger=<port>`             | Enable WebSocket debugger and break at start.              |
+| `--debugger=<port>`             | Enable WebSocket debugger and break at start. While stopped, the run waits for a client (no timeout); it ends once the last client disconnects. |
 | `--state=<file>`                | Load a save state before running.                          |
 | `--old-atrac`                   | Use the old Atrac3+ audio decoder.                         |
 | `--ignore <file>`               | Skip the specified test file.                              |

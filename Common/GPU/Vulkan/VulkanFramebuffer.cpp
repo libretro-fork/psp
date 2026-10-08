@@ -559,15 +559,34 @@ VkRenderPass VKRRenderPass::Get(VulkanContext *vulkan, RenderPassType rpType, Vk
 
 	_dbg_assert_(!((rpType & RenderPassType::MULTISAMPLE) && sampleCount == VK_SAMPLE_COUNT_1_BIT));
 
-	// Called from both the main thread and the render thread, see the note on mutex_.
-	std::lock_guard<std::mutex> lock(mutex_);
-
-	if (!pass[(int)rpType] || sampleCounts[(int)rpType] != sampleCount) {
-		if (pass[(int)rpType]) {
-			vulkan->Delete().QueueDeleteRenderPass(pass[(int)rpType]);
+	retro_atomic_ptr_t *slot = &pass_[(int)rpType];
+	for (;;) {
+		Created *cur = (Created *)retro_atomic_load_acquire_ptr(slot);
+		if (cur && cur->sampleCount == sampleCount) {
+			return cur->pass;
 		}
-		pass[(int)rpType] = CreateRenderPass(vulkan, key_, (RenderPassType)rpType, sampleCount);
-		sampleCounts[(int)rpType] = sampleCount;
+		Created *mine = new Created{ CreateRenderPass(vulkan, key_, (RenderPassType)rpType, sampleCount), sampleCount };
+		if (retro_atomic_cas_ptr(slot, (void *)cur, (void *)mine)) {
+			if (cur) {
+				vulkan->Delete().QueueDeleteRenderPass(cur->pass);
+				vulkan->Delete().QueueCallback([cur](VulkanContext *) {
+					delete cur;
+				});
+			}
+			return mine->pass;
+		}
+		// Another thread got there first. Nothing else has seen ours.
+		vkDestroyRenderPass(vulkan->GetDevice(), mine->pass, nullptr);
+		delete mine;
 	}
-	return pass[(int)rpType];
+}
+
+void VKRRenderPass::Destroy(VulkanContext *vulkan) {
+	for (size_t i = 0; i < (size_t)RenderPassType::TYPE_COUNT; i++) {
+		Created *cur = (Created *)retro_atomic_exchange_ptr(&pass_[i], nullptr);
+		if (cur) {
+			vulkan->Delete().QueueDeleteRenderPass(cur->pass);
+			delete cur;
+		}
+	}
 }

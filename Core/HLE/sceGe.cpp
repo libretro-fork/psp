@@ -18,7 +18,6 @@
 #include <list>
 #include <map>
 #include <vector>
-#include <mutex>
 
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"

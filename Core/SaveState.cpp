@@ -17,12 +17,13 @@
 
 #include <algorithm>
 #include <vector>
-#include <thread>
-#include <mutex>
 #include <string>
 #include <set>
 
 #include "Common/Data/Text/I18n.h"
+#include <retro_atomic.h>
+
+#include "Common/Thread/MpscQueue.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/Data/Text/Parsers.h"
 #include "Common/System/System.h"
@@ -81,9 +82,9 @@ namespace SaveState {
 // Used for "confirm exit if you haven't saved in a while"
 double g_lastSaveTime = -1.0;
 
-static bool needsProcess = false;
+// Set by Enqueue on any thread, taken by Process on the emulation thread.
+static retro_atomic_int_t needsProcess{ 0 };
 static bool needsRestart = false;
-static std::mutex mutex;
 static bool hasLoadedState = false;
 static const int STALE_STATE_USES = 2;
 // 4 hours of total gameplay since the virtual PSP started the game.
@@ -121,9 +122,10 @@ struct Operation {
 	int slot;
 };
 
-static std::vector<Operation> g_pendingOperations;
+static MpscQueue<Operation> g_pendingOperations;
 
-int g_screenshotFailures;
+// Bumped from the screenshot callback, which can run on the render thread.
+static retro_atomic_int_t g_screenshotFailures{ 0 };
 
 	CChunkFileReader::Error SaveToRam(std::vector<u8> &data) {
 		SaveStart state;
@@ -142,9 +144,7 @@ int g_screenshotFailures;
 
 	void SaveStart::DoState(PointerWrap &p) {
 		// Nothing may still be writing PSP memory while it's saved, or be left to write into what's loaded.
-		__UtilityWaitForIO();
 		__SasWaitForMix();
-		__IoWaitForAsync();
 		if (gpu)
 			gpu->FlushPendingDrawing();
 
@@ -225,12 +225,11 @@ int g_screenshotFailures;
 			return;
 		}
 
-		std::lock_guard<std::mutex> guard(mutex);
-		g_pendingOperations.push_back(op);
+		g_pendingOperations.Push(op);
 
 		// Don't actually run it until next frame.
 		// It's possible there might be a duplicate but it won't hurt us.
-		needsProcess = true;
+		retro_atomic_store_release_int(&needsProcess, 1);
 	}
 
 	void Load(const Path &filename, int slot, Callback callback) {
@@ -391,8 +390,7 @@ int g_screenshotFailures;
 	}
 
 	static void ScheduleSaveScreenshot(const Path &path) {
-		std::lock_guard<std::mutex> guard(mutex);
-		g_screenshotFailures = 0;
+		retro_atomic_store_relaxed_int(&g_screenshotFailures, 0);
 
 		// Savestate thumbnails don't need to be bigger.
 		constexpr int maxResMultiplier = 2;
@@ -401,14 +399,14 @@ int g_screenshotFailures;
 			case ScreenshotResult::ScreenshotNotPossible:
 				// Try again soon, for a short while.
 				WARN_LOG(Log::SaveState, "Failed to take a screenshot for the savestate! (%s) The savestate will lack an icon.", path.c_str());
-				if (coreState != CORE_STEPPING_CPU && g_screenshotFailures++ < SCREENSHOT_FAILURE_RETRIES) {
+				if (coreState != CORE_STEPPING_CPU && retro_atomic_fetch_add_int(&g_screenshotFailures, 1) < SCREENSHOT_FAILURE_RETRIES) {
 					// Requeue for next frame (if we were stepping, no point, will just spam errors quickly).
 					ScheduleSaveScreenshot(path);
 				}
 				break;
 			case ScreenshotResult::FailedToWriteFile:
 			case ScreenshotResult::Success:
-				g_screenshotFailures = 0;
+				retro_atomic_store_relaxed_int(&g_screenshotFailures, 0);
 				break;
 			}
 		});
@@ -764,10 +762,10 @@ int g_screenshotFailures;
 	}
 
 	std::vector<Operation> Flush() {
-		std::lock_guard<std::mutex> guard(mutex);
-		std::vector<Operation> copy = g_pendingOperations;
-		g_pendingOperations.clear();
-
+		std::vector<Operation> copy;
+		g_pendingOperations.Drain([&](Operation &&op) {
+			copy.push_back(std::move(op));
+		});
 		return copy;
 	}
 
@@ -854,14 +852,14 @@ int g_screenshotFailures;
 	void Process() {
 		rewindStates.Process();
 
-		if (!needsProcess)
+		if (!retro_atomic_load_acquire_int(&needsProcess))
 			return;
 		if (coreState == CORE_STEPPING_GE || coreState == CORE_RUNNING_GE) {
 			// A display list stopped in the GE debugger still belongs to the sceGe call that started
 			// it, which finishes when the list does. Wait for that.
 			return;
 		}
-		needsProcess = false;
+		retro_atomic_store_relaxed_int(&needsProcess, 0);
 
 		if (!__KernelIsRunning()) {
 			ERROR_LOG(Log::SaveState, "Savestate failure: Unable to load without kernel, this should never happen.");
@@ -1044,7 +1042,6 @@ int g_screenshotFailures;
 		// Make sure there's a directory for save slots
 		File::CreateFullPath(GetSysDirectory(DIRECTORY_SAVESTATE));
 
-		std::lock_guard<std::mutex> guard(mutex);
 		rewindStates.Clear();
 
 		hasLoadedState = false;
@@ -1057,7 +1054,6 @@ int g_screenshotFailures;
 	}
 
 	void Shutdown() {
-		std::lock_guard<std::mutex> guard(mutex);
 		rewindStates.Clear();
 	}
 

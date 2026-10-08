@@ -1,8 +1,6 @@
 #include "ppsspp_config.h"
 
-#include <mutex>
-#include <atomic>
-#include <thread>
+#include <retro_atomic.h>
 
 #include "Common/System/System.h"
 #include "Common/System/Request.h"
@@ -13,6 +11,7 @@
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
 #include "Common/GPU/GraphicsContext.h"
+#include "Common/Thread/Thread.h"
 #include "Common/Thread/ThreadUtil.h"
 
 #include "Core/EmuThread.h"
@@ -27,37 +26,38 @@ enum class EmuThreadState {
 	STOPPED,
 };
 
-static std::atomic<EmuThreadState> g_emuThreadState(EmuThreadState::STOPPED);
-static std::atomic<bool> g_inLoop;
+static retro_atomic_int_t g_emuThreadState{ (int)EmuThreadState::STOPPED };
 
-class GraphicsContext;
+static EmuThreadState GetEmuThreadState() {
+	return (EmuThreadState)retro_atomic_load_acquire_int(&g_emuThreadState);
+}
 
-bool MainThread_Ready() {
-	return g_inLoop;
+static void SetEmuThreadState(EmuThreadState state) {
+	retro_atomic_store_release_int(&g_emuThreadState, (int)state);
 }
 
 static void EmuThreadFunc(GraphicsContext *graphicsContext, Application *application, std::function<bool (GraphicsContext *)> frame) {
 	INFO_LOG(Log::G3D, "Entering separate emu thread");
 	SetCurrentThreadName("EmuThread");
 
-	g_emuThreadState = EmuThreadState::RUNNING;
+	SetEmuThreadState(EmuThreadState::RUNNING);
 
 
 	// This normally calls NativeInitGraphics()
 	if (!application->InitGraphics(graphicsContext)) {
 		_assert_msg_(false, "NativeInitGraphics failed, might as well bail");
 		// If this fails, which it normally shouldn't, let's bail.
-		g_emuThreadState = EmuThreadState::QUIT_REQUESTED;
+		SetEmuThreadState(EmuThreadState::QUIT_REQUESTED);
 	} else {
 		INFO_LOG(Log::G3D, "EmuThread: Entering loop");
 	}
 
-	while (g_emuThreadState != EmuThreadState::QUIT_REQUESTED) {
+	while (GetEmuThreadState() != EmuThreadState::QUIT_REQUESTED) {
 		// We're here again, so the game quit.  Restart Run() which controls the UI.
 		// This way they can load a new game.
 		// This normally calls NativeFrame()
 		if (!frame(graphicsContext)) {
-			g_emuThreadState = EmuThreadState::QUIT_REQUESTED;
+			SetEmuThreadState(EmuThreadState::QUIT_REQUESTED);
 		}
 	}
 
@@ -69,45 +69,42 @@ static void EmuThreadFunc(GraphicsContext *graphicsContext, Application *applica
 
 	INFO_LOG(Log::System, "Leaving separate emu thread");
 
-	g_emuThreadState = EmuThreadState::STOPPED;
+	SetEmuThreadState(EmuThreadState::STOPPED);
 }
 
-std::thread EmuThread_Start(GraphicsContext *graphicsContext, Application *application, std::function<bool(GraphicsContext *)> frame) {
+static Thread EmuThread_Start(GraphicsContext *graphicsContext, Application *application, std::function<bool(GraphicsContext *)> frame) {
 	INFO_LOG(Log::System, "EmuTread_Start");
-	_dbg_assert_(g_emuThreadState == EmuThreadState::STOPPED);
-	std::thread emuThread = std::thread(&EmuThreadFunc, graphicsContext, application, frame);
+	_dbg_assert_(GetEmuThreadState() == EmuThreadState::STOPPED);
+	Thread emuThread(&EmuThreadFunc, graphicsContext, application, frame);
 	graphicsContext->ThreadStart();
 	return emuThread;
 }
 
 // This is useful when the render thread is in control.
-void EmuThread_RequestExit() {
+static void EmuThread_RequestExit() {
 	INFO_LOG(Log::System, "EmuTread_RequestExit");
-	if (g_emuThreadState == EmuThreadState::RUNNING) {
-		g_emuThreadState = EmuThreadState::QUIT_REQUESTED;
+	if (GetEmuThreadState() == EmuThreadState::RUNNING) {
+		SetEmuThreadState(EmuThreadState::QUIT_REQUESTED);
 	} else {
 		INFO_LOG(Log::System, "EmuTread_RequestExit: g_emuThreadState was not RUNNING, so not requesting exit.");
 	}
 }
 
-void EmuThread_Join(GraphicsContext *graphicsContext, std::thread &emuThread) {
+static void EmuThread_Join(GraphicsContext *graphicsContext, Thread &emuThread) {
 	INFO_LOG(Log::System, "EmuTread_Join");
 	if (graphicsContext->NeedsSeparateEmuThread()) {
 		EmuThread_RequestExit();
 		while (graphicsContext->ThreadFrame()) {}
 	}
 	emuThread.join();
-	emuThread = std::thread();
 	graphicsContext->ThreadEnd();
 }
 
-bool RunMainLoop(GraphicsContext *graphicsContext, Application *application, std::function<bool(GraphicsContext *)> frame) {
+static bool RunMainLoop(GraphicsContext *graphicsContext, Application *application, std::function<bool(GraphicsContext *)> frame) {
 	// This is the main loop for graphics context that handle their own threading.
 	// InitFromRenderThread/ShutdownFromRenderThread are not used.
 
 	application->InitGraphics(graphicsContext);
-
-	g_inLoop = true;
 
 	while (frame(graphicsContext)) {}
 
@@ -116,8 +113,6 @@ bool RunMainLoop(GraphicsContext *graphicsContext, Application *application, std
 
 	// Process the shutdown.  Without this, non-GL delays 800ms on shutdown. TODO: is this still an issue?
 	Core_StateProcessed();
-
-	g_inLoop = false;
 
 	application->ShutdownGraphics(graphicsContext);
 	delete application;
@@ -135,15 +130,12 @@ bool MainThreadFunc(GraphicsContext *graphicsContext, Application *application, 
 	if (graphicsContext->NeedsSeparateEmuThread()) {
 		SetCurrentThreadName("RenderThread");
 
-		g_inLoop = true;
-		std::thread emuThread = EmuThread_Start(graphicsContext, application, frame);
+		Thread emuThread = EmuThread_Start(graphicsContext, application, frame);
 		graphicsContext->ThreadStart();
 		// This thread becomes the render thread. EmuThread will tell it when to quit by sending a message.
 		while (graphicsContext->ThreadFrame()) {}
 		EmuThread_Join(graphicsContext, emuThread);
-		g_inLoop = false;
-
-		graphicsContext->ThreadEnd();
+			graphicsContext->ThreadEnd();
 
 		INFO_LOG(Log::System, "RenderThread - joined");
 

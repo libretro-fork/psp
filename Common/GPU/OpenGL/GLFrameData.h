@@ -1,10 +1,10 @@
 #pragma once
 
-#include <mutex>
-#include <condition_variable>
 #include <vector>
 #include <string>
 #include <set>
+
+#include <retro_atomic.h>
 
 #include "Common/GPU/OpenGL/GLCommon.h"
 
@@ -53,15 +53,15 @@ struct GLFrameData {
 	// Also used for indexing into the frame timing history buffer.
 	uint64_t frameId;
 
-	std::mutex fenceMutex;
-	std::condition_variable fenceCondVar;
-	bool readyForFence = true;
+	// Set by the render thread once it has presented this frame, cleared by BeginFrame.
+	retro_atomic_int_t readyForFence{ 1 };
 
 	// Swapchain.
 	bool hasBegun = false;
 
 	GLDeleter deleter;
 	GLDeleter deleter_prev;
+	// Render thread only.
 	std::set<GLPushBuffer *> activePushBuffers;
 
 	GLQueueProfileContext profile;

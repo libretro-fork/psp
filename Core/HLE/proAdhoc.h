@@ -25,9 +25,7 @@
 #define PACK __attribute__((packed))
 #endif
 
-#include <atomic>
-#include <mutex>
-#include <thread>
+#include <retro_atomic.h>
 #include <climits>
 #include <ctime>
 
@@ -38,6 +36,7 @@
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceKernelMutex.h"
 #include "Core/HLE/sceUtility.h"
+#include "Common/Thread/Thread.h"
 
 namespace net { class CancelToken; }
 
@@ -332,13 +331,23 @@ typedef struct AdhocSocket {
 		SceNetAdhocPtpStat ptp;
 	} data;
 	void *postofficeHandle; // aemu_postoffice mode handle
-	std::thread *connectThread;
+	Thread *connectThread;
 	// Cancelled before a join, so closing doesn't wait out a connect.
 	net::CancelToken *connectCancel;
-	bool connectThreadDone;
-	int connectThreadResult;
+	// What the connect thread hands back, or null when no attempt was made yet.
+	struct PostofficeConnectState *connectState;
 } PACK AdhocSocket;
 
+// Filled by a postoffice connect thread, which then sets done (release).
+struct PostofficeConnectState {
+	retro_atomic_int_t done{ 0 };
+	int result = 0;
+	void *handle = nullptr;
+};
+
+// Emulation thread. Whether the last connect attempt (if any) is over, adopting its handle as
+// postofficeHandle if it made one. result gets the attempt's result.
+bool PostofficeConnectFinished(AdhocSocket *sock, int *result = nullptr);
 // Joins a postoffice socket's connect thread (cancelling it first if asked) and frees it.
 void JoinPostofficeConnect(AdhocSocket *sock, bool cancel);
 
@@ -456,8 +465,6 @@ typedef struct SceNetAdhocMatchingContext {
 
   // Local PDP Socket
   s32_le socket;
-  // Socket Lock
-  std::recursive_mutex *socketlock;
 
   // Receive Buffer Length
   s32_le rxbuflen;
@@ -511,11 +518,9 @@ typedef struct SceNetAdhocMatchingContext {
   u64_le inputLastHello = 0;
 
   // Event Caller Thread Message Stack
-  std::recursive_mutex *eventlock; // s32_le event_stack_lock;
   ThreadMessage *event_stack;
 
   // IO Handler Thread Message Stack
-  std::recursive_mutex *inputlock; // s32_le input_stack_lock;
   ThreadMessage *input_stack;
 
   // Socket Connectivity
@@ -771,14 +776,22 @@ extern int actionAfterMatchingMipsCall;
 #define SOCK_PDP	1
 #define SOCK_PTP	2
 // Aux vars
-extern std::atomic<int> metasocket;
+// The connection to the adhoc server. See proAdhoc.cpp for who touches it when.
+int MetaSocket();
+void SetMetaSocket(int sock);
+void CloseMetaSocket();
 extern SceNetAdhocctlParameter parameter;
 extern SceNetAdhocctlAdhocId product_code;
-extern std::thread friendFinderThread;
+extern Thread friendFinderThread;
 // Make the wake before starting the thread; wake it after changing what it acts on.
 void FriendFinderPrepare();
 void FriendFinderWake();
-extern std::recursive_mutex peerlock;
+bool FriendFinderIsRunning();
+// Emulation thread: applies what the friend finder thread received, and asks it to log in when
+// needed. Called often (the adhoc HLE loop, pending adhocctl requests).
+void FriendFinderProcess();
+// Emulation thread, after joining the friend finder.
+void FriendFinderStopped();
 extern AdhocSocket* adhocSockets[MAX_SOCKET];
 
 union SockAddrIN4 {
@@ -800,7 +813,7 @@ extern SceNetAdhocMatchingContext * contexts;
 extern char* dummyPeekBuf64k;
 extern int dummyPeekBuf64kSize;
 extern int one;                 
-extern std::atomic<bool> friendFinderRunning;
+extern retro_atomic_int_t friendFinderRunning;
 extern SceNetAdhocctlPeerInfo * friends;
 extern SceNetAdhocctlScanInfo * networks;
 extern u64 adhocctlStartTime;
@@ -886,19 +899,6 @@ SceNetAdhocMatchingMemberInternal* addMember(SceNetAdhocMatchingContext * contex
  */
 void addFriend(SceNetAdhocctlConnectPacketS2C * packet);
 
-/**
-* Send chat or get that
-* @param std::string ChatString 
-*/
-void sendChat(std::string_view chatString);
-
-struct ChatLogEntry {
-	std::string text;  // "name: message", or an info line with no colon.
-	time_t timestamp;
-};
-std::vector<ChatLogEntry> getChatLog();
-int GetChatChangeID();
-int GetChatMessageCount();
 
 /*
  * Find a Peer/Friend by MAC address
@@ -1295,13 +1295,6 @@ int getPDPSocketCount();
  */
 int getPTPSocketCount();
 
-/**
- * Initialize Networking Components for Adhocctl Emulator
- * @param adhoc_id Game Product Code
- * @param server_ip Server IP
- * @return 0 on success or... -1
- */
-int initNetwork(SceNetAdhocctlAdhocId *adhocid);
 
 /**
  * Zero MAC Check

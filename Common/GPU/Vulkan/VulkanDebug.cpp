@@ -17,8 +17,7 @@
 
 #include <string>
 #include <sstream>
-#include <map>
-#include <mutex>
+#include <retro_atomic.h>
 
 #include "Common/Log.h"
 #include "Common/System/System.h"
@@ -27,14 +26,43 @@
 
 const int MAX_SAME_ERROR_COUNT = 10;
 
-// Used to stop outputting the same message over and over.
-static std::map<int, int> g_errorCount;
-std::mutex g_errorCountMutex;
+// Used to stop outputting the same message over and over. Open addressing on the message code,
+// stored xored with a tag so that zero means empty. A code that finds the table full, or equals
+// the tag, just isn't rate limited.
+struct ErrorCountSlot {
+	retro_atomic_int_t key;
+	retro_atomic_int_t count;
+};
+static constexpr int ERROR_COUNT_SLOTS = 256;
+static constexpr int ERROR_KEY_TAG = 0x5A5A5A5A;
+static ErrorCountSlot g_errorCount[ERROR_COUNT_SLOTS];
+
+static int BumpErrorCount(int code) {
+	const int key = code ^ ERROR_KEY_TAG;
+	if (key == 0) {
+		return 0;
+	}
+	const uint32_t start = (uint32_t)code * 2654435761u;
+	for (int i = 0; i < ERROR_COUNT_SLOTS; i++) {
+		ErrorCountSlot &slot = g_errorCount[(start + i) % ERROR_COUNT_SLOTS];
+		int cur = retro_atomic_load_acquire_int(&slot.key);
+		if (cur == 0 && retro_atomic_cas_int(&slot.key, 0, key)) {
+			cur = key;
+		} else if (cur == 0) {
+			cur = retro_atomic_load_acquire_int(&slot.key);
+		}
+		if (cur == key) {
+			return retro_atomic_fetch_add_int(&slot.count, 1);
+		}
+	}
+	return 0;
+}
 
 // TODO: Call this when launching games in some clean way.
 void VulkanClearValidationErrorCounts() {
-	std::lock_guard<std::mutex> lock(g_errorCountMutex);
-	g_errorCount.clear();
+	for (int i = 0; i < ERROR_COUNT_SLOTS; i++) {
+		retro_atomic_store_relaxed_int(&g_errorCount[i].count, 0);
+	}
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugUtilsCallback(
@@ -110,11 +138,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugUtilsCallback(
 	}
 	*/
 
-	int count;
-	{
-		std::lock_guard<std::mutex> lock(g_errorCountMutex);
-		count = g_errorCount[messageCode]++;
-	}
+	const int count = BumpErrorCount(messageCode);
 	if (count == MAX_SAME_ERROR_COUNT) {
 		WARN_LOG(Log::G3D, "Too many validation messages with message %d, stopping", messageCode);
 	}

@@ -15,7 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <thread>
 
 #include "Core/Core.h"
 #include "Common/System/Request.h"
@@ -49,6 +48,7 @@
 #include "Core/System.h"
 #include "Core/PSPLoaders.h"
 #include "Core/HLE/sceKernelModule.h"
+#include "Common/Thread/Thread.h"
 
 static void UseLargeMem(int memsize) {
 	if (memsize != 1) {
@@ -68,7 +68,7 @@ void DumpBlockDeviceAsync(std::shared_ptr<BlockDevice> bd, Path destPath, std::s
 	NPDRMDemoBlockDevice *npdrmDemoBD = dynamic_cast<NPDRMDemoBlockDevice *>(bd.get());
 	if (npdrmDemoBD) {
 		INFO_LOG(Log::System, "Dumping NPDRM demo ISO... (%s)", destPath.c_str());
-		std::thread dumpThread([bd, title, destPath]() {
+		Thread dumpThread([bd, title, destPath]() {
 			File::CreateFullPath(destPath.NavigateUp());
 			if (File::Exists(destPath)) {
 				INFO_LOG(Log::System, "Dump file already exists, skipping: %s", destPath.c_str());

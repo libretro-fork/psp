@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <mutex>
-#include <condition_variable>
 
 #include "Common/Thread/Promise.h"
 #include "Common/Data/Collections/Hashmaps.h"
@@ -213,7 +211,7 @@ struct VKRRenderThreadTask {
 
 class VulkanQueueRunner {
 public:
-	VulkanQueueRunner(VulkanContext *vulkan) : vulkan_(vulkan), renderPasses_(16) {}
+	VulkanQueueRunner(VulkanContext *vulkan) : vulkan_(vulkan) {}
 
 	void SetBackbuffer(VkFramebuffer fb, VkImage img) {
 		backbuffer_ = fb;
@@ -253,15 +251,13 @@ public:
 	VKRRenderPass *GetRenderPass(const RPKey &key);
 
 	bool GetRenderPassKey(VKRRenderPass *passToFind, RPKey *outKey) const {
-		std::lock_guard<std::mutex> lock(renderPassesMutex_);
-		bool found = false;
-		renderPasses_.Iterate([passToFind, &found, outKey](const RPKey &rpkey, const VKRRenderPass *pass) {
-			if (pass == passToFind) {
-				found = true;
-				*outKey = rpkey;
+		for (int i = 0; i < RPKey::INDEX_COUNT; i++) {
+			if (retro_atomic_load_acquire_ptr(const_cast<retro_atomic_ptr_t *>(&renderPasses_[i])) == passToFind) {
+				*outKey = passToFind->Key();
+				return true;
 			}
-		});
-		return found;
+		}
+		return false;
 	}
 
 	void EnableHacks(uint32_t hacks) {
@@ -303,9 +299,9 @@ private:
 
 	// Renderpasses, all combinations of preserving or clearing or dont-care-ing fb contents.
 	// Each VKRRenderPass contains all compatibility classes (which attachments they have, etc).
-	// Looked up and inserted into from both the main thread and the render thread - see GetRenderPass.
-	mutable std::mutex renderPassesMutex_;
-	DenseHashMap<RPKey, VKRRenderPass *> renderPasses_;
+	// VKRRenderPass * by RPKey::Index(). Filled in with CAS from the main and render threads, see
+	// GetRenderPass, and only emptied in DestroyDeviceObjects.
+	retro_atomic_ptr_t renderPasses_[RPKey::INDEX_COUNT]{};
 
 	// Readback buffer. Currently we only support synchronous readback, so we only really need one.
 	// We size it generously.

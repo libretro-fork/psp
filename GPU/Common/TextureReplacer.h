@@ -19,7 +19,6 @@
 
 #include "ppsspp_config.h"
 
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <map>

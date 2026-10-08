@@ -1,9 +1,7 @@
 #pragma once
 
-#include <atomic>
 #include <functional>
 #include <memory>
-#include <thread>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -12,6 +10,7 @@
 #include "Common/Net/NetBuffer.h"
 #include "Common/Net/Resolve.h"
 #include "Common/Net/HTTPRequest.h"
+#include "Common/Thread/Thread.h"
 
 namespace net {
 
@@ -113,7 +112,7 @@ public:
 	void Start() override;
 	void Join() override;
 
-	bool Done() override { return completed_; }
+	bool Done() override { return retro_atomic_load_acquire_int(&completed_) != 0; }
 	bool Failed() const override { return failed_; }
 
 private:
@@ -123,11 +122,11 @@ private:
 	void SetFailed(int code);
 
 	std::string postData_;
-	std::thread thread_;
+	Thread thread_;
 	std::string postMime_;
-	// Set last on the download thread, after the result code and buffer. Atomic, so that once
+	// Set last on the download thread, after the result code and buffer (release), so once
 	// Done() sees it, those are visible too.
-	std::atomic<bool> completed_{false};
+	retro_atomic_int_t completed_{ 0 };
 	bool failed_ = false;
 	net::ResolveFunc customResolve_;
 };

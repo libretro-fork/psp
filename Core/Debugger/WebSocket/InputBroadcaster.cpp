@@ -73,7 +73,7 @@ static std::string ButtonsEvent(uint32_t lastButtons, uint32_t newButtons) {
 	return j.str();
 }
 
-void InputBroadcaster::Broadcast(net::WebSocketServer *ws) {
+void InputBroadcaster::Poll(std::vector<std::string> *events) {
 	int counter = __DisplayGetNumVblanks();
 	if (lastCounter_ == counter)
 		return;
@@ -81,21 +81,21 @@ void InputBroadcaster::Broadcast(net::WebSocketServer *ws) {
 
 	uint32_t newButtons = __CtrlPeekButtons();
 	if (newButtons != lastButtons_) {
-		ws->Send(ButtonsEvent(lastButtons_, newButtons));
+		events->push_back(ButtonsEvent(lastButtons_, newButtons));
 		lastButtons_ = newButtons;
 	}
 
 	Analog newAnalog;
 	__CtrlPeekAnalog(CTRL_STICK_LEFT, &newAnalog.x, &newAnalog.y);
 	if (!lastAnalog_[0].Equals(newAnalog)) {
-		ws->Send(newAnalog.Event("left"));
+		events->push_back(newAnalog.Event("left"));
 		lastAnalog_[0].x = newAnalog.x;
 		lastAnalog_[0].y = newAnalog.y;
 	}
 
 	__CtrlPeekAnalog(CTRL_STICK_RIGHT, &newAnalog.x, &newAnalog.y);
 	if (!lastAnalog_[1].Equals(newAnalog)) {
-		ws->Send(newAnalog.Event("right"));
+		events->push_back(newAnalog.Event("right"));
 		lastAnalog_[1].x = newAnalog.x;
 		lastAnalog_[1].y = newAnalog.y;
 	}

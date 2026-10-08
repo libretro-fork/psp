@@ -36,7 +36,6 @@
 using namespace Gen;
 using namespace X64JitConstants;
 
-extern volatile CoreState coreState;
 
 namespace MIPSComp
 {

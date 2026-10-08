@@ -16,7 +16,7 @@
 // http://code.google.com/p/dolphin-emu/
 
 #include <string>
-#include <mutex>
+#include <retro_atomic.h>
 
 #include "ppsspp_config.h"
 
@@ -39,9 +39,15 @@ static HWND g_dialogParent;
 
 static bool hitAnyAsserts = false;
 
-static std::mutex g_extraAssertInfoMutex;
-static std::string g_extraAssertInfo = "menu";
-static double g_assertInfoTime = 0.0;
+// Rotating slots: the writer fills one, then publishes its index. A reader racing a
+// writer several updates ahead may see a torn string; it's only assert decoration.
+struct AssertInfoSlot {
+	char text[64];
+	double time;
+};
+static AssertInfoSlot g_extraAssertInfo[4] = { { "menu", 0.0 } };
+static retro_atomic_int_t g_extraAssertInfoIndex;
+static retro_atomic_int_t g_extraAssertInfoNext;
 static bool g_exitOnAssert;
 static AssertNoCallbackFunc g_assertCancelCallback = 0;
 static void *g_assertCancelCallbackUserData = 0;
@@ -73,9 +79,11 @@ void SetAssertDialogParent(void *handle) {
 }
 
 void SetExtraAssertInfo(const char *info) {
-	std::lock_guard<std::mutex> guard(g_extraAssertInfoMutex);
-	g_extraAssertInfo = info ? info : "menu";
-	g_assertInfoTime = time_now_d();
+	const int idx = retro_atomic_fetch_add_int(&g_extraAssertInfoNext, 1) & 3;
+	AssertInfoSlot &slot = g_extraAssertInfo[idx];
+	truncate_cpy(slot.text, sizeof(slot.text), info ? info : "menu");
+	slot.time = time_now_d();
+	retro_atomic_store_release_int(&g_extraAssertInfoIndex, idx);
 }
 
 void SetAssertCancelCallback(AssertNoCallbackFunc callback, void *userdata) {
@@ -104,13 +112,16 @@ bool HandleAssert(bool isDebugAssert, const char *function, const char *file, in
 	// Secondary formatting. Wonder if this can be combined into the vsnprintf somehow.
 	char formatted[LOG_BUF_SIZE + 128];
 	{
-		std::lock_guard<std::mutex> guard(g_extraAssertInfoMutex);
-		double delta = time_now_d() - g_assertInfoTime;
+		const AssertInfoSlot &slot = g_extraAssertInfo[retro_atomic_load_acquire_int(&g_extraAssertInfoIndex) & 3];
+		char info[sizeof(slot.text)];
+		memcpy(info, slot.text, sizeof(info));
+		info[sizeof(info) - 1] = '\0';
+		double delta = time_now_d() - slot.time;
 		u32 debugCounters = 0;
 		for (int i = 0; i < 8; i++) {
 			debugCounters |= g_debugCounters[7 - i] << (i * 4);
 		}
-		snprintf(formatted, sizeof(formatted), "(%s:%s:%d:%08x): [%s] (%s, %0.1fs) %s", file, function, line, debugCounters, expression, g_extraAssertInfo.c_str(), delta, text);
+		snprintf(formatted, sizeof(formatted), "(%s:%s:%d:%08x): [%s] (%s, %0.1fs) %s", file, function, line, debugCounters, expression, info, delta, text);
 	}
 
 	// Normal logging (will also log to Android log)

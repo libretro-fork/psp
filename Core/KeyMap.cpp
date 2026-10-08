@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <set>
 #include <unordered_map>
-#include <mutex>
 
 #include "ppsspp_config.h"
 
@@ -40,9 +39,7 @@
 
 namespace KeyMap {
 
-// We actually need to lock g_controllerMap since it can be modified! Crashes will probably be rare though,
-// but I've seen one. Let's just protect it with a mutex.
-std::recursive_mutex g_controllerMapLock;
+// Belongs to the thread that loads and saves the config.
 KeyMapping g_controllerMap;
 
 // Incremented on modification, so we know when to update menus.
@@ -601,7 +598,6 @@ const KeyMap::KeyMap_IntStrPair *GetMappableKeys(size_t *count) {
 
 bool InputMappingToPspButton(const InputMapping &mapping, std::vector<int> *pspButtons) {
 	bool found = false;
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	for (auto iter = g_controllerMap.begin(); iter != g_controllerMap.end(); ++iter) {
 		for (auto iter2 = iter->second.begin(); iter2 != iter->second.end(); ++iter2) {
 			if (iter2->EqualsSingleMapping(mapping)) {
@@ -614,19 +610,7 @@ bool InputMappingToPspButton(const InputMapping &mapping, std::vector<int> *pspB
 	return found;
 }
 
-void GetAllComboMappingsNoLock(std::vector<MultiInputMapping> *combos) {
-	combos->clear();
-	for (const auto &iter : g_controllerMap) {
-		for (const auto &mapping : iter.second) {
-			if (mapping.mappings.size() > 1) {
-				combos->push_back(mapping);
-			}
-		}
-	}
-}
-
-// This is the main workhorse of the ControlMapper.
-bool InputMappingsFromPspButtonNoLock(int btn, std::vector<MultiInputMapping> *mappings, bool ignoreMouse) {
+bool InputMappingsFromPspButton(int btn, std::vector<MultiInputMapping> *mappings, bool ignoreMouse) {
 	auto iter = g_controllerMap.find(btn);
 	if (iter == g_controllerMap.end()) {
 		return false;
@@ -647,21 +631,7 @@ bool InputMappingsFromPspButtonNoLock(int btn, std::vector<MultiInputMapping> *m
 	return mapped;
 }
 
-bool InputMappingsFromPspButton(int btn, std::vector<MultiInputMapping> *mappings, bool ignoreMouse) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
-	return InputMappingsFromPspButtonNoLock(btn, mappings, ignoreMouse);
-}
-
-void LockMappings() {
-	g_controllerMapLock.lock();
-}
-
-void UnlockMappings() {
-	g_controllerMapLock.unlock();
-}
-
 bool PspButtonHasMappings(int btn) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	auto iter = g_controllerMap.find(btn);
 	if (iter == g_controllerMap.end()) {
 		return false;
@@ -696,7 +666,6 @@ MappedAnalogAxes MappedAxesForDevice(InputDeviceID deviceId) {
 	};
 
 	MappedAnalogAxes result;
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	result.leftX = findAxisIdPair(VIRTKEY_AXIS_X_MIN, VIRTKEY_AXIS_X_MAX);
 	result.leftY = findAxisIdPair(VIRTKEY_AXIS_Y_MIN, VIRTKEY_AXIS_Y_MAX);
 	result.rightX = findAxisIdPair(VIRTKEY_AXIS_RIGHT_X_MIN, VIRTKEY_AXIS_RIGHT_X_MAX);
@@ -705,7 +674,6 @@ MappedAnalogAxes MappedAxesForDevice(InputDeviceID deviceId) {
 }
 
 void RemoveButtonMapping(int btn) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	for (auto iter = g_controllerMap.begin(); iter != g_controllerMap.end(); ++iter)	{
 		if (iter->first == btn) {
 			g_controllerMap.erase(iter);
@@ -715,7 +683,6 @@ void RemoveButtonMapping(int btn) {
 }
 
 bool IsKeyMapped(InputDeviceID device, int key) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	for (auto &iter : g_controllerMap) {
 		for (auto &mappedKey : iter.second) {
 			if (mappedKey.mappings.contains(InputMapping(device, key))) {
@@ -727,7 +694,6 @@ bool IsKeyMapped(InputDeviceID device, int key) {
 }
 
 bool ReplaceSingleKeyMapping(int btn, int index, const MultiInputMapping &key) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	// Check for duplicate
 	for (int i = 0; i < (int)g_controllerMap[btn].size(); ++i) {
 		if (i != index && g_controllerMap[btn][i] == key) {
@@ -754,7 +720,6 @@ bool ReplaceSingleKeyMapping(int btn, int index, const MultiInputMapping &key) {
 }
 
 void DeleteNthMapping(int key, int number) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	auto iter = g_controllerMap.find(key);
 	if (iter != g_controllerMap.end()) {
 		if (number < iter->second.size()) {
@@ -765,7 +730,6 @@ void DeleteNthMapping(int key, int number) {
 }
 
 void SetInputMapping(int btn, const MultiInputMapping &key, bool replace) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	if (key.empty()) {
 		g_controllerMap.erase(btn);
 		return;
@@ -789,7 +753,6 @@ void SetInputMapping(int btn, const MultiInputMapping &key, bool replace) {
 }
 
 void RestoreDefault() {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	g_controllerMap.clear();
 	g_controllerMapGeneration++;
 
@@ -833,7 +796,6 @@ void LoadFromIni(IniFile &file) {
 		return;
 	}
 
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 
 	Section *controls = file.GetOrCreateSection("ControlMapping");
 	for (size_t i = 0; i < ARRAY_SIZE(psp_button_names); i++) {
@@ -866,7 +828,6 @@ void LoadFromIni(IniFile &file) {
 void SaveToIni(IniFile &file) {
 	Section *controls = file.GetOrCreateSection("ControlMapping");
 
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 
 	for (size_t i = 0; i < ARRAY_SIZE(psp_button_names); i++) {
 		std::vector<MultiInputMapping> keys;
@@ -884,7 +845,6 @@ void SaveToIni(IniFile &file) {
 }
 
 void ClearAllMappings() {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	g_controllerMap.clear();
 	g_controllerMapGeneration++;
 }
@@ -917,7 +877,6 @@ bool HasBuiltinController(std::string_view name) {
 
 void NotifyPadConnected(InputDeviceID deviceId, std::string_view name) {
 	{
-		std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 		g_seenPads.insert(std::string(name));
 		g_padNames[deviceId] = name;
 
@@ -934,7 +893,6 @@ void NotifyPadConnected(InputDeviceID deviceId, std::string_view name) {
 
 void NotifyPadDisconnected(InputDeviceID deviceId) {
 	{
-		std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 		auto iter = g_padNames.find(deviceId);
 		if (iter != g_padNames.end()) {
 			auto co = GetI18NCategory(I18NCat::CONTROLS);
@@ -948,7 +906,6 @@ void NotifyPadDisconnected(InputDeviceID deviceId) {
 
 void ClearControlsWithDeviceId(InputDeviceID deviceId) {
 	bool modified = false;
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	for (auto iter = g_controllerMap.begin(); iter != g_controllerMap.end(); ++iter) {
 		auto &mappings = iter->second;
 		for (auto mapIter = mappings.begin(); mapIter != mappings.end(); ) {
@@ -974,7 +931,6 @@ void ClearControlsWithDeviceId(InputDeviceID deviceId) {
 }
 
 void AutoConfForPad(std::string_view name) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 
 	InputDeviceID deviceId = DEVICE_ID_PAD_0;
 	for (auto [padDeviceId, padName] : g_padNames) {
@@ -1015,12 +971,10 @@ void AutoConfForPad(std::string_view name) {
 }
 
 const std::set<std::string> &GetSeenPads() {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	return g_seenPads;
 }
 
 std::string PadName(InputDeviceID deviceId) {
-	std::lock_guard<std::recursive_mutex> guard(g_controllerMapLock);
 	auto it = g_padNames.find(deviceId);
 	if (it != g_padNames.end())
 		return it->second;

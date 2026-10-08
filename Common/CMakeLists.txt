@@ -23,8 +23,8 @@ set(CommonVR
 	VR/VRRenderer.h
 )
 
-# The HTTP/WebSocket servers, the path browser and the Windows console are for
-# the headless tools; libretro/Makefile.common leaves them out of the core too.
+# The UI framework, the HTTP/WebSocket servers, the path browser and the Windows console
+# are for the headless tools; libretro/Makefile.common leaves them out of the core too.
 set(CommonNonLibretro)
 if(NOT LIBRETRO)
 	list(APPEND CommonNonLibretro
@@ -141,6 +141,8 @@ add_library(Common STATIC
 	File/Path.h
 	File/Path.cpp
 	File/FileUtil.cpp
+	File/PositionalFile.cpp
+	File/PositionalFile.h
 	File/FileUtil.h
 	File/DirListing.cpp
 	File/DirListing.h
@@ -279,6 +281,8 @@ add_library(Common STATIC
 	Thread/ParallelLoop.h
 	Thread/ParkingLot.cpp
 	Thread/ParkingLot.h
+	Thread/Thread.cpp
+	Thread/Thread.h
 	Thread/Promise.h
 	Thread/ThreadUtil.cpp
 	Thread/ThreadUtil.h
@@ -324,6 +328,7 @@ add_library(Common STATIC
 	${CMAKE_SOURCE_DIR}/ext/jpge/jpgd.h
 	${CMAKE_SOURCE_DIR}/ext/jpge/jpge.cpp
 	${CMAKE_SOURCE_DIR}/ext/jpge/jpge.h
+	${CommonNonLibretro}
 )
 
 setup_target_project(Common Common)

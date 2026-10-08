@@ -16,11 +16,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include <atomic>
 #include <climits>
 #include <cstdio>
 #include <cstring>
-#include <mutex>
 #include <set>
 #include <vector>
 

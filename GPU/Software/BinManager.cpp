@@ -15,10 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <atomic>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
+#include <retro_atomic.h>
 
 #include "Common/BitSet.h"
 #include "Common/Profiler/Profiler.h"
@@ -48,36 +45,28 @@ using namespace Rasterizer;
 struct BinWaitable : public Waitable {
 public:
 	BinWaitable() {
-		count_ = 0;
+		retro_atomic_int_init(&count_, 0);
 	}
 
 	void Fill() {
-		count_++;
+		retro_atomic_fetch_add_int(&count_, 1);
 	}
 
 	bool Empty() {
-		return count_ == 0;
+		return retro_atomic_load_acquire_int(&count_) == 0;
 	}
 
 	void Drain() {
-		int result = --count_;
-		if (result == 0) {
-			// We were the last one to increment.
-			std::unique_lock<std::mutex> lock(mutex_);
-			cond_.notify_all();
+		if (retro_atomic_fetch_sub_int(&count_, 1) == 1) {
+			ParkingLotNotify(this);
 		}
 	}
 
 	void Wait() override {
-		std::unique_lock<std::mutex> lock(mutex_);
-		while (count_ != 0) {
-			cond_.wait(lock);
-		}
+		ParkingLotWait(this, [this] { return retro_atomic_load_acquire_int(&count_) == 0; });
 	}
 
-	std::atomic<int> count_;
-	std::mutex mutex_;
-	std::condition_variable cond_;
+	retro_atomic_int_t count_;
 };
 
 static inline void DrawBinItem(const BinItem &item, const BinCoords &range, const RasterizerState &state) {
@@ -114,7 +103,7 @@ static inline void DrawBinItem(const BinItem &item, const RasterizerState &state
 
 class DrawBinItemsTask : public Task {
 public:
-	DrawBinItemsTask(BinWaitable *notify, BinManager *binner, int index, std::atomic<bool> &status)
+	DrawBinItemsTask(BinWaitable *notify, BinManager *binner, int index, retro_atomic_int_t &status)
 		: notify_(notify), binner_(binner), index_(index), status_(status) {
 	}
 
@@ -130,8 +119,10 @@ public:
 	void Run() override {
 		binner_->WakeChained();
 		binner_->ProcessTiles(index_);
-		status_ = false;
+		retro_atomic_store_release_int(&status_, 0);
 		// Work queued after the last look, but before status_ said we were done, would otherwise wait.
+		// Paired with the fence in WakeTasks().
+		retro_atomic_thread_fence_seq_cst();
 		binner_->ProcessTiles(index_);
 		notify_->Drain();
 	}
@@ -144,7 +135,7 @@ private:
 	BinWaitable *notify_;
 	BinManager *binner_;
 	int index_;
-	std::atomic<bool> &status_;
+	retro_atomic_int_t &status_;
 };
 
 constexpr int BinManager::MAX_POSSIBLE_TASKS;
@@ -152,7 +143,9 @@ constexpr int BinManager::MAX_POSSIBLE_TASKS;
 BinManager::BinManager() {
 	waitable_ = new BinWaitable();
 	for (auto &s : taskStatus_)
-		s = false;
+		retro_atomic_int_init(&s, 0);
+	for (auto &c : chainWake_)
+		retro_atomic_int_init(&c, 0);
 
 	int maxInitTasks = std::min(g_threadManager.GetNumLooperThreads(), MAX_POSSIBLE_TASKS);
 	maxTasks_ = FORCE_SINGLE_THREAD ? 1 : maxInitTasks;
@@ -163,12 +156,12 @@ BinManager::BinManager() {
 	PickTileSize(maxInitTasks);
 	tiles_ = (Tile *)AllocateAlignedMemory(sizeof(Tile) * tilesX_ * tilesY_, 64);
 	for (int i = 0; i < tilesX_ * tilesY_; ++i) {
-		tiles_[i].head = 0;
-		tiles_[i].tail = 0;
-		tiles_[i].busy = false;
+		retro_atomic_int_init(&tiles_[i].head, 0);
+		retro_atomic_int_init(&tiles_[i].tail, 0);
+		retro_atomic_int_init(&tiles_[i].busy, 0);
 	}
 	for (auto &r : itemRefs_)
-		r = 0;
+		retro_atomic_int_init(&r, 0);
 	states_.Setup();
 	cluts_.Setup();
 	queue_.Setup();
@@ -577,7 +570,7 @@ void BinManager::Drain() {
 	PROFILE_THIS_SCOPE("bin_drain");
 
 	// Also when switching to one thread: what's left goes to the tiles, which hold the earlier items.
-	if (maxTasks_ > 1 || activeCount_ != 0) {
+	if (maxTasks_ > 1 || retro_atomic_load_relaxed_int(&activeCount_) != 0) {
 		DistributeItems();
 		// Waking threads costs more than drawing a little: the flush draws that itself.
 		if (entriesSinceWake_ >= WAKE_ENTRIES) {
@@ -649,20 +642,20 @@ void BinManager::DistributeItems(size_t end) {
 		const int ty1 = std::clamp(item.range.y1 >> tileShiftY_, 0, tilesY_ - 1);
 		const int ty2 = std::clamp(item.range.y2 >> tileShiftY_, 0, tilesY_ - 1);
 		// Set before any tile can draw it.
-		itemRefs_[index].store((tx2 - tx1 + 1) * (ty2 - ty1 + 1), std::memory_order_relaxed);
+		retro_atomic_store_relaxed_int(&itemRefs_[index], (tx2 - tx1 + 1) * (ty2 - ty1 + 1));
 		for (int ty = ty1; ty <= ty2; ++ty) {
 			for (int tx = tx1; tx <= tx2; ++tx) {
 				const int t = ty * tilesX_ + tx;
 				Tile &tile = tiles_[t];
-				const uint32_t tail = tile.tail.load(std::memory_order_relaxed);
+				const uint32_t tail = (uint32_t)retro_atomic_load_relaxed_int(&tile.tail);
 				tile.items[tail % QUEUED_PRIMS] = (uint16_t)index;
 				entriesSinceWake_++;
-				tile.tail.store(tail + 1, std::memory_order_release);
+				retro_atomic_store_release_int(&tile.tail, (int)(tail + 1));
 				if (!tileActive_[t]) {
 					tileActive_[t] = true;
-					const int count = activeCount_.load(std::memory_order_relaxed);
+					const int count = retro_atomic_load_relaxed_int(&activeCount_);
 					activeTiles_[count] = (uint16_t)t;
-					activeCount_.store(count + 1, std::memory_order_release);
+					retro_atomic_store_release_int(&activeCount_, count + 1);
 				}
 			}
 		}
@@ -671,43 +664,46 @@ void BinManager::DistributeItems(size_t end) {
 }
 
 void BinManager::ResetTiles() {
-	const int activeCount = activeCount_;
+	// Workers are all done here (waitable_), so relaxed is enough; their next run is enqueued after this.
+	const int activeCount = retro_atomic_load_relaxed_int(&activeCount_);
 	for (int i = 0; i < activeCount; ++i) {
 		const int t = activeTiles_[i];
-		tiles_[t].head = 0;
-		tiles_[t].tail = 0;
+		retro_atomic_store_relaxed_int(&tiles_[t].head, 0);
+		retro_atomic_store_relaxed_int(&tiles_[t].tail, 0);
 		tileActive_[t] = false;
 	}
-	activeCount_ = 0;
+	retro_atomic_store_relaxed_int(&activeCount_, 0);
 	entriesSinceWake_ = 0;
 	tileGen_++;
 }
 
 void BinManager::ReclaimItems() {
-	while (!queue_.Empty() && queue_.head_ != distributePos_ && itemRefs_[queue_.head_].load(std::memory_order_acquire) == 0)
+	while (!queue_.Empty() && queue_.head_ != distributePos_ && retro_atomic_load_acquire_int(&itemRefs_[queue_.head_]) == 0)
 		queue_.SkipNext();
 }
 
 void BinManager::WakeTasks() {
 	// No more threads than tiles with work.
 	int pending = 0;
-	const int count = activeCount_.load(std::memory_order_relaxed);
+	// Paired with the fence in DrawBinItemsTask::Run(): either it sees the new items or we see it running.
+	retro_atomic_thread_fence_seq_cst();
+	const int count = retro_atomic_load_relaxed_int(&activeCount_);
 	for (int n = 0; n < count && pending < maxTasks_; ++n) {
-		const Tile &tile = tiles_[activeTiles_[n]];
-		if (tile.head.load(std::memory_order_relaxed) != tile.tail.load(std::memory_order_relaxed))
+		Tile &tile = tiles_[activeTiles_[n]];
+		if (retro_atomic_load_relaxed_int(&tile.head) != retro_atomic_load_relaxed_int(&tile.tail))
 			pending++;
 	}
 
 	int first = -1;
 	uint64_t chain = 0;
 	for (int i = 0; i < maxTasks_ && pending > 0; ++i) {
-		if (taskStatus_[i]) {
+		if (retro_atomic_load_acquire_int(&taskStatus_[i])) {
 			pending--;
 			continue;
 		}
 
 		waitable_->Fill();
-		taskStatus_[i] = true;
+		retro_atomic_store_relaxed_int(&taskStatus_[i], 1);
 		if (first < 0)
 			first = i;
 		else
@@ -717,18 +713,27 @@ void BinManager::WakeTasks() {
 	}
 	if (first < 0)
 		return;
-	if (chain != 0)
-		chainWake_.fetch_or(chain, std::memory_order_release);
+	for (int w = 0; w < (int)ARRAY_SIZE(chainWake_); ++w) {
+		const uint32_t bits = (uint32_t)(chain >> (w * 32));
+		if (bits != 0) {
+			retro_atomic_fetch_or_int(&chainWake_[w], (int)bits);
+		}
+	}
 	g_threadManager.EnqueueTaskOnThread(first, taskLists_[first].Next());
 	mostThreads_ = std::max(mostThreads_, maxTasks_);
 }
 
 void BinManager::WakeChained() {
-	u64 chain = chainWake_.exchange(0, std::memory_order_acquire);
-	while (chain != 0) {
-		const int i = LeastSignificantSetBit(chain);
-		chain &= chain - 1;
-		g_threadManager.EnqueueTaskOnThread(i, taskLists_[i].Next());
+	for (int w = 0; w < (int)ARRAY_SIZE(chainWake_); ++w) {
+		if (retro_atomic_load_relaxed_int(&chainWake_[w]) == 0) {
+			continue;
+		}
+		uint32_t chain = (uint32_t)retro_atomic_exchange_int(&chainWake_[w], 0);
+		while (chain != 0) {
+			const int i = w * 32 + LeastSignificantSetBit(chain);
+			chain &= chain - 1;
+			g_threadManager.EnqueueTaskOnThread(i, taskLists_[i].Next());
+		}
 	}
 }
 
@@ -744,22 +749,25 @@ void BinManager::MakeRoom() {
 		if (!ProcessTiles(0)) {
 			// Every tile with work is held by a worker. Park until one lets go of a tile
 			// (workers only notify while roomWaiting_ is up) or room frees up.
-			roomWaiting_.store(true, std::memory_order_seq_cst);
+			retro_atomic_store_release_int(&roomWaiting_, 1);
+			retro_atomic_thread_fence_seq_cst();
 			ParkingLotWait(&roomWaiting_, [&] {
 				ReclaimItems();
 				return !queue_.Full() || HasIdleTileWithWork();
 			});
-			roomWaiting_.store(false, std::memory_order_relaxed);
+			retro_atomic_store_relaxed_int(&roomWaiting_, 0);
 		}
 		ReclaimItems();
 	}
 }
 
 bool BinManager::HasIdleTileWithWork() const {
-	const int count = activeCount_.load(std::memory_order_acquire);
+	// The GPU thread's own view: it is the only writer of activeCount_ and tail.
+	BinManager *self = const_cast<BinManager *>(this);
+	const int count = retro_atomic_load_relaxed_int(&self->activeCount_);
 	for (int n = 0; n < count; ++n) {
-		const Tile &tile = tiles_[activeTiles_[n]];
-		if (tile.head.load(std::memory_order_relaxed) != tile.tail.load(std::memory_order_acquire) && !tile.busy.load(std::memory_order_seq_cst))
+		Tile &tile = self->tiles_[activeTiles_[n]];
+		if (retro_atomic_load_acquire_int(&tile.head) != retro_atomic_load_relaxed_int(&tile.tail) && !retro_atomic_load_acquire_int(&tile.busy))
 			return true;
 	}
 	return false;
@@ -770,13 +778,13 @@ bool BinManager::ProcessTiles(int start) {
 	bool found;
 	do {
 		found = false;
-		const int count = activeCount_.load(std::memory_order_acquire);
+		const int count = retro_atomic_load_acquire_int(&activeCount_);
 		for (int n = 0; n < count; ++n) {
 			const int t = activeTiles_[(start + n) % count];
 			Tile &tile = tiles_[t];
-			if (tile.head.load(std::memory_order_relaxed) == tile.tail.load(std::memory_order_acquire))
+			if (retro_atomic_load_relaxed_int(&tile.head) == retro_atomic_load_acquire_int(&tile.tail))
 				continue;
-			if (tile.busy.load(std::memory_order_relaxed) || tile.busy.exchange(true, std::memory_order_acquire))
+			if (retro_atomic_load_relaxed_int(&tile.busy) || retro_atomic_exchange_int(&tile.busy, 1))
 				continue;
 
 			const int tx = t % tilesX_, ty = t / tilesX_;
@@ -784,9 +792,9 @@ bool BinManager::ProcessTiles(int start) {
 				tx << tileShiftX_, ty << tileShiftY_,
 				((tx + 1) << tileShiftX_) - 1, ((ty + 1) << tileShiftY_) - 1,
 			};
-			uint32_t head = tile.head.load(std::memory_order_relaxed);
+			uint32_t head = (uint32_t)retro_atomic_load_relaxed_int(&tile.head);
 			uint32_t tail;
-			while (head != (tail = tile.tail.load(std::memory_order_acquire))) {
+			while (head != (tail = (uint32_t)retro_atomic_load_acquire_int(&tile.tail))) {
 				for (; head != tail; ++head) {
 					const uint16_t index = tile.items[head % QUEUED_PRIMS];
 					const BinItem &item = queue_[index];
@@ -794,13 +802,14 @@ bool BinManager::ProcessTiles(int start) {
 					const BinCoords range = tileRange.Intersect(item.range);
 					if (!range.Invalid())
 						DrawBinItem(item, range, states_[item.stateIndex]);
-					itemRefs_[index].fetch_sub(1, std::memory_order_release);
+					retro_atomic_fetch_sub_int(&itemRefs_[index], 1);
 				}
-				tile.head.store(head, std::memory_order_release);
+				retro_atomic_store_release_int(&tile.head, (int)head);
 			}
-			// Paired with the seq_cst store in MakeRoom(): either it sees this tile idle, or we see it waiting.
-			tile.busy.store(false, std::memory_order_seq_cst);
-			if (roomWaiting_.load(std::memory_order_seq_cst))
+			retro_atomic_store_release_int(&tile.busy, 0);
+			// Paired with the fence in MakeRoom(): either it sees this tile idle, or we see it waiting.
+			retro_atomic_thread_fence_seq_cst();
+			if (retro_atomic_load_relaxed_int(&roomWaiting_))
 				ParkingLotNotify(&roomWaiting_);
 			found = true;
 			any = true;
@@ -828,7 +837,7 @@ void BinManager::Flush(const char *reason) {
 		st = time_now_d();
 	}
 	Drain();
-	if (maxTasks_ > 1 || activeCount_ != 0) {
+	if (maxTasks_ > 1 || retro_atomic_load_relaxed_int(&activeCount_) != 0) {
 		// Help with the drawing, then wait for what the threads are still on.
 		while (ProcessTiles(0)) {
 		}
@@ -1245,7 +1254,7 @@ void BinManager::DrainDependent() {
 	pendingStateIndex_ = stateIndex_;
 	if (distributePos_ != last)
 		DistributeItems(last);
-	if (activeCount_ != 0) {
+	if (retro_atomic_load_relaxed_int(&activeCount_) != 0) {
 		if (entriesSinceWake_ >= WAKE_ENTRIES)
 			WakeTasks();
 		while (ProcessTiles(0)) {

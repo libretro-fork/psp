@@ -17,8 +17,9 @@
 
 #pragma once
 
-#include <mutex>
 #include <vector>
+
+#include <retro_atomic.h>
 
 #include "Common/File/Path.h"
 #include "Common/Net/Cancel.h"
@@ -28,6 +29,8 @@
 #include "Common/CommonTypes.h"
 #include "Core/Loaders.h"
 
+// Prepared (FileSize/Exists) before reads start, then read from one thread at a time: the worker
+// of the CachingFileLoader that ConstructFileLoader wraps it in. Cancel and LatestError are any thread.
 class HTTPFileLoader : public FileLoader {
 public:
 	HTTPFileLoader(const ::Path &filename);
@@ -52,11 +55,14 @@ public:
 	}
 
 	std::string LatestError() const override {
-		return latestError_;
+		return (const char *)retro_atomic_load_acquire_ptr(const_cast<retro_atomic_ptr_t *>(&latestError_));
 	}
 
 private:
 	void Prepare();
+	void SetError(const char *error) {
+		retro_atomic_store_release_ptr(&latestError_, (void *)error);
+	}
 	int SendHEAD(const Url &url, std::vector<std::string> &responseHeaders);
 
 	void Connect(double timeout);
@@ -76,8 +82,8 @@ private:
 	::Path filename_;
 	bool connected_ = false;
 	net::CancelToken cancel_;
-	const char *latestError_ = "";
+	// Always a string literal.
+	retro_atomic_ptr_t latestError_{ (void *)"" };
 
-	std::once_flag preparedFlag_;
-	std::mutex readAtMutex_;
+	bool prepared_ = false;
 };

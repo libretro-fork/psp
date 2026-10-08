@@ -103,6 +103,9 @@ void GLRenderManager::ThreadEnd() {
 
 	VLOG("  PULL: Quitting");
 
+	// Buffers that never made it over in a task, so the deleters below find them.
+	AddNewPushBuffers(newPushBuffers_);
+
 	// Good time to run all the deleters to get rid of leftover objects.
 	for (int i = 0; i < MAX_INFLIGHT_FRAMES; i++) {
 		// Since we're in shutdown, we should skip the GL calls on Android.
@@ -124,21 +127,11 @@ void GLRenderManager::NotifyEmuThreadExit() {
 	exitNotified_ = true;
 	// We need to make sure that the render thread isn't waiting for more work, since the emu thread is gone.
 	// This is a bit of a hack, but it works.
-	GLRRenderThreadTask *task = new GLRRenderThreadTask(GLRRunType::EXIT);
-	{
-		std::unique_lock<std::mutex> lock(pushMutex_);
-		renderThreadQueue_.push(task);
-	}
-	pushCondVar_.notify_one();
+	PushTask(new GLRRenderThreadTask(GLRRunType::EXIT));
 }
 
 void GLRenderManager::NotifyEmuThreadPaused() {
-	GLRRenderThreadTask *task = new GLRRenderThreadTask(GLRRunType::PAUSE);
-	{
-		std::unique_lock<std::mutex> lock(pushMutex_);
-		renderThreadQueue_.push(task);
-	}
-	pushCondVar_.notify_one();
+	PushTask(new GLRRenderThreadTask(GLRRunType::PAUSE));
 }
 
 // Unlike in Vulkan, this isn't a full independent function, instead it gets called every frame.
@@ -164,12 +157,15 @@ bool GLRenderManager::RunQueue(RunUntil until) {
 	while (true) {
 		// Pop a task off the queue and execute it. Exiting this loop is done with a special EXIT task,
 		// to keep things uniform.
-		{
-			std::unique_lock<std::mutex> lock(pushMutex_);
-			pushCondVar_.wait(lock, [this] { return !renderThreadQueue_.empty(); });
-			task = renderThreadQueue_.front();
-			renderThreadQueue_.pop();
+		while (renderThreadTasks_.empty()) {
+			const int seen = renderThreadWork_.Seen();
+			renderThreadQueue_.Drain([this](GLRRenderThreadTask *t) { renderThreadTasks_.push_back(t); });
+			if (renderThreadTasks_.empty()) {
+				renderThreadWork_.Wait(seen);
+			}
 		}
+		task = renderThreadTasks_.front();
+		renderThreadTasks_.pop_front();
 
 		if (task->runType == GLRRunType::EXIT) {
 			VLOG("  PULL: Frame %d EXIT (%0.3f)", task->frame, time_now_d());
@@ -374,18 +370,14 @@ void GLRenderManager::BeginFrame(bool enableProfiling) {
 	frameTimeData.afterFenceWait = frameTimeData.frameBegin;
 
 	GLFrameData &frameData = frameData_[curFrame];
+	VLOG("PUSH: BeginFrame (curFrame = %d, time=%0.3f)", curFrame, time_now_d());
+	// The render thread may still be presenting this frame slot's last use.
+	ParkingLotWait(&frameData.readyForFence, [&] { return retro_atomic_load_acquire_int(&frameData.readyForFence) != 0; });
+	retro_atomic_store_relaxed_int(&frameData.readyForFence, 0);
+
 	frameData.frameId = frameIdGen_;
 	frameData.profile.enabled = enableProfiling;
-
 	frameIdGen_++;
-	{
-		std::unique_lock<std::mutex> lock(frameData.fenceMutex);
-		VLOG("PUSH: BeginFrame (curFrame = %d, readyForFence = %d, time=%0.3f)", curFrame, (int)frameData.readyForFence, time_now_d());
-		while (!frameData.readyForFence) {
-			frameData.fenceCondVar.wait(lock);
-		}
-		frameData.readyForFence = false;
-	}
 
 	insideFrame_ = true;
 }
@@ -420,28 +412,14 @@ void GLRenderManager::Finish() {
 	VLOG("PUSH: Finish, pushing task. curFrame = %d", curFrame);
 	GLRRenderThreadTask *task = new GLRRenderThreadTask(GLRRunType::SUBMIT);
 	task->frame = curFrame;
-	{
-		std::unique_lock<std::mutex> lock(pushMutex_);
-		{
-			std::lock_guard<std::mutex> initLock(initStepsMutex_);
-			task->initSteps = std::move(initSteps_);
-			initSteps_.clear();
-		}
-		task->steps = std::move(steps_);
-		renderThreadQueue_.push(task);
-		steps_.clear();
-		pushCondVar_.notify_one();
-	}
+	TakeRecordedWork(task);
+	PushTask(task);
 }
 
 void GLRenderManager::Present() {
 	GLRRenderThreadTask *presentTask = new GLRRenderThreadTask(GLRRunType::PRESENT);
 	presentTask->frame = curFrame_;
-	{
-		std::unique_lock<std::mutex> lock(pushMutex_);
-		renderThreadQueue_.push(presentTask);
-		pushCondVar_.notify_one();
-	}
+	PushTask(presentTask);
 
 	int newCurFrame = curFrame_ + 1;
 	if (newCurFrame >= inflightFrames_) {
@@ -481,14 +459,13 @@ bool GLRenderManager::Run(GLRRenderThreadTask &task) {
 
 		VLOG("  PULL: Frame %d.readyForFence = true", task.frame);
 
-		{
-			std::lock_guard<std::mutex> lock(frameData.fenceMutex);
-			frameData.readyForFence = true;
-			frameData.fenceCondVar.notify_one();
-			// At this point, we're done with this framedata (for now).
-		}
+		// At this point, we're done with this framedata (for now).
+		retro_atomic_store_release_int(&frameData.readyForFence, 1);
+		ParkingLotNotify(&frameData.readyForFence);
 		return swapRequest;
 	}
+
+	AddNewPushBuffers(task.newPushBuffers);
 
 	if (!frameData.hasBegun) {
 		frameData.hasBegun = true;
@@ -502,7 +479,6 @@ bool GLRenderManager::Run(GLRRenderThreadTask &task) {
 
 	// Run this after RunInitSteps so any fresh GLRBuffers for the pushbuffers can get created.
 	if (!skipGLCalls_) {
-		std::lock_guard<std::mutex> lock(pushBuffersMutex_);
 		for (auto iter : frameData.activePushBuffers) {
 			iter->Flush();
 			iter->UnmapDevice();
@@ -529,7 +505,6 @@ bool GLRenderManager::Run(GLRRenderThreadTask &task) {
 	}
 
 	if (!skipGLCalls_) {
-		std::lock_guard<std::mutex> lock(pushBuffersMutex_);
 		for (auto iter : frameData.activePushBuffers) {
 			iter->MapDevice(bufferStrategy_);
 		}
@@ -544,11 +519,8 @@ bool GLRenderManager::Run(GLRRenderThreadTask &task) {
 
 		// glFinish is not actually necessary here, and won't be unless we start using
 		// glBufferStorage. Then we need to use fences.
-		{
-			std::lock_guard<std::mutex> lock(syncMutex_);
-			syncDone_ = true;
-			syncCondVar_.notify_one();
-		}
+		retro_atomic_store_release_int(&syncDone_, 1);
+		ParkingLotNotify(&syncDone_);
 		break;
 
 	default:
@@ -564,26 +536,11 @@ void GLRenderManager::FlushSync() {
 
 		GLRRenderThreadTask *task = new GLRRenderThreadTask(GLRRunType::SYNC);
 		task->frame = curFrame_;
-
-		std::unique_lock<std::mutex> lock(pushMutex_);
-		renderThreadQueue_.push(task);
-		{
-			std::lock_guard<std::mutex> initLock(initStepsMutex_);
-			renderThreadQueue_.back()->initSteps = std::move(initSteps_);
-			initSteps_.clear();
-		}
-		renderThreadQueue_.back()->steps = std::move(steps_);
-		pushCondVar_.notify_one();
-		steps_.clear();
+		TakeRecordedWork(task);
+		PushTask(task);
 	}
 
-	{
-		std::unique_lock<std::mutex> lock(syncMutex_);
-		// Wait for the flush to be hit, since we're syncing.
-		while (!syncDone_) {
-			VLOG("PUSH: Waiting for frame[%d].readyForFence = 1 (sync)", curFrame_);
-			syncCondVar_.wait(lock);
-		}
-		syncDone_ = false;
-	}
+	// Wait for the flush to be hit, since we're syncing.
+	ParkingLotWait(&syncDone_, [this] { return retro_atomic_load_acquire_int(&syncDone_) != 0; });
+	retro_atomic_store_relaxed_int(&syncDone_, 0);
 }

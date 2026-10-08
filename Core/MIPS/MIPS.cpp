@@ -18,7 +18,6 @@
 #include <cfenv>
 #include <cmath>
 #include <limits>
-#include <mutex>
 #include <utility>
 
 #include "ppsspp_config.h"

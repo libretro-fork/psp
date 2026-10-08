@@ -50,7 +50,6 @@ add_library(xxhash STATIC
 set(aemu_postoffice_client_obj
 	aemu_postoffice_client/postoffice.c
 	aemu_postoffice_client/postoffice_mem_stdc.c
-	aemu_postoffice_client/mutex_impl_cpp.cpp
 	aemu_postoffice_client/log_impl_ppsspp.cpp
 )
 

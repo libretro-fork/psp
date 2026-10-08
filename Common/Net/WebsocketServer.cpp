@@ -226,7 +226,7 @@ void WebSocketServer::CloseAbnormally() {
 	outBufOffset_ = 0;
 }
 
-bool WebSocketServer::Process(float timeout) {
+bool WebSocketServer::Process(const intptr_t *wakeFds, int wakeCount) {
 	if (!open_) {
 		return false;
 	}
@@ -248,15 +248,21 @@ bool WebSocketServer::Process(float timeout) {
 		return false;
 	}
 
-	struct timeval tv;
-	tv.tv_sec = floor(timeout);
-	tv.tv_usec = (timeout - floor(timeout)) * 1000000.0;
-
 	fd_set read;
 	FD_ZERO(&read);
 	// In case we closed due to protocol error, don't even try to read.
 	if (!sentClose_) {
 		FD_SET(fd_, &read);
+	}
+	intptr_t maxfd = (intptr_t)fd_;
+	for (int i = 0; i < wakeCount; ++i) {
+		if (wakeFds[i] == -1) {
+			continue;
+		}
+		FD_SET((size_t)wakeFds[i], &read);
+		if (wakeFds[i] > maxfd) {
+			maxfd = wakeFds[i];
+		}
 	}
 
 	fd_set write;
@@ -266,7 +272,7 @@ bool WebSocketServer::Process(float timeout) {
 	}
 
 	// First argument to select is the highest socket in the set + 1.
-	int rval = select((int)fd_ + 1, &read, &write, nullptr, &tv);
+	int rval = select((int)maxfd + 1, &read, &write, nullptr, nullptr);
 	if (rval < 0) {
 		const int err = socket_errno;
 #if !PPSSPP_PLATFORM(WINDOWS)
@@ -276,15 +282,10 @@ bool WebSocketServer::Process(float timeout) {
 		}
 #endif
 		// Anything else isn't going to fix itself (a bad fd, say), and returning true on a call
-		// that fails immediately means the caller busy-loops instead of being paced by the timeout.
+		// that fails immediately would make the caller busy-loop.
 		ERROR_LOG(Log::IO, "WebSocket select() failed: %d - closing connection", err);
 		CloseAbnormally();
 		return false;
-	}
-
-	if (rval == 0) {
-		// Timed out.
-		return true;
 	}
 
 	if (FD_ISSET(fd_, &write)) {

@@ -17,6 +17,7 @@
 
 #include "Common/Data/Encoding/Base64.h"
 #include "Common/File/FileUtil.h"
+#include "Common/Thread/MpscQueue.h"
 #include "Core/Core.h"
 #include "Core/Debugger/WebSocket/GPURecordSubscriber.h"
 #include "Core/Debugger/WebSocket/WebSocketUtils.h"
@@ -32,9 +33,11 @@ struct WebSocketGPURecordState : public DebuggerSubscriber {
 	void Broadcast(net::WebSocketServer *ws) override;
 
 protected:
+	// The connection thread's: whether the CPU thread may still call our callback.
 	bool pending_ = false;
 	std::string lastTicket_;
-	Path lastFilename_;
+	// Filled on the CPU thread when the recording is written.
+	MpscQueue<Path> finished_;
 };
 
 DebuggerSubscriber *WebSocketGPURecordInit(DebuggerEventHandlerMap &map) {
@@ -72,9 +75,9 @@ void WebSocketGPURecordState::Dump(DebuggerRequest &req) {
 		haveGPU = PSP_GetBootState() == BootState::Complete && gpu != nullptr;
 		if (!haveGPU)
 			return;
-		started = gpu->GetRecorder()->RecordNextFrame([=](const Path &filename) {
-			lastFilename_ = filename;
-			pending_ = false;
+		started = gpu->GetRecorder()->RecordNextFrame([this](const Path &filename) {
+			finished_.Push(filename);
+			mailbox->Wake();
 		});
 	});
 
@@ -93,10 +96,14 @@ void WebSocketGPURecordState::Dump(DebuggerRequest &req) {
 
 // This handles the asynchronous gpu.record.dump response.
 void WebSocketGPURecordState::Broadcast(net::WebSocketServer *ws) {
-	if (!lastFilename_.empty()) {
-		FILE *fp = File::OpenCFile(lastFilename_, "rb");
+	Path lastFilename;
+	finished_.Drain([&](Path &&filename) {
+		lastFilename = std::move(filename);
+	});
+	if (!lastFilename.empty()) {
+		pending_ = false;
+		FILE *fp = File::OpenCFile(lastFilename, "rb");
 		if (!fp) {
-			lastFilename_.clear();
 			return;
 		}
 
@@ -120,7 +127,6 @@ void WebSocketGPURecordState::Broadcast(net::WebSocketServer *ws) {
 
 		ws->AddFragment(true, R"("})");
 
-		lastFilename_.clear();
 		lastTicket_.clear();
 	}
 }

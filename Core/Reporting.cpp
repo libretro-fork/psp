@@ -18,10 +18,6 @@
 #include "ppsspp_config.h"
 
 #include <deque>
-#include <thread>
-#include <mutex>
-#include <atomic>
-#include <condition_variable>
 #include <set>
 #include <cstdlib>
 #include <cstdarg>
@@ -30,6 +26,8 @@
 extern "C" {
 #include <encodings/crc32.h>
 }
+
+#include <retro_atomic.h>
 
 #include "Core/Reporting.h"
 #include "Common/File/VFS/VFS.h"
@@ -60,6 +58,8 @@ extern "C" {
 #include "Core/HW/Display.h"
 #include "GPU/GPUCommon.h"
 #include "GPU/GPUState.h"
+#include "Common/Thread/ParkingLot.h"
+#include "Common/Thread/Thread.h"
 
 namespace Reporting
 {
@@ -67,14 +67,14 @@ namespace Reporting
 	const u32 SPAM_LIMIT = 100;
 	const int PAYLOAD_BUFFER_SIZE = 200;
 
-	// Internal limiter on number of requests per instance.
-	static u32 spamProtectionCount = 0;
+	// Internal limiter on number of requests per instance. Bumped by whichever thread logs.
+	static retro_atomic_int_t spamProtectionCount{ 0 };
 	// Keeps track of whether a harmful setting was ever used.
 	static bool everUnsupported = false;
 	// Support is cached here to avoid checking it on every single request.
 	static bool currentSupported = false;
 	// Whether the most recent server request seemed successful.
-	static bool serverWorking = true;
+	static retro_atomic_int_t serverWorking{ 1 };
 	// The latest compatibility result from the server.
 	static std::vector<std::string> lastCompatResult;
 
@@ -95,17 +95,20 @@ namespace Reporting
 		int int1;
 		int int2;
 		int int3;
+		std::vector<u8> icon;
 	};
 
-	static std::mutex crcLock;
-	static std::condition_variable crcCond;
+	// The CRC thread computes one CRC at a time. crcFilename and crcResults belong to the thread
+	// that calls the functions below (the emulation thread); the CRC thread reads crcFilename,
+	// writes crcValue, then clears crcPending.
 	static Path crcFilename;
 	static std::map<Path, u32> crcResults;
-	static std::atomic<bool> crcPending{};
-	static std::atomic<bool> crcCancel{};
-	static std::thread crcThread;
+	static u32 crcValue;
+	static retro_atomic_int_t crcPending{ 0 };
+	static retro_atomic_int_t crcCancel{ 0 };
+	static Thread crcThread;
 
-	static u32 CalculateCRC(BlockDevice *blockDevice, std::atomic<bool> *cancel) {
+	static u32 CalculateCRC(BlockDevice *blockDevice, retro_atomic_int_t *cancel) {
 		auto ga = GetI18NCategory(I18NCat::GAME);
 
 		u32 crc = 0;
@@ -113,7 +116,7 @@ namespace Reporting
 		u8 block[2048];
 		u32 numBlocks = blockDevice->GetNumBlocks();
 		for (u32 i = 0; i < numBlocks; ++i) {
-			if (cancel && *cancel) {
+			if (cancel && retro_atomic_load_acquire_int(cancel)) {
 				g_OSD.RemoveProgressBar("crc", false, 0.0f);
 				return 0;
 			}
@@ -130,9 +133,14 @@ namespace Reporting
 		return crc;
 	}
 
+	static void FinishCRCThread(u32 crc) {
+		crcValue = crc;
+		retro_atomic_store_release_int(&crcPending, 0);
+		ParkingLotNotify(&crcPending);
+	}
+
 	static int CalculateCRCThread() {
 		SetCurrentThreadName("ReportCRC");
-
 
 		IdentifiedFileType type;
 
@@ -140,10 +148,7 @@ namespace Reporting
 		FileLoader *fileLoader = ResolveFileLoaderTarget(ConstructFileLoader(crcFilename), &type, &errorString);
 		if (!fileLoader) {
 			ERROR_LOG(Log::Loader, "Failed to construct file loader for CRC: %s", errorString.c_str());
-			std::lock_guard<std::mutex> guard(crcLock);
-			crcResults[crcFilename] = 0;
-			crcPending = false;
-			crcCond.notify_one();
+			FinishCRCThread(0);
 			return 0;
 		}
 
@@ -159,15 +164,21 @@ namespace Reporting
 		blockDevice.reset();
 		delete fileLoader;
 
-		std::lock_guard<std::mutex> guard(crcLock);
-		crcResults[crcFilename] = crc;
-		crcPending = false;
-		crcCond.notify_one();
+		FinishCRCThread(crc);
 		return 0;
 	}
 
+	// Picks up the result of a finished CRC thread, if there is one.
+	static void CollectCRC() {
+		if (crcThread.joinable() && !retro_atomic_load_acquire_int(&crcPending)) {
+			crcThread.join();
+			crcResults[crcFilename] = crcValue;
+			INFO_LOG(Log::System, "Finished CRC calculation");
+		}
+	}
+
 	void QueueCRC(const Path &gamePath) {
-		std::lock_guard<std::mutex> guard(crcLock);
+		CollectCRC();
 
 		auto it = crcResults.find(gamePath);
 		if (it != crcResults.end()) {
@@ -176,38 +187,33 @@ namespace Reporting
 			return;
 		}
 
-		if (crcPending) {
+		if (crcThread.joinable()) {
 			// Already in process. This is OK - on the crash screen we call this in a polling fashion.
 			return;
 		}
 
 		INFO_LOG(Log::System, "Starting CRC calculation");
 		crcFilename = gamePath;
-		crcPending = true;
-		crcCancel = false;
-		crcThread = std::thread(CalculateCRCThread);
+		retro_atomic_store_release_int(&crcCancel, 0);
+		retro_atomic_store_release_int(&crcPending, 1);
+		crcThread = Thread(CalculateCRCThread);
 	}
 
 	bool HasCRC(const Path &gamePath) {
-		std::lock_guard<std::mutex> guard(crcLock);
+		CollectCRC();
 		return crcResults.find(gamePath) != crcResults.end();
 	}
 
 	uint32_t RetrieveCRC(const Path &gamePath) {
-		QueueCRC(gamePath);
-
-		std::unique_lock<std::mutex> guard(crcLock);
-		auto it = crcResults.find(gamePath);
-		while (it == crcResults.end()) {
-			crcCond.wait(guard);
-			it = crcResults.find(gamePath);
+		for (;;) {
+			QueueCRC(gamePath);
+			auto it = crcResults.find(gamePath);
+			if (it != crcResults.end()) {
+				return it->second;
+			}
+			// Running, for this path or (then QueueCRC starts ours next lap) another one.
+			ParkingLotWait(&crcPending, [] { return retro_atomic_load_acquire_int(&crcPending) == 0; });
 		}
-
-		if (crcThread.joinable()) {
-			INFO_LOG(Log::System, "Finished CRC calculation");
-			crcThread.join();
-		}
-		return it->second;
 	}
 
 	static uint32_t RetrieveCRCUnlessPowerSaving(const Path &gamePath) {
@@ -220,19 +226,16 @@ namespace Reporting
 	}
 
 	static void PurgeCRC() {
-		std::unique_lock<std::mutex> guard(crcLock);
-		if (crcPending) {
-			INFO_LOG(Log::System, "Cancelling CRC calculation");
-			crcCancel = true;
-			while (crcPending) {
-				crcCond.wait(guard);
+		if (crcThread.joinable()) {
+			if (retro_atomic_load_acquire_int(&crcPending)) {
+				INFO_LOG(Log::System, "Cancelling CRC calculation");
+				retro_atomic_store_release_int(&crcCancel, 1);
+				ParkingLotWait(&crcPending, [] { return retro_atomic_load_acquire_int(&crcPending) == 0; });
 			}
+			CollectCRC();
 		} else {
 			DEBUG_LOG(Log::System, "No CRC pending");
 		}
-
-		if (crcThread.joinable())
-			crcThread.join();
 	}
 
 	void CancelCRC() {
@@ -300,7 +303,7 @@ namespace Reporting
 	// Should only be called once per request.
 	bool CheckSpamLimited()
 	{
-		return ++spamProtectionCount >= SPAM_LIMIT;
+		return (u32)retro_atomic_fetch_add_int(&spamProtectionCount, 1) + 1 >= SPAM_LIMIT;
 	}
 
 	static void SendReportRequest(const char *uri, const std::string &data, const std::string &mimeType, std::function<void(http::Request &)> callback) {
@@ -361,7 +364,7 @@ namespace Reporting
 
 	void Init() {
 		// New game, clean slate.
-		spamProtectionCount = 0;
+		retro_atomic_store_release_int(&spamProtectionCount, 0);
 		ResetCounts();
 		everUnsupported = false;
 		currentSupported = IsSupported();
@@ -465,17 +468,15 @@ namespace Reporting
 		postdata.Add("savestate_used", SaveState::HasLoadedState());
 	}
 
-	void AddScreenshotData(MultipartFormDataEncoder &postdata, const Path &filename)
+	void AddScreenshotData(MultipartFormDataEncoder &postdata, const Path &filename, const std::vector<u8> &icon)
 	{
 		std::string data;
 		if (!filename.empty() && File::ReadBinaryFileToString(filename, &data)) {
 			postdata.Add("screenshot", data, "screenshot.jpg", "image/jpeg");
 		}
 
-		const std::string iconFilename = "disc0:/PSP_GAME/ICON0.PNG";
-		std::vector<u8> iconData;
-		if (pspFileSystem.ReadEntireFile(iconFilename, iconData) >= 0) {
-			postdata.Add("icon", iconData, "icon.png", "image/png");
+		if (!icon.empty()) {
+			postdata.Add("icon", icon, "icon.png", "image/png");
 		}
 	}
 
@@ -498,7 +499,7 @@ namespace Reporting
 
 			postdata.Finish();
 			SendReportRequest("/report/message", postdata.ToString(), postdata.GetMimeType(), [=](http::Request &req) {
-				serverWorking = !req.Failed();
+				retro_atomic_store_release_int(&serverWorking, req.Failed() ? 0 : 1);
 			});
 			break;
 
@@ -511,22 +512,22 @@ namespace Reporting
 			postdata.Add("gameplay", StringFromFormat("%d", payload.int3));
 			postdata.Add("crc", StringFromFormat("%08x", RetrieveCRCUnlessPowerSaving(PSP_CoreParameter().fileToStart)));
 			postdata.Add("suggestions", payload.string1 != "perfect" && payload.string1 != "playable" ? "1" : "0");
-			AddScreenshotData(postdata, Path(payload.string2));
+			AddScreenshotData(postdata, Path(payload.string2), payload.icon);
 
 			postdata.Finish();
-			serverWorking = true;
+			retro_atomic_store_release_int(&serverWorking, 1);
 			SendReportRequest("/report/compat", postdata.ToString(), postdata.GetMimeType(), [=](http::Request &req) {
 				if (req.Failed()) {
-					serverWorking = false;
+					retro_atomic_store_release_int(&serverWorking, 0);
 					return;
 				}
-				serverWorking = true;
+				retro_atomic_store_release_int(&serverWorking, 1);
 
 				std::string result;
 				req.buffer().TakeAll(&result);
 				lastCompatResult.clear();
 				if (result.empty() || result[0] == '0')
-					serverWorking = false;
+					retro_atomic_store_release_int(&serverWorking, 0);
 				else if (result[0] != '1')
 					SplitString(result, '\n', lastCompatResult);
 			});
@@ -586,7 +587,7 @@ namespace Reporting
 	}
 
 	ReportStatus GetStatus() {
-		if (!serverWorking)
+		if (!retro_atomic_load_acquire_int(&serverWorking))
 			return ReportStatus::FAILING;
 		return ReportStatus::WORKING;
 	}
@@ -608,10 +609,14 @@ namespace Reporting
 		Process(payload);
 	}
 
+	// Emulation thread: pspFileSystem is read here.
 	void ReportCompatibility(const char *compat, int graphics, int speed, int gameplay, const std::string &screenshotFilename) {
 		if (!IsEnabled())
 			return;
 		Payload payload{};
+		if (pspFileSystem.ReadEntireFile("disc0:/PSP_GAME/ICON0.PNG", payload.icon) < 0) {
+			payload.icon.clear();
+		}
 		payload.type = RequestType::COMPAT;
 		payload.string1 = compat;
 		payload.string2 = screenshotFilename;

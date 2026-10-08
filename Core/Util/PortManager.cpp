@@ -20,18 +20,18 @@
 // All credit goes to him and the official miniupnp project! http://miniupnp.free.fr/
 
 // Threading model: everything in PortManager runs on the UPnP service thread, which exists only
-// while the UPnP setting is on. Other threads only ever push requests onto g_upnpReqs
-// (UPnP_Add/UPnP_Remove) or poke the condition variable (UPnP_Notify). Talking to a router means
-// blocking socket I/O with multi-second timeouts, so none of it may happen on a thread anyone
-// waits for - and the thread must never end up in a state where it can't be told to stop.
+// while the UPnP setting is on. Other threads only push requests into g_upnpInbox
+// (UPnP_Add/UPnP_Remove) or wake the thread (UPnP_Notify). Talking to a router means blocking
+// socket I/O with multi-second timeouts, so none of it may happen on a thread anyone waits for -
+// and the thread must never end up in a state where it can't be told to stop. The Thread object
+// belongs to the thread that called __UPnPInit (the emulation thread): only it starts and joins.
 
 #include <algorithm>  // find_if
 #include <chrono>
 #include <cstring>
 #include <string>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
+
+#include <retro_atomic.h>
 
 #include "Common/TimeUtil.h"
 #include "Common/Data/Text/I18n.h"
@@ -44,32 +44,36 @@
 #include "Core/System.h"
 #include "Core/ELF/ParamSFO.h"
 #include "Core/Util/PortManager.h"
+#include "Common/Thread/Thread.h"
+#include "Common/Thread/MpscQueue.h"
+#include "Common/Thread/ParkingLot.h"
 
 PortManager g_PortManager;
 
-// Guards g_upnpServiceThread itself, so that a start racing a start (or a shutdown) can't end up
-// with two service threads or a std::thread being reassigned while it's still running.
-static std::mutex g_upnpThreadLock;
-static std::thread g_upnpServiceThread;
-static bool g_upnpInitialized;
+enum UPnPThreadState {
+	UPNP_THREAD_NONE,
+	UPNP_THREAD_RUNNING,
+	// Exited by itself (the setting went off). Joined by the owner on the next start or shutdown.
+	UPNP_THREAD_EXITED,
+};
 
-static std::mutex g_upnpLock;
-static std::condition_variable g_upnpCond;
-
-// All of the following are guarded by g_upnpLock.
-static std::deque<UPnPArgs> g_upnpReqs;
+static Thread g_upnpServiceThread;
+static uintptr_t g_upnpOwnerThread;
+static retro_atomic_int_t g_upnpThreadState{ UPNP_THREAD_NONE };
+static retro_atomic_int_t g_upnpInitialized{ 0 };
+static retro_atomic_int_t g_upnpExit{ 0 };
 static unsigned int g_upnpTimeout = 2000;
-static bool g_upnpExit;
-// Whether a service thread is up. The thread only exists while the setting is on, so most users
-// never pay for one at all - it used to be started unconditionally and parked for the session.
-static bool g_upnpThreadRunning;
-// Bumped whenever there's a reason for the service thread to wake up and look around. The thread
-// snapshots it before doing (slow) work, so a request that arrives while it's busy can't be missed
-// and leave it asleep with something queued.
-static uint32_t g_upnpWakeSeq;
+
+// Requests from any thread. The service thread moves them into g_upnpReqs, which only it touches.
+static MpscQueue<UPnPArgs> g_upnpInbox;
+static retro_atomic_int_t g_upnpInboxCount{ 0 };
+static std::deque<UPnPArgs> g_upnpReqs;
+// Wakes the service thread. It reads Seen() before doing (slow) work, so a request that arrives
+// while it's busy can't be missed and leave it asleep with something queued.
+static EventCounter g_upnpWork;
 // Set by UPnP_Notify() - the user flipped a setting, so retry immediately instead of continuing to
 // back off from earlier failures.
-static bool g_upnpResetBackoff;
+static retro_atomic_int_t g_upnpResetBackoff{ 0 };
 
 // A game hammering bind() shouldn't be able to grow the queue without bound, especially while
 // UPnP is unreachable and nothing is being drained.
@@ -442,8 +446,28 @@ bool PortManager::RefreshPortList() {
 
 // --- Service thread ---
 
+static bool UPnPExiting() {
+	return retro_atomic_load_acquire_int(&g_upnpExit) != 0;
+}
+
+// Last request wins for a given port: this collapses the repeated adds that games produce when
+// they rebind in a loop, and lets a remove cancel an add that hasn't been sent yet.
+static void TakeInbox() {
+	g_upnpInbox.Drain([](UPnPArgs &&args) {
+		retro_atomic_fetch_sub_int(&g_upnpInboxCount, 1);
+		for (auto it = g_upnpReqs.begin(); it != g_upnpReqs.end(); ) {
+			(it->port == args.port && it->protocol == args.protocol) ? it = g_upnpReqs.erase(it) : ++it;
+		}
+		if (g_upnpReqs.size() >= MAX_QUEUED_REQUESTS) {
+			WARN_LOG(Log::Net, "UPnP request queue is full, dropping request for %s port %d", args.protocol.c_str(), args.port);
+			return;
+		}
+		g_upnpReqs.push_back(std::move(args));
+	});
+}
+
 static void DiscardQueuedRequests() {
-	std::lock_guard<std::mutex> lock(g_upnpLock);
+	TakeInbox();
 	if (!g_upnpReqs.empty()) {
 		DEBUG_LOG(Log::Net, "UPnPService: discarding %d queued request(s)", (int)g_upnpReqs.size());
 		g_upnpReqs.clear();
@@ -454,18 +478,11 @@ static void DiscardQueuedRequests() {
 // Returns false if we lost the router, in which case the unfinished request stays queued.
 static bool ProcessQueuedRequests() {
 	while (true) {
-		UPnPArgs arg;
-		{
-			std::lock_guard<std::mutex> lock(g_upnpLock);
-			if (g_upnpExit || g_upnpReqs.empty())
-				return true;
-			// Take it out of the queue for the duration. Talking to the router happens without the
-			// lock held, and QueueRequest() supersedes pending requests for the same port - if the
-			// in-flight one were still in the deque it could be erased out from under us, and we'd
-			// then drop whatever replaced it without ever running it.
-			arg = std::move(g_upnpReqs.front());
-			g_upnpReqs.pop_front();
-		}
+		TakeInbox();
+		if (UPnPExiting() || g_upnpReqs.empty())
+			return true;
+		UPnPArgs arg = std::move(g_upnpReqs.front());
+		g_upnpReqs.pop_front();
 
 		bool ok;
 		switch (arg.cmd) {
@@ -484,9 +501,9 @@ static bool ProcessQueuedRequests() {
 
 		// The router stopped answering, and Add()/Remove() have already reset us to disconnected.
 		// Put the request back for after we reconnect and stop draining - everything behind it
-		// would just fail the same way.
+		// would just fail the same way. A newer request for the same port, taken meanwhile, wins.
+		TakeInbox();
 		if (++arg.attempts < MAX_REQUEST_ATTEMPTS) {
-			std::lock_guard<std::mutex> lock(g_upnpLock);
 			const bool superseded = std::any_of(g_upnpReqs.begin(), g_upnpReqs.end(), [&arg](const UPnPArgs &req) {
 				return req.port == arg.port && req.protocol == arg.protocol;
 			});
@@ -511,24 +528,18 @@ static int upnpService(unsigned int timeout) {
 	double nextInitTime = 0.0;
 
 	while (true) {
-		uint32_t seq;
-		{
-			std::lock_guard<std::mutex> lock(g_upnpLock);
-			if (g_upnpExit)
-				break;
-			seq = g_upnpWakeSeq;
-			if (g_upnpResetBackoff) {
-				// The user just flipped the setting - don't make them wait out an old backoff.
-				g_upnpResetBackoff = false;
-				failCount = 0;
-				nextInitTime = 0.0;
-			}
+		const int seen = g_upnpWork.Seen();
+		if (UPnPExiting())
+			break;
+		if (retro_atomic_exchange_int(&g_upnpResetBackoff, 0)) {
+			// The user just flipped the setting - don't make them wait out an old backoff.
+			failCount = 0;
+			nextInitTime = 0.0;
 		}
 
 		if (!g_Config.bEnableUPnP) {
 			// Callers queue requests without checking the setting (see bind() in sceNetInet), so throw
-			// them away here. Otherwise the queue grows without bound and, worse, the wait below never
-			// blocks - which is what pegged a core whenever UPnP was off but a game was using sockets.
+			// them away here, or the queue grows without bound.
 			DiscardQueuedRequests();
 			if (wasEnabled) {
 				// Turned off at runtime - take our mappings back down right away.
@@ -536,15 +547,9 @@ static int upnpService(unsigned int timeout) {
 				g_PortManager.Shutdown();
 				wasEnabled = false;
 			}
-			failCount = 0;
-			nextInitTime = 0.0;
-
-			std::lock_guard<std::mutex> lock(g_upnpLock);
 			if (!g_Config.bEnableUPnP) {
-				// Nothing left to do until the setting comes back on, and StartUPnPService() will
-				// spin up a fresh thread for that. Deciding this under the lock is what makes that
-				// safe: a start that observed us still running can't be left without a thread.
-				g_upnpThreadRunning = false;
+				// Nothing left to do until the setting comes back on, and the next start spins up
+				// a fresh thread for that.
 				break;
 			}
 			// Turned back on while we were cleaning up (which involves network round trips, so
@@ -576,104 +581,84 @@ static int upnpService(unsigned int timeout) {
 
 		// Sleep until someone wakes us, with no timer: a router that couldn't be reached is tried
 		// again on the next request (or setting change) once the backoff has passed.
-		std::unique_lock<std::mutex> lock(g_upnpLock);
-		g_upnpCond.wait(lock, [seq] { return g_upnpExit || g_upnpWakeSeq != seq; });
+		g_upnpWork.Wait(seen);
 	}
 
-	// Clean up regardless of g_Config.bEnableUPnP, to avoid leaving open ports on the router.
-	g_PortManager.Shutdown();
-
-	{
-		std::lock_guard<std::mutex> lock(g_upnpLock);
-		g_upnpReqs.clear();
+	if (UPnPExiting()) {
+		// Clean up regardless of g_Config.bEnableUPnP, to avoid leaving open ports on the router.
+		g_PortManager.Shutdown();
+		DiscardQueuedRequests();
 	}
 
 	INFO_LOG(Log::Net, "UPnPService: End of UPnPService Thread");
+	retro_atomic_store_release_int(&g_upnpThreadState, UPNP_THREAD_EXITED);
 	return 0;
 }
 
-// Starts the service thread if the setting is on and it isn't up already.
+// Owner thread only. Starts the service thread if the setting is on and it isn't up already.
 static void StartUPnPService() {
-	std::lock_guard<std::mutex> threadLock(g_upnpThreadLock);
-	{
-		std::lock_guard<std::mutex> lock(g_upnpLock);
-		if (!g_upnpInitialized || g_upnpExit || !g_Config.bEnableUPnP)
-			return;
-		if (g_upnpThreadRunning) {
-			// Already up - it'll notice whatever changed on its own.
-			return;
-		}
-		g_upnpThreadRunning = true;
-		g_upnpResetBackoff = true;
+	if (!retro_atomic_load_acquire_int(&g_upnpInitialized) || UPnPExiting() || !g_Config.bEnableUPnP)
+		return;
+	if (retro_atomic_load_acquire_int(&g_upnpThreadState) == UPNP_THREAD_RUNNING) {
+		// Already up - it'll notice whatever changed on its own.
+		return;
 	}
-	// A previous thread may have exited when the setting was turned off. By the time it clears
-	// g_upnpThreadRunning it has already cleaned up after itself, so this doesn't block on a router.
+	// A previous thread may have exited when the setting was turned off. It has already cleaned
+	// up after itself, so this doesn't block on a router.
 	if (g_upnpServiceThread.joinable())
 		g_upnpServiceThread.join();
-	g_upnpServiceThread = std::thread(upnpService, g_upnpTimeout);
+	retro_atomic_store_release_int(&g_upnpResetBackoff, 1);
+	retro_atomic_store_release_int(&g_upnpThreadState, UPNP_THREAD_RUNNING);
+	g_upnpServiceThread = Thread(upnpService, g_upnpTimeout);
 }
 
 void __UPnPInit(unsigned int timeout) {
-	{
-		std::lock_guard<std::mutex> lock(g_upnpLock);
-		g_upnpExit = false;
-		g_upnpReqs.clear();
-		g_upnpInitialized = true;
-		g_upnpTimeout = timeout;
-	}
+	g_upnpOwnerThread = CurrentThreadId();
+	retro_atomic_store_release_int(&g_upnpExit, 0);
+	g_upnpTimeout = timeout;
+	retro_atomic_store_release_int(&g_upnpInitialized, 1);
 	// Only actually spawns a thread if UPnP is enabled; otherwise UPnP_Notify() starts one when
 	// the user turns it on.
 	StartUPnPService();
 }
 
 void __UPnPShutdown() {
-	{
-		std::lock_guard<std::mutex> lock(g_upnpLock);
-		g_upnpInitialized = false;
-		g_upnpExit = true;
-		// Anything still queued is moot, and dropping it here means the thread won't try to talk to
-		// a router we may no longer be able to reach on its way out.
-		g_upnpReqs.clear();
-		g_upnpWakeSeq++;
-	}
-	g_upnpCond.notify_all();
+	retro_atomic_store_release_int(&g_upnpInitialized, 0);
+	retro_atomic_store_release_int(&g_upnpExit, 1);
+	g_upnpWork.Notify();
 
-	std::lock_guard<std::mutex> threadLock(g_upnpThreadLock);
 	if (g_upnpServiceThread.joinable()) {
 		INFO_LOG(Log::Net, "Waiting for upnp thread to shut down...");
 		g_upnpServiceThread.join();
 		INFO_LOG(Log::Net, "upnp thread shut down.");
 	}
-	std::lock_guard<std::mutex> lock(g_upnpLock);
-	g_upnpThreadRunning = false;
+	retro_atomic_store_release_int(&g_upnpThreadState, UPNP_THREAD_NONE);
+	// Anything still queued is moot.
+	g_upnpInbox.Drain([](UPnPArgs &&) {
+		retro_atomic_fetch_sub_int(&g_upnpInboxCount, 1);
+	});
+	g_upnpReqs.clear();
 }
 
 static void QueueRequest(UPnPArgs args) {
 	// The enable setting can change after startup without the settings UI being involved - a
 	// per-game config, or a libretro core option. Reconcile here rather than requiring every place
 	// that can flip it to remember to call UPnP_Notify(): this starts a thread if the setting is on
-	// and there isn't one, and is a cheap no-op otherwise. The other direction takes care of itself,
-	// since queuing below wakes a thread that then notices the setting is off and cleans up.
-	StartUPnPService();
-
-	std::lock_guard<std::mutex> lock(g_upnpLock);
-	// With UPnP off there's no service thread to drain the queue, so don't let one build up.
-	if (!g_upnpThreadRunning || g_upnpExit)
-		return;
-
-	// Last request wins for a given port: this collapses the repeated adds that games produce when
-	// they rebind in a loop, and lets a remove cancel an add that hasn't been sent yet.
-	for (auto it = g_upnpReqs.begin(); it != g_upnpReqs.end(); ) {
-		(it->port == args.port && it->protocol == args.protocol) ? it = g_upnpReqs.erase(it) : ++it;
+	// and there isn't one. Only the owner thread can start one; a request from elsewhere waits
+	// for the next start.
+	if (CurrentThreadId() == g_upnpOwnerThread) {
+		StartUPnPService();
 	}
-	if (g_upnpReqs.size() >= MAX_QUEUED_REQUESTS) {
+	if (!retro_atomic_load_acquire_int(&g_upnpInitialized) || UPnPExiting() || !g_Config.bEnableUPnP)
+		return;
+	// A game hammering bind() mustn't grow the inbox without bound before the thread gets to it.
+	if (retro_atomic_fetch_add_int(&g_upnpInboxCount, 1) >= (int)MAX_QUEUED_REQUESTS) {
+		retro_atomic_fetch_sub_int(&g_upnpInboxCount, 1);
 		WARN_LOG(Log::Net, "UPnP request queue is full, dropping request for %s port %d", args.protocol.c_str(), args.port);
 		return;
 	}
-
-	g_upnpReqs.push_back(std::move(args));
-	g_upnpWakeSeq++;
-	g_upnpCond.notify_one();
+	g_upnpInbox.Push(std::move(args));
+	g_upnpWork.Notify();
 }
 
 // Built here rather than on the service thread, which can't safely read the game state.
@@ -694,14 +679,12 @@ void UPnP_Remove(const char *protocol, unsigned short port) {
 }
 
 void UPnP_Notify() {
-	{
-		std::lock_guard<std::mutex> lock(g_upnpLock);
-		g_upnpWakeSeq++;
-		g_upnpResetBackoff = true;
-	}
-	g_upnpCond.notify_one();
+	retro_atomic_store_release_int(&g_upnpResetBackoff, 1);
+	g_upnpWork.Notify();
 	// Turned on: start a thread. Turned off: the running one cleans up and exits by itself, which
-	// we deliberately don't wait for here - this is called from the UI thread, and the cleanup
-	// means talking to a router that may be slow to answer.
-	StartUPnPService();
+	// we deliberately don't wait for here, since the cleanup means talking to a router that may be
+	// slow to answer.
+	if (CurrentThreadId() == g_upnpOwnerThread) {
+		StartUPnPService();
+	}
 }

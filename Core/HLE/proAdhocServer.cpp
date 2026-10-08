@@ -44,6 +44,7 @@
 #include "Core/Core.h"
 #include "Core/Config.h"
 #include "Core/HLE/proAdhocServer.h"
+#include "Common/Thread/Thread.h"
 
 #ifdef _WIN32
 #undef errno
@@ -60,8 +61,8 @@ SceNetAdhocctlUserNode * _db_user = NULL;
 SceNetAdhocctlGameNode * _db_game = NULL;
 
 // Server Status
-std::atomic<bool> adhocServerRunning(false);
-std::thread adhocServerThread;
+retro_atomic_int_t adhocServerRunning{ 0 };
+Thread adhocServerThread;
 // Made once before the first start and kept, so a wake never races a free.
 static net::WakeSocket *adhocServerWake;
 
@@ -1717,7 +1718,7 @@ int proAdhocServerThread(int port) // (int argc, char * argv[])
 	}
 
 	//_status = 0;
-	adhocServerRunning = false;
+	retro_atomic_store_release_int(&adhocServerRunning, 0);
 
 	INFO_LOG(Log::sceNet, "AdhocServer: End of AdhocServer Thread");
 
@@ -1736,7 +1737,7 @@ void interrupt(int sig)
 
 	// Trigger Shutdown
 	//_status = 0;
-	adhocServerRunning = false;
+	retro_atomic_store_release_int(&adhocServerRunning, 0);
 }
 
 /**
@@ -1886,7 +1887,7 @@ int server_loop(int server)
 	update_status();
 
 	// Handling Loop
-	while (adhocServerRunning) //(_status == 1)
+	while (retro_atomic_load_acquire_int(&adhocServerRunning)) //(_status == 1)
 	{
 		// Login Block
 		{

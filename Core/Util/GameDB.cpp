@@ -59,7 +59,6 @@ static void SplitSV(std::string_view strv, char delim, bool removeWhiteSpace, st
 	}
 }
 
-// Call this with the mutex locked.
 void GameDB::LoadIfNeeded() {
 	if (loaded_) {
 		// Already loaded
@@ -147,8 +146,6 @@ bool GameDB::GetGameInfos(std::string_view id, std::vector<GameDBInfo> *infos) {
 		// Not a game.
 		return false;
 	}
-
-	std::lock_guard<std::mutex> guard(loadMutex_);
 
 	LoadIfNeeded();
 

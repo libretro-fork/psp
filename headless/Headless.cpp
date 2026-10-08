@@ -50,6 +50,7 @@
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/Core.h"
+#include "Core/Debugger/WebSocket.h"
 #include "Core/CoreTiming.h"
 #include "Core/EmuThread.h"
 #include "Core/HLE/HLE.h"
@@ -433,6 +434,7 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 	double emulatedElapsed = 0.0;
 	double lastEmulatedTime = CoreTiming::GetGlobalTimeUs() / 1000000.0;
 	coreState = coreParameter.startBreak ? CORE_STEPPING_CPU : CORE_RUNNING_CPU;
+	bool debuggerClientSeen = false;
 	while (coreState == CORE_RUNNING_CPU || coreState == CORE_STEPPING_CPU) {
 		// Savestate loads/saves are queued and applied here, same as EmuScreen::render does in the
 		// app. Without this, --state silently did nothing at all.
@@ -453,6 +455,7 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 			});
 		}
 
+		const int cpuWorkSeen = Core_CPUWorkSeen();
 		int blockTicks = (int)usToCycles(1000000 / 10);
 		PSP_RunLoopFor(blockTicks);
 
@@ -494,6 +497,20 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 		// burns real seconds but no emulated ones, so the emulated limit can't misfire that way.
 		const bool wallTimedOut = time_now_d() > wallDeadline && !debugger;
 		const bool emulatedTimedOut = emulatedElapsed > opt.timeoutEmulated;
+		// Stopped for a debugger client: wait for it to queue something rather than spin. There's
+		// no deadline while waiting for the first client. Once every client has gone, nothing can
+		// resume us, so that ends the run like a stop without a debugger.
+		if (WebSocketDebuggerHasClients()) {
+			debuggerClientSeen = true;
+		}
+		const bool stoppedForDebugger = opt.debugger && (coreState == CORE_STEPPING_CPU || coreState == CORE_STEPPING_GE);
+		if (stoppedForDebugger) {
+			if (debuggerClientSeen && !WebSocketDebuggerHasClients()) {
+				break;
+			}
+			Core_WaitForCPUWork(cpuWorkSeen);
+			continue;
+		}
 		if (wallTimedOut || emulatedTimedOut) {
 			// Don't compare, print the output at least up to this point, and bail.
 			if (!opt.bench) {
@@ -1168,7 +1185,7 @@ int main(int argc, const char* argv[]) {
 		// hangs until the timeout. Better to say why and bail - see WebServerSetRequireExactPort().
 		if (!WebServerWaitForStartup()) {
 			fprintf(stderr, "Failed to start the debugger web server on port %d\n", cmdLineOptions.DebuggerPort().value());
-			// The server thread has exited but is still joinable - without this, its std::thread
+			// The server thread has exited but is still joinable - without this, its Thread
 			// destructor would call std::terminate() on the way out and we'd abort instead of
 			// returning a useful exit code.
 			ShutdownWebServer();

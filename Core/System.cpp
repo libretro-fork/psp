@@ -15,7 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <atomic>
 #include "ppsspp_config.h"
 
 #ifdef _WIN32
@@ -25,7 +24,7 @@
 #include <string>
 #endif
 
-#include <mutex>
+#include <retro_atomic.h>
 
 #include "ext/lua/lapi.h"
 
@@ -76,6 +75,7 @@
 #include "GPU/GPUCommon.h"
 #include "GPU/Debugger/Playback.h"
 #include "GPU/Debugger/RecordFormat.h"
+#include "Common/Thread/Thread.h"
 
 enum CPUThreadState {
 	CPU_THREAD_NOT_RUNNING,
@@ -89,13 +89,10 @@ static GlobalUIState globalUIState;
 CoreParameter g_CoreParameter;
 static FileLoader *g_loadedFile;
 // For background loading thread.
-static std::mutex loadingLock;
-static std::thread g_loadingThread;
+static Thread g_loadingThread;
 
 bool g_coreCollectDebugStats = false;
 static int g_coreCollectDebugStatsCounter = 0;
-
-static volatile CPUThreadState cpuThreadState = CPU_THREAD_NOT_RUNNING;
 
 static GPUBackend gpuBackend;
 static std::string gpuBackendDevice;
@@ -103,10 +100,18 @@ static bool g_fileLoggingWasEnabled;
 
 // Atomic because it's read as a fast-fail from the WebSocket debugger's own thread while the
 // CPU and loader threads move it along.
-static std::atomic<BootState> g_bootState = BootState::Off;
+static retro_atomic_int_t g_bootState{ (int)BootState::Off };
+
+static BootState GetBootState() {
+	return (BootState)retro_atomic_load_acquire_int(&g_bootState);
+}
+
+static void SetBootState(BootState state) {
+	retro_atomic_store_release_int(&g_bootState, (int)state);
+}
 
 BootState PSP_GetBootState() {
-	return g_bootState;
+	return GetBootState();
 }
 
 FileLoader *PSP_LoadedFile() {
@@ -694,7 +699,7 @@ static bool InitGPU(std::string *error_string) {
 		if (!success) {
 			*error_string = "Unable to initialize rendering engine.";
 			CPU_Shutdown(false);
-			g_bootState = BootState::Failed;
+			SetBootState(BootState::Failed);
 			return false;
 		}
 	}
@@ -702,14 +707,14 @@ static bool InitGPU(std::string *error_string) {
 }
 
 bool PSP_InitStart(const CoreParameter &coreParam) {
-	if (g_bootState != BootState::Off) {
+	if (GetBootState() != BootState::Off) {
 		ERROR_LOG(Log::Loader, "Can't start loader thread - already on.");
 		return false;
 	}
 
 	IncrementDebugCounter(DebugCounter::GAME_BOOT);
 
-	g_bootState = BootState::Booting;
+	SetBootState(BootState::Booting);
 
 	GraphicsContext *temp = g_CoreParameter.graphicsContext;
 	g_CoreParameter = coreParam;
@@ -727,7 +732,7 @@ bool PSP_InitStart(const CoreParameter &coreParam) {
 
 	Core_NotifyLifecycle(CoreLifecycle::STARTING);
 
-	g_loadingThread = std::thread([errorString]() {
+	g_loadingThread = Thread([errorString]() {
 		SetCurrentThreadName("ExecLoader");
 
 
@@ -763,21 +768,13 @@ bool PSP_InitStart(const CoreParameter &coreParam) {
 			if (errorString->empty()) {
 				*errorString = "Failed initializing CPU/Memory";
 			}
-			g_bootState = BootState::Failed;
+			SetBootState(BootState::Failed);
 			return;
 		}
 
-		// Initialize the GPU as far as we can here (do things like load cache files).
+		// The GPU is created in PSP_InitFinish(), on the thread that goes on to render with it.
 		_dbg_assert_(!gpu);
-#ifndef __LIBRETRO__
-		// Must not stamp Complete over the Failed that InitGPU sets - it has already run
-		// CPU_Shutdown(), so PSP_InitUpdate would take the success path on a core that no longer
-		// exists, right down to a null Memory::base.
-		if (!InitGPU(errorString)) {
-			return;
-		}
-#endif
-		g_bootState = BootState::Complete;
+		SetBootState(BootState::Complete);
 	});
 
 	return true;
@@ -785,26 +782,24 @@ bool PSP_InitStart(const CoreParameter &coreParam) {
 
 // The loader thread has been joined; finishes on the calling thread.
 static BootState PSP_InitFinish(std::string *error_string) {
-	const BootState bootState = g_bootState;
+	const BootState bootState = GetBootState();
 	_dbg_assert_(bootState == BootState::Complete || bootState == BootState::Failed);
 
 	if (bootState == BootState::Failed) {
 		// Failed! (Note: PSP_Shutdown was already called on the loader thread).
 		Core_NotifyLifecycle(CoreLifecycle::START_COMPLETE);
 		*error_string = g_CoreParameter.errorString;
-		g_bootState = BootState::Off;
+		SetBootState(BootState::Off);
 		return BootState::Failed;
 	}
 
-#ifdef __LIBRETRO__
 	if (!InitGPU(error_string)) {
 		// Same as the Failed branch above - the core is already gone.
 		Core_NotifyLifecycle(CoreLifecycle::START_COMPLETE);
 		*error_string = g_CoreParameter.errorString;
-		g_bootState = BootState::Off;
+		SetBootState(BootState::Off);
 		return BootState::Failed;
 	}
-#endif
 
 	// Ok, async part of the boot completed, let's finish up things on the main thread.
 	if (gpu) {
@@ -820,7 +815,7 @@ static BootState PSP_InitFinish(std::string *error_string) {
 }
 
 BootState PSP_InitUpdate(std::string *error_string) {
-	const BootState bootState = g_bootState;
+	const BootState bootState = GetBootState();
 
 	if (bootState == BootState::Booting || bootState == BootState::Off) {
 		// Nothing to do right now.
@@ -839,7 +834,7 @@ BootState PSP_InitUpdate(std::string *error_string) {
 BootState PSP_Init(const CoreParameter &coreParam, std::string *error_string) {
 	// InitStart doesn't really fail anymore.
 	if (!PSP_InitStart(coreParam)) {
-		g_bootState = BootState::Off;
+		SetBootState(BootState::Off);
 		return BootState::Failed;
 	}
 
@@ -847,26 +842,26 @@ BootState PSP_Init(const CoreParameter &coreParam, std::string *error_string) {
 }
 
 BootState PSP_InitWait(std::string *error_string) {
-	if (g_bootState == BootState::Off)
+	if (GetBootState() == BootState::Off)
 		return BootState::Off;
 	// Every path out of the loader thread sets Complete or Failed.
-	_assert_msg_(g_loadingThread.joinable(), "bootstate: %d", (int)g_bootState.load());
+	_assert_msg_(g_loadingThread.joinable(), "bootstate: %d", (int)GetBootState());
 	g_loadingThread.join();
 	return PSP_InitFinish(error_string);
 }
 
 BootState PollBootState() {
-	return g_bootState;
+	return GetBootState();
 }
 
 void PSP_Shutdown(bool success) {
 	// Do nothing if we never inited.
-	if (g_bootState == BootState::Off) {
+	if (GetBootState() == BootState::Off) {
 		ERROR_LOG(Log::Loader, "Unexpected PSP_Shutdown");
 		return;
 	}
 
-	_assert_(g_bootState != BootState::Failed);
+	_assert_(GetBootState() != BootState::Failed);
 
 	Core_Stop();
 
@@ -874,7 +869,7 @@ void PSP_Shutdown(bool success) {
 		MIPSAnalyst::StoreHashMap();
 	}
 
-	if (g_bootState == BootState::Booting) {
+	if (GetBootState() == BootState::Booting) {
 		// This should only happen during failures.
 		Core_NotifyLifecycle(CoreLifecycle::START_COMPLETE);
 	}
@@ -896,7 +891,7 @@ void PSP_Shutdown(bool success) {
 	Core_NotifyLifecycle(CoreLifecycle::STOPPED);
 
 	if (success) {
-		g_bootState = BootState::Off;
+		SetBootState(BootState::Off);
 	}
 
 	IncrementDebugCounter(DebugCounter::GAME_SHUTDOWN);

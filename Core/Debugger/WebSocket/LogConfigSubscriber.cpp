@@ -71,8 +71,8 @@ void WebSocketLogChannelsList(DebuggerRequest &req) {
 		const LogChannel *chan = g_logManager.GetLogChannel(type);
 		json.pushDict();
 		json.writeString("name", LogManager::GetLogTypeName(type));
-		json.writeString("level", LogLevelToString(chan->level));
-		json.writeBool("enabled", chan->enabled);
+		json.writeString("level", LogLevelToString(chan->Level()));
+		json.writeBool("enabled", chan->Enabled());
 		json.pop();
 	}
 	json.pop();
@@ -130,8 +130,8 @@ void WebSocketLogChannelSet(DebuggerRequest &req) {
 		const LogChannel *chan = g_logManager.GetLogChannel(type);
 		JsonWriter &json = req.Respond();
 		json.writeString("name", channelName);
-		json.writeString("level", LogLevelToString(chan->level));
-		json.writeBool("enabled", chan->enabled);
+		json.writeString("level", LogLevelToString(chan->Level()));
+		json.writeBool("enabled", chan->Enabled());
 		return;
 	}
 

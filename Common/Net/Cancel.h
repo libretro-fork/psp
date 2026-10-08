@@ -1,7 +1,8 @@
 #pragma once
 
-#include <atomic>
 #include <cstdint>
+
+#include <retro_atomic.h>
 
 namespace net {
 
@@ -31,11 +32,11 @@ class CancelToken {
 public:
 	// Any thread.
 	void Cancel();
-	bool IsCancelled() const { return cancelled_.load(std::memory_order_acquire); }
+	bool IsCancelled() const { return retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&cancelled_)) != 0; }
 	intptr_t WakeFd() const { return wake_.Fd(); }
 
 private:
-	std::atomic<bool> cancelled_{ false };
+	retro_atomic_int_t cancelled_{ 0 };
 	WakeSocket wake_;
 };
 

@@ -1,4 +1,3 @@
-#include <thread>
 #include <vector>
 
 #include "Common/Log.h"

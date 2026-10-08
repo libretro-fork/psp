@@ -21,14 +21,23 @@ public:
 	bool InitAPI(void *wnd, std::string *deviceName, std::string *error_message) override;
 	void CreateDrawContext() override;
 	void DestroyDrawContext() override;
+	// The render thread uses the framebuffer, so it fetches it: on the emu thread when there's no
+	// separate one, else at the start of each render thread pass.
 	void SetRenderTarget() override {
-		extern GLuint g_defaultFBO;
-		g_defaultFBO = hw_render_.get_current_framebuffer();
+		if (!Libretro::useEmuThread) {
+			UpdateDefaultFBO();
+		}
 	}
 
 	void ThreadStart() override { renderManager_->ThreadStart(draw_); }
-	bool ThreadFrame() override { return renderManager_->ThreadFrame(); }
-	bool ThreadRunUntilPaused() override { return renderManager_->ThreadRunUntilPaused(); }
+	bool ThreadFrame() override {
+		UpdateDefaultFBO();
+		return renderManager_->ThreadFrame();
+	}
+	bool ThreadRunUntilPaused() override {
+		UpdateDefaultFBO();
+		return renderManager_->ThreadRunUntilPaused();
+	}
 	void NotifyEmuThreadPaused() override { renderManager_->NotifyEmuThreadPaused(); }
 	void ThreadEnd() override { renderManager_->ThreadEnd(); }
 
@@ -39,6 +48,11 @@ public:
    void NotifyEmuThreadExit() override;
 
 private:
+	void UpdateDefaultFBO() {
+		extern GLuint g_defaultFBO;
+		g_defaultFBO = hw_render_.get_current_framebuffer();
+	}
+
 	GLRenderManager *renderManager_ = nullptr;
 	bool glewInitDone = false;
 };

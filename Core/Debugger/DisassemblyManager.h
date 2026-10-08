@@ -21,7 +21,6 @@
 #include <string_view>
 
 #include "ppsspp_config.h"
-#include <mutex>
 #include "Common/CommonTypes.h"
 #include "Core/Debugger/SymbolMap.h"
 #include "Core/MIPS/MIPSAnalyst.h"
@@ -97,7 +96,6 @@ private:
 	std::vector<BranchLine> lines;
 	std::map<u32,DisassemblyEntry*> entries;
 	std::vector<u32> lineAddresses;
-	std::recursive_mutex lock_;
 };
 
 class DisassemblyOpcode: public DisassemblyEntry
@@ -152,7 +150,6 @@ private:
 	DataType type;
 	std::map<u32,DataEntry> lines;
 	std::vector<u32> lineAddresses;
-	std::recursive_mutex lock_;
 };
 
 class DisassemblyComment: public DisassemblyEntry
@@ -176,6 +173,7 @@ private:
 
 class DebugInterface;
 
+// All of it is the CPU thread's: the debugger reaches it through Core_RunOnCPUThread().
 class DisassemblyManager {
 public:
 	~DisassemblyManager();
@@ -197,7 +195,6 @@ public:
 
 private:
 	std::map<u32,DisassemblyEntry*> entries;
-	std::recursive_mutex entriesLock_;
 	DebugInterface *cpu_;
 	int maxParamChars = 29;
 };

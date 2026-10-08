@@ -22,13 +22,17 @@ class WebSocketServer;
 }
 
 class DebuggerLogListener;
+class DebuggerMailbox;
 
+// Collects log messages from any thread and wakes mailbox; the connection's thread sends them.
 struct LogBroadcaster {
 public:
-	LogBroadcaster();
+	explicit LogBroadcaster(DebuggerMailbox *mailbox);
 	~LogBroadcaster();
 
 	void Broadcast(net::WebSocketServer *ws);
+	// Drops what has queued up, for a client that disallowed log events.
+	void Discard();
 
 private:
 	DebuggerLogListener *listener_;

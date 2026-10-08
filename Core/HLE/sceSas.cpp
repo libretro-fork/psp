@@ -28,9 +28,6 @@
 
 #include <cstdlib>
 #include <functional>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
 
 #include "Common/Profiler/Profiler.h"
 #include "Common/Thread/ThreadUtil.h"
@@ -51,6 +48,8 @@
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelInterrupt.h"
+#include "Common/Thread/Thread.h"
+#include "Common/Thread/ParkingLot.h"
 
 // TODO - allow more than one, associating each with one Core pointer (passed in to all the functions)
 // No known games use more than one instance of Sas though.
@@ -72,12 +71,10 @@ struct SasThreadParams {
 	int rightVol;
 };
 
-static std::thread g_sasThread;
-static std::mutex sasWakeMutex;
-static std::mutex sasDoneMutex;
-static std::condition_variable sasWake;
-static std::condition_variable sasDone;
-static volatile int sasThreadState = SasThreadState::DISABLED;
+static Thread g_sasThread;
+// SasThreadState. The emulation thread queues a mix and the SAS thread moves it back to READY.
+static retro_atomic_int_t sasThreadState{ SasThreadState::DISABLED };
+static EventCounter sasWork;
 static SasThreadParams sasThreadParams;
 static int sasMixEvent = -1;
 
@@ -87,62 +84,60 @@ bool *__SasGetGlobalMuteFlag() {
 	return &g_sasMuteFlag;
 }
 
+static int SasState() {
+	return retro_atomic_load_acquire_int(&sasThreadState);
+}
+
 int __SasThread() {
 	SetCurrentThreadName("SAS");
 
-	std::unique_lock<std::mutex> guard(sasWakeMutex);
-	while (sasThreadState != SasThreadState::DISABLED) {
-		sasWake.wait(guard);
-		if (sasThreadState == SasThreadState::QUEUED) {
+	for (;;) {
+		const int seen = sasWork.Seen();
+		const int state = SasState();
+		if (state == SasThreadState::DISABLED) {
+			break;
+		}
+		if (state == SasThreadState::QUEUED) {
 			const bool mute = g_sasMuteFlag;
 			sas->Mix(sasThreadParams.outAddr, sasThreadParams.inAddr, sasThreadParams.leftVol, sasThreadParams.rightVol, mute);
-			std::lock_guard<std::mutex> doneGuard(sasDoneMutex);
-			sasThreadState = SasThreadState::READY;
-			sasDone.notify_one();
+			// Fails only if the thread was disabled meanwhile.
+			retro_atomic_cas_int(&sasThreadState, SasThreadState::QUEUED, SasThreadState::READY);
+			ParkingLotNotify(&sasThreadState);
+			continue;
 		}
+		sasWork.Wait(seen);
 	}
 	return 0;
 }
 
 static void __SasDrain() {
-	std::unique_lock<std::mutex> guard(sasDoneMutex);
-	while (sasThreadState == SasThreadState::QUEUED)
-		sasDone.wait(guard);
+	ParkingLotWait(&sasThreadState, [] { return SasState() != SasThreadState::QUEUED; });
 }
 
 static void __SasEnqueueMix(u32 outAddr, u32 inAddr = 0, int leftVol = 0, int rightVol = 0) {
-	if (sasThreadState == SasThreadState::DISABLED) {
+	if (SasState() == SasThreadState::DISABLED) {
 		// No thread, call it immediately.
 		const bool mute = g_sasMuteFlag;
 		sas->Mix(outAddr, inAddr, leftVol, rightVol, mute);
 		return;
 	}
 
-	if (sasThreadState == SasThreadState::QUEUED) {
-		// Wait for the queue to drain.
-		__SasDrain();
-	}
-
-	// We're safe to write, since it can't be processing now anymore.
-	// No other thread enqueues.
+	// Wait for the last mix, so the params are free to write. No other thread enqueues.
+	__SasDrain();
 	sasThreadParams.outAddr = outAddr;
 	sasThreadParams.inAddr = inAddr;
 	sasThreadParams.leftVol = leftVol;
 	sasThreadParams.rightVol = rightVol;
 
-	// And now, notify.
-	sasWakeMutex.lock();
-	sasThreadState = SasThreadState::QUEUED;
-	sasWake.notify_one();
-	sasWakeMutex.unlock();
+	retro_atomic_store_release_int(&sasThreadState, SasThreadState::QUEUED);
+	sasWork.Notify();
 }
 
 static void __SasDisableThread() {
-	if (sasThreadState != SasThreadState::DISABLED) {
-		sasWakeMutex.lock();
-		sasThreadState = SasThreadState::DISABLED;
-		sasWake.notify_one();
-		sasWakeMutex.unlock();
+	if (SasState() != SasThreadState::DISABLED) {
+		retro_atomic_store_release_int(&sasThreadState, SasThreadState::DISABLED);
+		sasWork.Notify();
+		ParkingLotNotify(&sasThreadState);
 		if (g_sasThread.joinable()) {
 			g_sasThread.join();
 		}
@@ -176,10 +171,10 @@ void __SasInit() {
 	sasMixEvent = CoreTiming::RegisterEvent("SasMix", sasMixFinish);
 
 	if (g_Config.bSeparateSASThread) {
-		sasThreadState = SasThreadState::READY;
-		g_sasThread = std::thread(__SasThread);
+		retro_atomic_store_release_int(&sasThreadState, SasThreadState::READY);
+		g_sasThread = Thread(__SasThread);
 	} else {
-		sasThreadState = SasThreadState::DISABLED;
+		retro_atomic_store_release_int(&sasThreadState, SasThreadState::DISABLED);
 	}
 }
 
@@ -188,10 +183,8 @@ void __SasDoState(PointerWrap &p) {
 	if (!s)
 		return;
 
-	if (sasThreadState == SasThreadState::QUEUED) {
-		// Wait for the queue to drain.  Don't want to save the wrong stuff.
-		__SasDrain();
-	}
+	// Wait for the queue to drain.  Don't want to save the wrong stuff.
+	__SasDrain();
 
 	DoClass(p, sas);
 
@@ -206,9 +199,7 @@ void __SasDoState(PointerWrap &p) {
 }
 
 void __SasWaitForMix() {
-	if (sasThreadState == SasThreadState::QUEUED) {
-		__SasDrain();
-	}
+	__SasDrain();
 }
 
 void __SasShutdown() {

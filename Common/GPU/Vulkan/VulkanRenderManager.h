@@ -4,12 +4,10 @@
 // Only draws and binds are handled here, resource creation and allocations are handled as normal -
 // that's the nice thing with Vulkan.
 
-#include <atomic>
-#include <condition_variable>
 #include <cstdint>
-#include <mutex>
-#include <thread>
-#include <queue>
+#include <deque>
+
+#include <retro_atomic.h>
 
 #include "Common/Math/Statistics.h"
 #include "Common/Thread/Promise.h"
@@ -25,6 +23,9 @@
 #include "Common/GPU/Vulkan/VulkanFramebuffer.h"
 #include "Common/GPU/Vulkan/VulkanDescSet.h"
 #include "Common/GPU/thin3d.h"
+#include "Common/Thread/Thread.h"
+#include "Common/Thread/MpscQueue.h"
+#include "Common/Thread/ParkingLot.h"
 
 // Forward declaration
 VK_DEFINE_HANDLE(VmaAllocation);
@@ -120,7 +121,8 @@ struct VKRGraphicsPipeline {
 	VKRGraphicsPipeline(PipelineFlags flags, const char *tag) : flags_(flags), tag_(tag) {}
 	~VKRGraphicsPipeline();
 
-	bool Create(VulkanContext *vulkan, VkRenderPass compatibleRenderPass, RenderPassType rpType, VkSampleCountFlagBits sampleCount, double scheduleTime, int countToCompile);
+	// Posts the result to promise, which must be the one ClaimVariant() installed for rpType.
+	bool Create(VulkanContext *vulkan, Promise<VkPipeline> *promise, VkRenderPass compatibleRenderPass, RenderPassType rpType, VkSampleCountFlagBits sampleCount, double scheduleTime, int countToCompile);
 	void DestroyVariants(VulkanContext *vulkan, bool msaaOnly);
 
 	// This deletes the whole VKRGraphicsPipeline, you must remove your last pointer to it when doing this.
@@ -135,10 +137,18 @@ struct VKRGraphicsPipeline {
 	void LogCreationFailure() const;
 
 	VKRGraphicsPipelineDesc *desc = nullptr;
-	Promise<VkPipeline> *pipeline[(size_t)RenderPassType::TYPE_COUNT]{};
-	std::mutex mutex_;  // protects the pipeline array
 
-	VkSampleCountFlagBits SampleCount() const { return sampleCount_; }
+	// Any thread. The variant's promise, or null if none was claimed.
+	Promise<VkPipeline> *Variant(RenderPassType rpType) const {
+		return (Promise<VkPipeline> *)retro_atomic_load_acquire_ptr(const_cast<retro_atomic_ptr_t *>(&pipeline_[(size_t)rpType]));
+	}
+	// Any thread. Installs an empty promise if the slot is free. *created says whether this caller
+	// installed it and so must get it compiled.
+	Promise<VkPipeline> *ClaimVariant(RenderPassType rpType, bool *created);
+
+	VkSampleCountFlagBits SampleCount() const {
+		return (VkSampleCountFlagBits)retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&sampleCount_));
+	}
 
 	const char *Tag() const { return tag_.c_str(); }
 private:
@@ -146,19 +156,19 @@ private:
 
 	std::string tag_;
 	PipelineFlags flags_;
-	VkSampleCountFlagBits sampleCount_ = VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
+	// Promise<VkPipeline> * per render pass type. Slots are claimed with CAS, and a promise that
+	// was swapped out is freed through the delete list, after any reader is done with it.
+	retro_atomic_ptr_t pipeline_[(size_t)RenderPassType::TYPE_COUNT]{};
+	retro_atomic_int_t sampleCount_{ (int)VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM };
 };
 
 struct CompileQueueEntry {
-	CompileQueueEntry(VKRGraphicsPipeline *p, VkRenderPass _compatibleRenderPass, RenderPassType _renderPassType, VkSampleCountFlagBits _sampleCount)
-		: type(Type::GRAPHICS), graphics(p), compatibleRenderPass(_compatibleRenderPass), renderPassType(_renderPassType), sampleCount(_sampleCount) {}
-	enum class Type {
-		GRAPHICS,
-	};
-	Type type;
+	CompileQueueEntry(VKRGraphicsPipeline *p, Promise<VkPipeline> *_promise, VkRenderPass _compatibleRenderPass, RenderPassType _renderPassType, VkSampleCountFlagBits _sampleCount)
+		: compatibleRenderPass(_compatibleRenderPass), renderPassType(_renderPassType), graphics(p), promise(_promise), sampleCount(_sampleCount) {}
 	VkRenderPass compatibleRenderPass;
 	RenderPassType renderPassType;
-	VKRGraphicsPipeline* graphics = nullptr;
+	VKRGraphicsPipeline *graphics = nullptr;
+	Promise<VkPipeline> *promise = nullptr;
 	VkSampleCountFlagBits sampleCount;
 };
 
@@ -293,9 +303,7 @@ public:
 	int WaitForPipelines();
 
 	void NudgeCompilerThread() {
-		compileQueueMutex_.lock();
-		compileCond_.notify_one();
-		compileQueueMutex_.unlock();
+		compileWork_.Notify();
 	}
 
 	void AssertInRenderPass() const {
@@ -562,8 +570,11 @@ private:
 	// Bad for performance but sometimes necessary for synchronous CPU readbacks (screenshots and whatnot).
 	void FlushSync();
 
-	void PresentWaitThreadFunc();
-	void PollPresentTiming();
+	void PushRenderTask(VKRRenderThreadTask *task);
+	void QueueCompile(VKRGraphicsPipeline *pipeline, Promise<VkPipeline> *promise, VkRenderPass compatibleRenderPass, RenderPassType rpType, VkSampleCountFlagBits sampleCount);
+	bool CompileThreadRunning() const {
+		return retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&runCompileThread_)) != 0;
+	}
 
 	void ResetDescriptorLists(int frame);
 	void FlushDescriptors(int frame);
@@ -591,8 +602,7 @@ private:
 	int curHeight_ = -1;
 
 	bool insideFrame_ = false;
-	// probably doesn't need to be atomic.
-	std::atomic<bool> runCompileThread_{};
+	retro_atomic_int_t runCompileThread_{ 0 };
 
 	bool useRenderThread_ = true;
 	bool measurePresentTime_ = false;
@@ -608,33 +618,19 @@ private:
 
 	// Execution time state
 	VulkanContext *vulkan_;
-	std::thread renderThread_;
+	Thread renderThread_;
 	VulkanQueueRunner queueRunner_;
 
-	// For pushing data on the queue.
-	std::mutex pushMutex_;
-	std::condition_variable pushCondVar_;
-
-	std::queue<VKRRenderThreadTask *> renderThreadQueue_;
-
-	// For readbacks and other reasons we need to sync with the render thread.
-	std::mutex syncMutex_;
-	std::condition_variable syncCondVar_;
+	// Tasks for the render thread, which parks on renderThreadWork_.
+	MpscQueue<VKRRenderThreadTask *> renderThreadQueue_;
+	EventCounter renderThreadWork_;
 
 	// Shader compilation thread to compile while emulating the rest of the frame.
-	// Only one right now but we could use more.
-	std::thread compileThread_;
-	// Sync
-	std::condition_variable compileCond_;
-	std::mutex compileQueueMutex_;
-	std::vector<CompileQueueEntry> compileQueue_;
-	// Set while the compile thread turns a batch it took off compileQueue_ into tasks.
-	bool compileScheduling_ = false;
-	// Bumped after each batch is scheduled; WaitForPipelines() parks on it.
-	std::atomic<int> compileProgress_{0};
-
-	// Thread for measuring presentation delay.
-	std::thread presentWaitThread_;
+	Thread compileThread_;
+	MpscQueue<CompileQueueEntry> compileQueue_;
+	EventCounter compileWork_;
+	// Entries queued but not yet made into tasks. WaitForPipelines() parks on it.
+	retro_atomic_int_t compilePending_{ 0 };
 
 	// pipelines to check and possibly create at the end of the current render pass.
 	std::vector<VKRGraphicsPipeline *> pipelinesToCheck_;
@@ -654,11 +650,13 @@ private:
 
 	VKRPipelineLayout *curPipelineLayout_ = nullptr;
 
-	// Guards pipelineLayouts_, both the vector itself and the lifetime of the layouts in it.
-	// The list is added to by CreatePipelineLayout and erased from by the deferred callback queued by
-	// DestroyPipelineLayout, both of which run on the main thread, while the render thread walks it
-	// every frame in FlushDescriptors. Contention is negligible - layouts are only created and destroyed
-	// when a game starts or stops, and the lock is otherwise taken exactly twice per frame.
-	std::mutex pipelineLayoutsMutex_;
-	std::vector<VKRPipelineLayout *> pipelineLayouts_;
+	// Copy-on-write list. The main thread replaces it (create, and the deferred destroy callback),
+	// the render thread reads it in FlushDescriptors inside layoutsGate_.
+	typedef std::vector<VKRPipelineLayout *> LayoutList;
+	const LayoutList *Layouts() const {
+		return (const LayoutList *)retro_atomic_load_acquire_ptr(const_cast<retro_atomic_ptr_t *>(&pipelineLayouts_));
+	}
+	void PublishLayouts(LayoutList *list);
+	retro_atomic_ptr_t pipelineLayouts_{};
+	ReaderGate layoutsGate_;
 };

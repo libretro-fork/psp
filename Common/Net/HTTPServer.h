@@ -1,38 +1,38 @@
 #pragma once
 
-#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
-#include <thread>
 #include <vector>
+
+#include <retro_atomic.h>
 
 #include "Common/Net/HTTPHeaders.h"
 #include "Common/Net/Resolve.h"
+#include "Common/Thread/Thread.h"
 
+// One thread per request. Run() and the destructor belong to one thread (the accept loop's);
+// the destructor joins every worker, so handlers must finish on their own or be woken first.
 class NewThreadExecutor {
 public:
 	~NewThreadExecutor();
 	void Run(std::function<void()> func);
 
 private:
-	// Reap threads that have finished. Only called from the thread that calls Run().
+	// Joins the workers that have finished.
 	void Prune();
 
 	struct Worker {
-		std::thread thread;
-		// Set by the worker as its last act, read by whoever calls Run() next.
-		// It does look a bit fragile with the atomic inside a shared_ptr, but the way
-		// this is used, it should be fine. The atomic is only used to signal that the thread
-		// is done, and the shared_ptr is only used to keep the atomic alive until
-		// the thread is joined.
-		std::shared_ptr<std::atomic<bool>> done;
+		Thread thread;
+		// The worker's last act.
+		retro_atomic_int_t done{ 0 };
 	};
-	std::vector<Worker> workers_;
+	std::vector<std::unique_ptr<Worker>> workers_;
 };
 
 namespace net {
 
+class CancelToken;
 class InputSink;
 class OutputSink;
 
@@ -101,9 +101,9 @@ public:
 	// better put this on a thread. Returns false if failed to start serving, never
 	// returns if successful.
 	bool Run(int port);
-	// May run for (significantly) longer than timeout, but won't wait longer than that
-	// for a new connection to handle.
-	bool RunSlice(double timeout);
+	// Blocks until a connection arrives and hands it to the executor, or until cancel is set.
+	// Returns false when cancelled or on error.
+	bool RunSlice(const net::CancelToken *cancel);
 	bool Listen(int port, const char *reason, net::DNSType type = net::DNSType::ANY);
 	void Stop();
 

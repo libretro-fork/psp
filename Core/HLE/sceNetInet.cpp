@@ -1040,8 +1040,6 @@ static int sceNetInetSendto(int socket, u32 bufferPtr, int len, int flags, u32 t
 	bool isBcast = isBroadcastIP(saddr.in.sin_addr.s_addr);
 	// Broadcast/Multicast, use real broadcast/multicast if there is no one in peerlist
 	if (isBcast && getActivePeerCount() > 0) {
-		// Acquire Peer Lock
-		peerlock.lock();
 		SceNetAdhocctlPeerInfo* peer = friends;
 		for (; peer != NULL; peer = peer->next) {
 			// Does Skipping sending to timed out friends could cause desync when players moving group at the time MP game started?
@@ -1056,8 +1054,6 @@ static int sceNetInetSendto(int socket, u32 bufferPtr, int len, int flags, u32 t
 				DEBUG_LOG(Log::sceNet, "SendTo(BC): Address = %s, Port = %d", ip2str(saddr.in.sin_addr).c_str(), ntohs(saddr.in.sin_port));
 			}
 		}
-		// Free Peer Lock
-		peerlock.unlock();
 		retval = len;
 	}
 	// Unicast or real broadcast/multicast
@@ -1207,8 +1203,6 @@ static int sceNetInetSendmsg(int socket, u32 msghdrPtr, int flags) {
 	bool isBcast = isBroadcastIP(saddr.in.sin_addr.s_addr);
 	// Broadcast/Multicast, use real broadcast/multicast if there is no one in peerlist
 	if (isBcast && getActivePeerCount() > 0) {
-		// Acquire Peer Lock
-		peerlock.lock();
 		SceNetAdhocctlPeerInfo* peer = friends;
 		for (; peer != NULL; peer = peer->next) {
 			// Does Skipping sending to timed out friends could cause desync when players moving group at the time MP game started?
@@ -1231,8 +1225,6 @@ static int sceNetInetSendmsg(int socket, u32 msghdrPtr, int flags) {
 				DEBUG_LOG(Log::sceNet, "SendMsg(BC): Socket error %d", socket_errno);
 			}
 		}
-		// Free Peer Lock
-		peerlock.unlock();
 		// TODO: Calculate number of bytes supposed to be sent
 		retval = std::max(retval, 0); // Broadcast always success?
 	}

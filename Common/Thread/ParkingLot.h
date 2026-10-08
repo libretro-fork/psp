@@ -37,6 +37,32 @@ inline void ParkingLotWait(const void *addr, Pred pred) {
 	}
 }
 
+// A count of events, for "wait until something happened since I last looked". A waiter reads
+// Seen() before it checks its own state, and Wait(seen) returns once Notify() has run since.
+class EventCounter {
+public:
+	EventCounter() {
+		retro_atomic_int_init(&count_, 0);
+	}
+
+	int Seen() const {
+		return retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&count_));
+	}
+
+	// Any thread, after publishing whatever the waiters look at.
+	void Notify() {
+		retro_atomic_fetch_add_int(&count_, 1);
+		ParkingLotNotify(this);
+	}
+
+	void Wait(int seen) const {
+		ParkingLotWait(this, [&] { return Seen() != seen; });
+	}
+
+private:
+	retro_atomic_int_t count_;
+};
+
 // Grace period for read-mostly pointers: readers bracket each use with
 // Enter/Exit, a writer unpublishes and then Drain()s before freeing.
 // Readers never wait. Drain waits only for readers already inside.

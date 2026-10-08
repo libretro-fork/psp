@@ -30,10 +30,6 @@
 using namespace MIPSAnalyst;
 
 struct WebSocketSteppingState : public DebuggerSubscriber {
-	WebSocketSteppingState() {
-		g_disassemblyManager.setCpu(currentDebugMIPS);
-	}
-
 	void Into(DebuggerRequest &req);
 	void Over(DebuggerRequest &req);
 	void Out(DebuggerRequest &req);
@@ -92,10 +88,12 @@ void WebSocketSteppingState::Into(DebuggerRequest &req) {
 	if (!currentDebugMIPS->isAlive())
 		return req.Fail("CPU not started");
 	if (!Core_IsStepping()) {
-		// Core_Break() is explicitly free-threaded (see Core.cpp), so no need to bounce this to the CPU
-		// thread - and we can't anyway, since queuing to it only makes sense once the CPU actually *is*
-		// stepping, which this call is what triggers in the first place.
-		Core_Break(BreakReason::DebugStepInto, 0);
+		// The CPU thread drains its queue at least once a frame while running, too.
+		Core_RunOnCPUThread([] {
+			if (!Core_IsStepping()) {
+				Core_Break(BreakReason::DebugStepInto, 0);
+			}
+		});
 		return;
 	}
 
@@ -353,7 +351,9 @@ void WebSocketSteppingState::HLE(DebuggerRequest &req) {
 	});
 }
 
+// CPU thread.
 uint32_t WebSocketSteppingState::GetNextAddress(DebugInterface *cpuDebug) {
+	g_disassemblyManager.setCpu(currentDebugMIPS);
 	uint32_t current = g_disassemblyManager.getStartAddress(cpuDebug->GetPC());
 	return g_disassemblyManager.getNthNextAddress(current, 1);
 }

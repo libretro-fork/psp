@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <time.h>
 #include "proAdhoc.h"
+#include "Common/Thread/Thread.h"
 
 // Server Listening Port
 //#define SERVER_PORT 27312
@@ -371,8 +372,8 @@ void update_status();
 int proAdhocServerThread(int port); // (int argc, char * argv[])
 
 //extern int _status;
-extern std::atomic<bool> adhocServerRunning;
-extern std::thread adhocServerThread;
+extern retro_atomic_int_t adhocServerRunning;
+extern Thread adhocServerThread;
 // Make the wake before starting the thread; wake it after clearing adhocServerRunning.
 void AdhocServerPrepare();
 void AdhocServerWake();

@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include <mutex>
+#include <retro_atomic.h>
 #include <string>
 
 #include "Common/File/VFS/VFS.h"
@@ -145,13 +145,15 @@ public:
 	ReplacedTexture(VFSBackend *vfs, const ReplacementDesc &desc);
 	~ReplacedTexture();
 
+	// The loader task publishes the levels with its final state (release), and the
+	// emu thread only reads them once it sees that state (acquire).
 	inline ReplacementState State() const {
-		return state_;
+		return (ReplacementState)retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&state_));
 	}
 
 	void SetState(ReplacementState state) {
-		_dbg_assert_(state != state_);
-		state_ = state;
+		_dbg_assert_(state != State());
+		retro_atomic_store_release_int(&state_, (int)state);
 	}
 
 	void GetSize(int level, int *w, int *h) const {
@@ -204,7 +206,8 @@ public:
 		return alphaStatus_;
 	}
 
-	bool Poll(double budget);
+	// wait: block until a pending load is done, rather than checking on it.
+	bool Poll(bool wait);
 	bool CopyLevelTo(int level, uint8_t *out, size_t outDataSize, int rowPitch);
 
 	std::string logId_;
@@ -232,12 +235,11 @@ private:
 
 	double lastUsed_ = 0.0;
 	LimitedWaitable *threadWaitable_ = nullptr;
-	std::mutex lock_;
 	Draw::DataFormat fmt = Draw::DataFormat::UNDEFINED;
 	TextureAlpha alphaStatus_ = TextureAlpha::Any;
 	double lastUsed = 0.0;
 
-	std::atomic<ReplacementState> state_ = ReplacementState::UNLOADED;
+	retro_atomic_int_t state_{ (int)ReplacementState::UNLOADED };
 
 	VFSBackend *vfs_ = nullptr;
 	ReplacementDesc desc_;

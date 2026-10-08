@@ -16,6 +16,7 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
+#include <memory>
 
 #include "ppsspp_config.h"
 
@@ -142,7 +143,7 @@ void ReplacedTexture::PurgeIfNotUsedSinceTime(double t) {
 
 	// If there's some leftover threadWaitable, get rid of it.
 	if (threadWaitable_) {
-		if (threadWaitable_->WaitFor(0.0)) {
+		if (threadWaitable_->Ready()) {
 			delete threadWaitable_;
 			threadWaitable_ = nullptr;
 			// Continue with purging.
@@ -168,7 +169,7 @@ void ReplacedTexture::PurgeIfNotUsedSinceTime(double t) {
 }
 
 // This can only return true if ACTIVE or NOT_FOUND.
-bool ReplacedTexture::Poll(double budget) {
+bool ReplacedTexture::Poll(bool wait) {
 	_assert_(vfs_ != nullptr);
 
 	double now = time_now_d();
@@ -177,7 +178,9 @@ bool ReplacedTexture::Poll(double budget) {
 	case ReplacementState::ACTIVE:
 	case ReplacementState::NOT_FOUND:
 		if (threadWaitable_) {
-			if (!threadWaitable_->WaitFor(budget)) {
+			if (wait)
+				threadWaitable_->Wait();
+			if (!threadWaitable_->Ready()) {
 				lastUsed_ = now;
 				return false;
 			}
@@ -200,16 +203,13 @@ bool ReplacedTexture::Poll(double budget) {
 
 	lastUsed_ = now;
 
-	// Let's not even start a new texture if we're already behind.
-	// Note that 0.0 is used as a signalling value that we don't want to wait (just handling already finished textures).
-	if (budget < 0.0)
-		return false;
-
 	_assert_(!threadWaitable_);
 	threadWaitable_ = new LimitedWaitable();
 	SetState(ReplacementState::PENDING);
 	g_threadManager.EnqueueTask(new ReplacedTextureTask(vfs_, *this, threadWaitable_));
-	if (threadWaitable_->WaitFor(budget)) {
+	if (wait)
+		threadWaitable_->Wait();
+	if (threadWaitable_->Ready()) {
 		// If we successfully wait here, we're done. The thread will set state accordingly.
 		_assert_(State() == ReplacementState::ACTIVE || State() == ReplacementState::NOT_FOUND || State() == ReplacementState::CANCEL_INIT);
 		delete threadWaitable_;
@@ -231,9 +231,8 @@ void ReplacedTexture::Prepare(VFSBackend *vfs) {
 		return;
 	}
 
-	this->vfs_ = vfs;
-
-	std::unique_lock<std::mutex> lock(lock_);
+	// vfs_ is already vfs: it only changes in Unload(), which waits for this task first.
+	_dbg_assert_(vfs_ == vfs);
 
 	fmt = Draw::DataFormat::UNDEFINED;
 
@@ -776,9 +775,6 @@ bool ReplacedTexture::CopyLevelTo(int level, uint8_t *out, size_t outDataSize, i
 
 	int outW = levels_[level].fullW;
 	int outH = levels_[level].fullH;
-
-	// We probably could avoid this lock, but better to play it safe.
-	std::lock_guard<std::mutex> guard(lock_);
 
 	const ReplacedTextureLevel &info = levels_[level];
 	const std::vector<uint8_t> &data = data_[level];

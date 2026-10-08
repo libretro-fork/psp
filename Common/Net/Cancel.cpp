@@ -58,7 +58,7 @@ void WakeSocket::Drain() {
 }
 
 void CancelToken::Cancel() {
-	cancelled_.store(true, std::memory_order_release);
+	retro_atomic_store_release_int(&cancelled_, 1);
 	// Never drained, so the socket stays readable from here on.
 	wake_.Wake();
 }

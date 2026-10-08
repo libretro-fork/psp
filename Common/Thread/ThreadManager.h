@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include <queues/mpsc_stack.h>
+
 // The new threadpool.
 
 // To help smart scheduling.
@@ -19,9 +21,22 @@ enum class TaskPriority {
 	COUNT,
 };
 
+class Task;
+
+// Intrusive link for the thread manager's lock-free queues. node stays the first member,
+// so a node drained from an mpsc_stack converts straight back to its TaskLink.
+struct TaskLink {
+	mpsc_stack_node_t node;
+	Task *self;
+};
+
 // Implement this to make something that you can run on the thread manager.
 class Task {
 public:
+	Task() {
+		link_.node.next = nullptr;
+		link_.self = this;
+	}
 	virtual ~Task() {}
 	virtual TaskType Type() const = 0;
 	virtual TaskPriority Priority() const = 0;
@@ -29,6 +44,9 @@ public:
 	virtual bool Cancellable() const { return false; }
 	virtual void Cancel() {}
 	virtual void Release() { delete this; }
+
+	// Belongs to whichever thread manager queue holds the task.
+	TaskLink link_;
 };
 
 class Waitable {

@@ -24,6 +24,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <retro_atomic.h>
+
 #include "Common/Common.h"
 #include "Common/Math/SIMDHeaders.h"
 
@@ -265,6 +267,88 @@ private:
 	int firstVecStack_;
 	std::vector<RegCache::Reg> prologVec_;
 	std::vector<RegCache::Reg> prologGen_;
+};
+
+// Compiled functions by ID hash, open addressed and insert-only. One thread (the GPU thread) inserts
+// and clears; any thread looks up without locking. Clear() only while no other thread looks up,
+// since it also goes with freeing the code. A null function is cached as failed.
+template <typename F, int N>
+class JitFuncTable {
+	static_assert((N & (N - 1)) == 0, "N must be a power of two");
+
+public:
+	JitFuncTable() {
+		for (Slot &slot : slots_) {
+			slot.key = 0;
+			retro_atomic_ptr_init(&slot.value, nullptr);
+		}
+	}
+	JitFuncTable(const JitFuncTable &) = delete;
+	JitFuncTable &operator=(const JitFuncTable &) = delete;
+
+	bool Get(size_t key, F *func) {
+		size_t i = key & (N - 1);
+		for (int n = 0; n < N; ++n) {
+			void *value = retro_atomic_load_acquire_ptr(&slots_[i].value);
+			if (!value) {
+				return false;
+			}
+			if (slots_[i].key == key) {
+				*func = value == Failed() ? nullptr : reinterpret_cast<F>(value);
+				return true;
+			}
+			i = (i + 1) & (N - 1);
+		}
+		return false;
+	}
+
+	bool ContainsKey(size_t key) {
+		F func;
+		return Get(key, &func);
+	}
+
+	// Inserting thread only. Compilers clear first when NearFull(), so there's always a free slot.
+	void Insert(size_t key, F func) {
+		size_t i = key & (N - 1);
+		for (int n = 0; n < N; ++n) {
+			void *value = retro_atomic_load_relaxed_ptr(&slots_[i].value);
+			if (!value) {
+				slots_[i].key = key;
+				retro_atomic_store_release_ptr(&slots_[i].value, func ? reinterpret_cast<void *>(func) : Failed());
+				count_++;
+				return;
+			}
+			if (slots_[i].key == key) {
+				return;
+			}
+			i = (i + 1) & (N - 1);
+		}
+	}
+
+	bool NearFull() const {
+		return count_ >= N - N / 4;
+	}
+
+	void Clear() {
+		for (Slot &slot : slots_) {
+			retro_atomic_store_relaxed_ptr(&slot.value, nullptr);
+		}
+		count_ = 0;
+	}
+
+private:
+	static void *Failed() {
+		static char failed;
+		return &failed;
+	}
+
+	struct Slot {
+		// Written before value is published.
+		size_t key;
+		retro_atomic_ptr_t value;
+	};
+	Slot slots_[N];
+	int count_ = 0;
 };
 
 };

@@ -43,7 +43,7 @@
 LogChannel g_log[(size_t)Log::NUMBER_OF_LOGS];
 LogManager g_logManager;
 
-const char *hleCurrentThreadName = nullptr;
+thread_local const char *hleCurrentThreadName = nullptr;
 
 bool g_bDummySetting = true;
 bool *g_bLogEnabledSetting = &g_bDummySetting;
@@ -136,8 +136,7 @@ void LogManager::Init(bool *enabledSetting, bool headless) {
 	_dbg_assert_(ARRAY_SIZE(g_logTypeNames) == ARRAY_SIZE(g_log));
 
 	for (size_t i = 0; i < ARRAY_SIZE(g_log); i++) {
-		g_log[i].enabled = true;
-		g_log[i].level = LogLevel::LINFO;
+		g_log[i].Set(LogLevel::LINFO, true);
 	}
 }
 
@@ -147,21 +146,19 @@ void LogManager::Shutdown() {
 		return;
 	}
 
-	{
-		std::lock_guard<std::mutex> lk(logFileLock_);
-		if (fp_) {
-			fclose(fp_);
-			fp_ = nullptr;
-		}
-	}
-
-	outputs_ = (LogOutput)0;
+	retro_atomic_store_release_int(&outputs_, 0);
+	CloseLogFile();
 
 	ringLog_.Clear();
 	initialized_ = false;
 }
 
 LogManager::LogManager() {
+	retro_atomic_int_init(&outputs_, 0);
+	retro_atomic_ptr_init(&fp_, nullptr);
+	retro_atomic_int_init(&externalCount_, 0);
+	for (int i = 0; i < MAX_EXTERNAL_CALLBACKS; i++)
+		retro_atomic_ptr_init(&externalCallbacks_[i], nullptr);
 #if PPSSPP_PLATFORM(IOS) || PPSSPP_PLATFORM(UWP) || PPSSPP_PLATFORM(SWITCH)
 	stdioUseColor_ = false;
 #elif defined(_MSC_VER)
@@ -176,38 +173,45 @@ LogManager::LogManager() {
 
 #if PPSSPP_PLATFORM(WINDOWS)
 	if (IsDebuggerPresent()) {
-		outputs_ |= LogOutput::DebugString;
+		retro_atomic_fetch_or_int(&outputs_, (int)LogOutput::DebugString);
 	}
 #endif
 }
 
 LogManager::~LogManager() {
 	Shutdown();
+	for (int i = 0; i < MAX_EXTERNAL_CALLBACKS; i++)
+		delete (ExternalCallbackEntry *)retro_atomic_exchange_ptr(&externalCallbacks_[i], nullptr);
+}
 
+void LogManager::CloseLogFile() {
+	FILE *fp = (FILE *)retro_atomic_exchange_ptr(&fp_, nullptr);
+	if (fp) {
+		// Loggers that loaded fp before the exchange are inside the gate.
+		gate_.Drain();
+		fclose(fp);
+	}
 }
 
 void LogManager::SetFileLogPath(const Path &filename) {
-	std::lock_guard<std::mutex> lk(logFileLock_);
-	if (fp_ && filename == logFilename_) {
+	if (retro_atomic_load_acquire_ptr(&fp_) && filename == logFilename_) {
 		// All good
 		return;
 	}
 
-	if (fp_) {
-		fclose(fp_);
-		fp_ = nullptr;
-	}
+	CloseLogFile();
 
 	if (!filename.empty()) {
 		logFilename_ = Path(filename);
 
-		if (outputs_ & LogOutput::File) {
+		if (GetOutputsEnabled() & LogOutput::File) {
 			File::CreateFullPath(logFilename_.NavigateUp());
-			fp_ = File::OpenCFile(logFilename_, "at");
-			logFileOpenFailed_ = fp_ == nullptr;
+			FILE *fp = File::OpenCFile(logFilename_, "at");
+			logFileOpenFailed_ = fp == nullptr;
 			if (logFileOpenFailed_) {
 				printf("Failed to open log file %s\n", logFilename_.c_str());
 			}
+			retro_atomic_store_release_ptr(&fp_, fp);
 		}
 	}
 }
@@ -219,8 +223,8 @@ void LogManager::SaveConfig(Section *section) {
 		return;
 	}
 	for (int i = 0; i < (int)Log::NUMBER_OF_LOGS; i++) {
-		section->Set((std::string(g_logTypeNames[i]) + "Enabled"), g_log[i].enabled);
-		section->Set((std::string(g_logTypeNames[i]) + "Level"), (int)g_log[i].level);
+		section->Set((std::string(g_logTypeNames[i]) + "Enabled"), g_log[i].Enabled());
+		section->Set((std::string(g_logTypeNames[i]) + "Level"), (int)g_log[i].Level());
 	}
 }
 
@@ -231,13 +235,12 @@ void LogManager::LoadConfig(const Section *section) {
 		int level = (int)LogLevel::LERROR;
 		section->Get((std::string(g_logTypeNames[i]) + "Enabled"), &enabled);
 		section->Get((std::string(g_logTypeNames[i]) + "Level"), &level);
-		g_log[i].enabled = enabled;
-		g_log[i].level = (LogLevel)level;
+		g_log[i].Set((LogLevel)level, enabled);
 	}
 }
 
 void LogManager::SetOutputsEnabled(LogOutput outputs) {
-	outputs_ = outputs;
+	retro_atomic_store_release_int(&outputs_, (int)outputs);
 	if (outputs & LogOutput::File) {
 		SetFileLogPath(logFilename_);
 	}
@@ -246,8 +249,8 @@ void LogManager::SetOutputsEnabled(LogOutput outputs) {
 void LogManager::LogLine(LogLevel level, Log type, const char *file, int line, const char *format, va_list args) {
 	char msgBuf[1024];
 
-	const LogChannel &log = g_log[(size_t)type];
-	if (level > log.level || !log.enabled || outputs_ == (LogOutput)0) {
+	const LogOutput outputs = GetOutputsEnabled();
+	if (!g_log[(size_t)type].IsEnabled(level) || outputs == (LogOutput)0) {
 		// If we get here, it should have been caught earlier.
 		return;
 	}
@@ -311,25 +314,37 @@ void LogManager::LogLine(LogLevel level, Log type, const char *file, int line, c
 	message.msg[neededBytes] = '\n';
 	va_end(args_copy);
 
-	if (outputs_ & LogOutput::Stdio) {
-		// This has its own mutex.
+	if (outputs & LogOutput::Stdio) {
 		StdioLog(message);
 	}
 
 	// OK, now go through the possible listeners in order.
-	if (outputs_ & LogOutput::File) {
-		// Lock covers the fp_ check too - SetFileLogPath()/Shutdown() can close it concurrently.
-		std::lock_guard<std::mutex> lk(logFileLock_);
-		if (fp_) {
-			fprintf(fp_, "%s %s %s", message.timestamp, message.header, message.msg.c_str());
+	const bool wantFile = (outputs & LogOutput::File) != 0;
+	const bool wantExternal = (outputs & LogOutput::ExternalCallback) != 0;
+	if (wantFile || wantExternal) {
+		gate_.Enter();
+		FILE *fp = wantFile ? (FILE *)retro_atomic_load_acquire_ptr(&fp_) : nullptr;
+		if (fp) {
+			// One write per line so concurrent loggers don't interleave mid-line.
+			std::string line;
+			line.reserve(strlen(message.timestamp) + strlen(message.header) + message.msg.size() + 2);
+			line.append(message.timestamp).append(" ").append(message.header).append(" ").append(message.msg);
+			fwrite(line.data(), 1, line.size(), fp);
 			// Is this really necessary to do every time? I guess to catch the last message before a crash..
-			fflush(fp_);
+			fflush(fp);
 		}
+		if (wantExternal) {
+			for (int i = 0; i < MAX_EXTERNAL_CALLBACKS; i++) {
+				const ExternalCallbackEntry *entry = (const ExternalCallbackEntry *)retro_atomic_load_acquire_ptr(&externalCallbacks_[i]);
+				if (entry)
+					entry->callback(message, entry->userdata);
+			}
+		}
+		gate_.Exit();
 	}
 
 #if PPSSPP_PLATFORM(WINDOWS)
-	if (outputs_ & LogOutput::DebugString) {
-		// No mutex needed
+	if (outputs & LogOutput::DebugString) {
 		char buffer[4096];
 		// We omit the timestamp for easy copy-paste-diffing.
 		snprintf(buffer, sizeof(buffer), "%s %s", message.header, message.msg.c_str());
@@ -337,22 +352,12 @@ void LogManager::LogLine(LogLevel level, Log type, const char *file, int line, c
 	}
 #endif
 
-	if (outputs_ & LogOutput::RingBuffer) {
+	if (outputs & LogOutput::RingBuffer) {
 		ringLog_.Log(message);
 	}
 
-	if (outputs_ & LogOutput::Printf) {
+	if (outputs & LogOutput::Printf) {
 		PrintfLog(message);
-	}
-
-
-	if (outputs_ & LogOutput::ExternalCallback) {
-		// Held across the dispatch on purpose: RemoveExternalLogCallback() takes the same lock, so a
-		// listener can't be torn down (and its userdata freed) while we're in the middle of calling it.
-		std::lock_guard<std::mutex> guard(externalLock_);
-		for (const ExternalCallbackEntry &entry : externalCallbacks_) {
-			entry.callback(message, entry.userdata);
-		}
 	}
 }
 
@@ -360,38 +365,102 @@ int LogManager::AddExternalLogCallback(LogCallback callback, void *userdata) {
 	if (!callback) {
 		return -1;
 	}
-	std::lock_guard<std::mutex> guard(externalLock_);
-	const int handle = nextExternalHandle_++;
-	externalCallbacks_.push_back(ExternalCallbackEntry{ handle, callback, userdata });
-	EnableOutput(LogOutput::ExternalCallback);
-	return handle;
+	ExternalCallbackEntry *entry = new ExternalCallbackEntry{ callback, userdata };
+	for (int i = 0; i < MAX_EXTERNAL_CALLBACKS; i++) {
+		if (retro_atomic_cas_ptr(&externalCallbacks_[i], nullptr, entry)) {
+			retro_atomic_fetch_add_int(&externalCount_, 1);
+			EnableOutput(LogOutput::ExternalCallback);
+			return i;
+		}
+	}
+	delete entry;
+	return -1;
 }
 
 void LogManager::RemoveExternalLogCallback(int handle) {
-	if (handle < 0) {
+	if (handle < 0 || handle >= MAX_EXTERNAL_CALLBACKS) {
 		return;
 	}
-	std::lock_guard<std::mutex> guard(externalLock_);
-	for (size_t i = 0; i < externalCallbacks_.size(); i++) {
-		if (externalCallbacks_[i].handle == handle) {
-			externalCallbacks_.erase(externalCallbacks_.begin() + i);
-			break;
-		}
-	}
+	ExternalCallbackEntry *entry = (ExternalCallbackEntry *)retro_atomic_exchange_ptr(&externalCallbacks_[handle], nullptr);
+	if (!entry)
+		return;
 	// Only when the last one goes away - otherwise removing one connection's callback would stop
-	// delivery to the ones still attached, which is the bug this list exists to avoid.
-	if (externalCallbacks_.empty()) {
+	// delivery to the ones still attached.
+	if (retro_atomic_fetch_sub_int(&externalCount_, 1) == 1) {
 		DisableOutput(LogOutput::ExternalCallback);
+	}
+	// Anyone still calling it is inside the gate; after this, userdata may be freed.
+	gate_.Drain();
+	delete entry;
+}
+
+RingbufferLog::RingbufferLog() {
+	retro_atomic_int_init(&head_, 0);
+	retro_atomic_int_init(&count_, 0);
+	for (int i = 0; i < MAX_LOGS; i++) {
+		retro_atomic_int_init(&slots_[i].seq, 0);
+		retro_atomic_int_init(&slots_[i].level, 0);
+		slots_[i].text[0] = '\0';
 	}
 }
 
 void RingbufferLog::Log(const LogMessage &message) {
-	std::lock_guard<std::mutex> lock(ringLock_);
-	messages_[curMessage_] = message;
-	curMessage_++;
-	if (curMessage_ >= MAX_LOGS)
-		curMessage_ -= MAX_LOGS;
-	count_++;
+	const int idx = retro_atomic_fetch_add_int(&head_, 1) & (MAX_LOGS - 1);
+	Slot &slot = slots_[idx];
+	const int seq = retro_atomic_load_relaxed_int(&slot.seq);
+	// Odd: another writer lapped the ring onto this slot. Drop ours.
+	if ((seq & 1) || !retro_atomic_cas_int(&slot.seq, seq, seq + 1))
+		return;
+	retro_atomic_thread_fence_seq_cst();
+	const size_t len = std::min(message.msg.size(), (size_t)MAX_TEXT - 1);
+	memcpy(slot.text, message.msg.data(), len);
+	slot.text[len] = '\0';
+	retro_atomic_store_relaxed_int(&slot.level, (int)message.level);
+	retro_atomic_store_release_int(&slot.seq, seq + 2);
+	if (retro_atomic_load_relaxed_int(&count_) < MAX_LOGS)
+		retro_atomic_fetch_add_int(&count_, 1);
+}
+
+int RingbufferLog::GetCount() const {
+	const int count = retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&count_));
+	return count < MAX_LOGS ? count : MAX_LOGS;
+}
+
+bool RingbufferLog::Read(int i, std::string *text, LogLevel *level) const {
+	const int head = retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&head_));
+	const Slot &slot = slots_[(head - i - 1) & (MAX_LOGS - 1)];
+	retro_atomic_int_t *seqp = const_cast<retro_atomic_int_t *>(&slot.seq);
+	const int seq = retro_atomic_load_acquire_int(seqp);
+	if (seq & 1)
+		return false;
+	char buf[MAX_TEXT];
+	memcpy(buf, slot.text, sizeof(buf));
+	buf[MAX_TEXT - 1] = '\0';
+	const int lvl = retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&slot.level));
+	retro_atomic_thread_fence_seq_cst();
+	if (retro_atomic_load_relaxed_int(seqp) != seq)
+		return false;
+	if (text)
+		*text = buf;
+	if (level)
+		*level = (LogLevel)lvl;
+	return true;
+}
+
+std::string RingbufferLog::TextAt(int i) const {
+	std::string text;
+	Read(i, &text, nullptr);
+	return text;
+}
+
+LogLevel RingbufferLog::LevelAt(int i) const {
+	LogLevel level = LogLevel::LINFO;
+	Read(i, nullptr, &level);
+	return level;
+}
+
+void RingbufferLog::Clear() {
+	retro_atomic_store_release_int(&count_, 0);
 }
 
 #ifdef _WIN32
@@ -492,7 +561,7 @@ void LogManager::StdioLog(const LogMessage &message) {
 		}
 	}
 
-	std::lock_guard<std::mutex> lock(stdioLock_);
+	// One call per line; stdio keeps it whole.
 	fprintf(stderr, "%s%s%s", colorAttr, text, resetAttr);
 #endif
 }

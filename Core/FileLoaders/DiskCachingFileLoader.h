@@ -17,9 +17,8 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
-#include <map>
-#include <mutex>
 
 #include "Common/CommonTypes.h"
 #include "Common/File/Path.h"
@@ -28,6 +27,8 @@
 
 class DiskCachingFileLoaderCache;
 
+// Used from one thread at a time (the CachingFileLoader worker that wraps it, or the thread
+// that prepares and destroys it), so it and its cache need no locks.
 class DiskCachingFileLoader : public ProxiedFileLoader {
 public:
 	DiskCachingFileLoader(FileLoader *backend);
@@ -42,21 +43,20 @@ public:
 	}
 	size_t ReadAt(s64 absolutePos, size_t bytes, void *data, Flags flags = Flags::NONE) override;
 
-	static std::vector<Path> GetCachedPathsInUse();
+	// Whether a cache file (by name, as MakeCacheFilename gives it) is open in this process.
+	static bool IsCacheFileInUse(const std::string &cacheFilename);
 
 private:
 	void Prepare();
 	void InitCache();
 	void ShutdownCache();
 
-	std::once_flag preparedFlag_;
+	bool prepared_ = false;
 	s64 filesize_ = 0;
 	DiskCachingFileLoaderCache *cache_ = nullptr;
-
 	// We don't support concurrent disk cache access (we use memory cached indexes.)
-	// So we have to ensure there's only one of these per.
-	static std::map<Path, DiskCachingFileLoaderCache *> caches_;
-	static std::mutex cachesMutex_;
+	// So a cache file is open in one loader at most; this is our claim on it, or -1.
+	int claimSlot_ = -1;
 };
 
 class DiskCachingFileLoaderCache {
@@ -68,17 +68,10 @@ public:
 		return f_ != nullptr;
 	}
 
-	void AddRef() {
-		++refCount_;
-	}
-
-	bool Release() {
-		return --refCount_ == 0;
-	}
-
 	static void SetCacheDir(const Path &path) {
 		cacheDir_ = path;
 	}
+	static std::string MakeCacheFilename(const Path &path);
 
 	size_t ReadFromCache(s64 pos, size_t bytes, void *data);
 	// Guaranteed to read at least one block into the cache.
@@ -100,7 +93,6 @@ private:
 	s64 GetBlockOffset(u32 block);
 
 	Path MakeCacheFilePath(const Path &filename);
-	std::string MakeCacheFilename(const Path &path);
 	bool LoadCacheFile(const Path &path);
 	void LoadCacheIndex();
 	void CreateCacheFile(const Path &path);
@@ -137,7 +129,6 @@ private:
 		INVALID_INDEX = 0xFFFFFFFF,
 	};
 
-	int refCount_ = 0;
 	s64 filesize_;
 	u32 blockSize_;
 	u16 generation_;
@@ -146,7 +137,6 @@ private:
 	u32 flags_;
 	size_t cacheSize_;
 	size_t indexCount_;
-	std::mutex lock_;
 	Path origPath_;
 
 	struct FileHeader {

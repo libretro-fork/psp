@@ -15,10 +15,13 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <mutex>
+#include <cstring>
 #include <vector>
 
+#include <retro_atomic.h>
+
 #include "Common/Data/Text/StringWriter.h"
+#include "Common/Thread/MpscQueue.h"
 #include "Core/Debugger/WebSocket/GPUStatsSubscriber.h"
 #include "Core/Core.h"
 #include "Core/HW/Display.h"
@@ -81,13 +84,14 @@ struct WebSocketGPUStatsState : public DebuggerSubscriber {
 	void FlipListener();
 
 protected:
+	// The WebSocket thread's.
 	bool forced_ = false;
-	bool sendNext_ = false;
-	bool sendFeed_ = false;
-
 	std::string lastTicket_;
-	std::mutex pendingLock_;
-	std::vector<CollectedStats> pendingStats_;
+	// Set by the WebSocket thread, read on the emu thread at each flip.
+	retro_atomic_int_t sendNext_{ 0 };
+	retro_atomic_int_t sendFeed_{ 0 };
+	// Collected on the emu thread, sent from the WebSocket thread.
+	MpscQueue<CollectedStats> pendingStats_;
 };
 
 DebuggerSubscriber *WebSocketGPUStatsInit(DebuggerEventHandlerMap &map) {
@@ -99,15 +103,20 @@ DebuggerSubscriber *WebSocketGPUStatsInit(DebuggerEventHandlerMap &map) {
 }
 
 WebSocketGPUStatsState::WebSocketGPUStatsState() {
-	__DisplayListenFlip(&WebSocketGPUStatsState::FlipForwarder, this);
+	// The flip listeners belong to the CPU thread.
+	Core_RunOnCPUThread([this] { __DisplayListenFlip(&WebSocketGPUStatsState::FlipForwarder, this); });
 }
 
 WebSocketGPUStatsState::~WebSocketGPUStatsState() {
 	// PSP_ForceDebugStats bumps a plain counter, so do it on the CPU thread that owns it - see
 	// Core_RunOnCPUThread() in Core.h.
-	if (forced_)
-		Core_RunOnCPUThread([] { PSP_ForceDebugStats(false); });
-	__DisplayForgetFlip(&WebSocketGPUStatsState::FlipForwarder, this);
+	const bool forced = forced_;
+	Core_RunOnCPUThread([this, forced] {
+		if (forced) {
+			PSP_ForceDebugStats(false);
+		}
+		__DisplayForgetFlip(&WebSocketGPUStatsState::FlipForwarder, this);
+	});
 }
 
 void WebSocketGPUStatsState::FlipForwarder(void *thiz) {
@@ -116,13 +125,11 @@ void WebSocketGPUStatsState::FlipForwarder(void *thiz) {
 }
 
 void WebSocketGPUStatsState::FlipListener() {
-	if (!sendNext_ && !sendFeed_)
+	if (!retro_atomic_load_acquire_int(&sendNext_) && !retro_atomic_load_acquire_int(&sendFeed_))
 		return;
 
 	// Okay, collect the data (we'll actually send at next Broadcast.)
-	std::lock_guard<std::mutex> guard(pendingLock_);
-	pendingStats_.resize(pendingStats_.size() + 1);
-	CollectedStats &stats = pendingStats_[pendingStats_.size() - 1];
+	CollectedStats stats;
 
 	__DisplayGetFPS(&stats.vps, &stats.fps, &stats.actual_fps);
 
@@ -140,7 +147,9 @@ void WebSocketGPUStatsState::FlipListener() {
 		memcpy(&stats.sleepTimes[0], sleepHistory, sizeof(float) * valid);
 	}
 
-	sendNext_ = false;
+	pendingStats_.Push(std::move(stats));
+	retro_atomic_store_release_int(&sendNext_, 0);
+	mailbox->Wake();
 }
 
 // Get next GPU stats (gpu.stats.get)
@@ -163,11 +172,9 @@ void WebSocketGPUStatsState::Get(DebuggerRequest &req) {
 	if (PSP_GetBootState() != BootState::Complete)
 		return req.Fail("CPU not started");
 
-	std::lock_guard<std::mutex> guard(pendingLock_);
-	sendNext_ = true;
-
 	const JsonNode *value = req.data.get("ticket");
 	lastTicket_ = value ? json_stringify(value) : "";
+	retro_atomic_store_release_int(&sendNext_, 1);
 }
 
 // Setup GPU stats feed (gpu.stats.feed)
@@ -186,8 +193,7 @@ void WebSocketGPUStatsState::Feed(DebuggerRequest &req) {
 	if (!req.ParamBool("enable", &enable, DebuggerParamType::OPTIONAL))
 		return;
 
-	std::lock_guard<std::mutex> guard(pendingLock_);
-	sendFeed_ = enable;
+	retro_atomic_store_release_int(&sendFeed_, enable ? 1 : 0);
 	if (forced_ != enable) {
 		Core_RunOnCPUThread([enable] { PSP_ForceDebugStats(enable); });
 		forced_ = enable;
@@ -195,19 +201,25 @@ void WebSocketGPUStatsState::Feed(DebuggerRequest &req) {
 }
 
 void WebSocketGPUStatsState::Broadcast(net::WebSocketServer *ws) {
-	std::lock_guard<std::mutex> guard(pendingLock_);
-	if (lastTicket_.empty() && !sendFeed_) {
-		pendingStats_.clear();
+	if (pendingStats_.Empty()) {
+		return;
+	}
+	std::vector<CollectedStats> pending;
+	pendingStats_.Drain([&](CollectedStats &&stats) {
+		pending.push_back(std::move(stats));
+	});
+
+	const bool sendFeed = retro_atomic_load_acquire_int(&sendFeed_) != 0;
+	if (lastTicket_.empty() && !sendFeed) {
 		return;
 	}
 
 	// To be safe, make sure we only send one if we're doing a get.
-	if (!sendFeed_ && pendingStats_.size() > 1)
-		pendingStats_.resize(1);
+	if (!sendFeed && pending.size() > 1)
+		pending.resize(1);
 
-	for (size_t i = 0; i < pendingStats_.size(); ++i) {
-		ws->Send(DebuggerGPUStatsEvent{ pendingStats_[i], lastTicket_ });
+	for (size_t i = 0; i < pending.size(); ++i) {
+		ws->Send(DebuggerGPUStatsEvent{ pending[i], lastTicket_ });
 		lastTicket_.clear();
 	}
-	pendingStats_.clear();
 }

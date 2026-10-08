@@ -17,7 +17,6 @@
 
 #include <algorithm>
 #include <ctime>
-#include <thread>
 
 #include "Common/Data/Encoding/Utf8.h"
 #include "Common/Data/Text/I18n.h"
@@ -26,7 +25,6 @@
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/StringUtils.h"
-#include "Common/Thread/ThreadUtil.h"
 #include "Core/Dialog/PSPSaveDialog.h"
 #include "Core/FileSystems/MetaFileSystem.h"
 #include "Core/Util/PathUtil.h"
@@ -107,9 +105,6 @@ PSPSaveDialog::PSPSaveDialog(UtilityDialogType type) : PSPDialog(type) {
 }
 
 PSPSaveDialog::~PSPSaveDialog() {
-	if (ioThread.joinable()) {
-		ioThread.join();
-	}
 }
 
 int PSPSaveDialog::Init(int paramAddr) {
@@ -119,12 +114,7 @@ int PSPSaveDialog::Init(int paramAddr) {
 		return SCE_ERROR_UTILITY_INVALID_STATUS;
 	}
 
-	if (ioThread.joinable()) {
-		// Normally shouldn't be the case here.
-		ioThread.join();
-	}
-
-	ioThreadStatus = SAVEIO_NONE;
+	ioStatus_ = SAVEIO_NONE;
 
 	requestAddr = 0;
 	const int check = CheckRequest(paramAddr, { SAVEDATA_DIALOG_SIZE_V1, SAVEDATA_DIALOG_SIZE_V2, SAVEDATA_DIALOG_SIZE_V3 });
@@ -406,7 +396,6 @@ void PSPSaveDialog::DisplayBanner(int which)
 }
 
 void PSPSaveDialog::DisplaySaveList(bool canMove) {
-	std::lock_guard<std::mutex> guard(paramLock);
 	static int upFramesHeld = 0;
 	static int downFramesHeld = 0;
 
@@ -475,7 +464,6 @@ void PSPSaveDialog::DisplaySaveList(bool canMove) {
 }
 
 void PSPSaveDialog::DisplaySaveIcon(bool checkExists) {
-	std::lock_guard<std::mutex> guard(paramLock);
 	PPGeImageStyle imageStyle = FadedImageStyle();
 	auto curSave = param.GetFileInfo(currentSelectedSave);
 
@@ -547,7 +535,6 @@ static void FormatSaveDate(char *date, size_t sz, const tm &t) {
 }
 
 void PSPSaveDialog::DisplaySaveDataInfo1() {
-	std::lock_guard<std::mutex> guard(paramLock);
 	const SaveFileInfo &saveInfo = param.GetFileInfo(currentSelectedSave);
 	PPGeStyle saveTitleStyle = FadedStyle(PPGeAlign::BOX_LEFT, 0.55f);
 
@@ -587,7 +574,6 @@ void PSPSaveDialog::DisplaySaveDataInfo1() {
 }
 
 void PSPSaveDialog::DisplaySaveDataInfo2(bool showNewData) {
-	std::lock_guard<std::mutex> guard(paramLock);
 
 	tm modif_time;
 	const char *save_title;
@@ -686,7 +672,6 @@ int PSPSaveDialog::Update(int animSpeed) {
 		memset(&request, 0, sizeof(request));
 		Memory::Memcpy(&request, requestAddr, size);
 		Memory::Memcpy(&originalRequest, requestAddr, size);
-		std::lock_guard<std::mutex> guard(paramLock);
 		param.SetPspParam(&request);
 	}
 
@@ -719,7 +704,7 @@ int PSPSaveDialog::Update(int animSpeed) {
 					display = DS_SAVE_CONFIRM_OVERWRITE;
 				} else {
 					display = DS_SAVE_SAVING;
-					StartIOThread();
+					StartIO();
 				}
 			}
 			EndDraw();
@@ -740,7 +725,7 @@ int PSPSaveDialog::Update(int animSpeed) {
 				StartFade(false);
 			} else if (IsButtonPressed(okButtonFlag)) {
 				display = DS_SAVE_SAVING;
-				StartIOThread();
+				StartIO();
 			}
 
 			EndDraw();
@@ -765,14 +750,14 @@ int PSPSaveDialog::Update(int animSpeed) {
 				}
 			} else if (IsButtonPressed(okButtonFlag)) {
 				display = DS_SAVE_SAVING;
-				StartIOThread();
+				StartIO();
 			}
 
 			EndDraw();
 		break;
 		case DS_SAVE_SAVING:
 			// The dialog keeps drawing while the IO runs, and takes the results once it's done.
-			FinishIO(false);
+			FinishIO();
 
 			StartDraw();
 
@@ -843,7 +828,7 @@ int PSPSaveDialog::Update(int animSpeed) {
 				StartFade(false);
 			} else if (IsButtonPressed(okButtonFlag)) {
 				display = DS_LOAD_LOADING;
-				StartIOThread();
+				StartIO();
 			}
 
 			EndDraw();
@@ -864,14 +849,14 @@ int PSPSaveDialog::Update(int animSpeed) {
 				StartFade(false);
 			} else if (IsButtonPressed(okButtonFlag)) {
 				display = DS_LOAD_LOADING;
-				StartIOThread();
+				StartIO();
 			}
 
 			EndDraw();
 		break;
 		case DS_LOAD_LOADING:
 			// The dialog keeps drawing while the IO runs, and takes the results once it's done.
-			FinishIO(false);
+			FinishIO();
 
 			StartDraw();
 
@@ -986,14 +971,14 @@ int PSPSaveDialog::Update(int animSpeed) {
 				}
 			} else if (IsButtonPressed(okButtonFlag)) {
 				display = DS_DELETE_DELETING;
-				StartIOThread();
+				StartIO();
 			}
 
 			EndDraw();
 		break;
 		case DS_DELETE_DELETING:
 			// The dialog keeps drawing while the IO runs, and takes the results once it's done.
-			FinishIO(false);
+			FinishIO();
 
 			StartDraw();
 
@@ -1060,9 +1045,9 @@ int PSPSaveDialog::Update(int animSpeed) {
 		break;
 
 		case DS_NONE: // For action which display nothing
-			if (ioThreadStatus == SAVEIO_NONE) {
-				StartIOThread();
-			} else if (FinishIO(g_Config.iIOTimingMethod != IOTIMING_HOST)) {
+			if (ioStatus_ == SAVEIO_NONE) {
+				StartIO();
+			} else if (FinishIO()) {
 				ChangeStatus(SCE_UTILITY_STATUS_FINISHED, 0);
 			}
 		break;
@@ -1079,7 +1064,7 @@ int PSPSaveDialog::Update(int animSpeed) {
 	return 0;
 }
 
-// Runs on the IO thread. Of the dialog, it only touches the io* members (see StartIOThread and FinishIO).
+// Of the dialog, this only touches the io* members (see StartIO and FinishIO).
 void PSPSaveDialog::ExecuteIOAction() {
 	ioParam_.ClearSFOCache();
 	auto &result = ioRequest_.common.result;
@@ -1111,7 +1096,7 @@ void PSPSaveDialog::ExecuteIOAction() {
 	}
 
 	ioParam_.ClearSFOCache();
-	ioThreadStatus = SAVEIO_READY;
+	ioStatus_ = SAVEIO_READY;
 }
 
 void PSPSaveDialog::ExecuteNotVisibleIOAction() {
@@ -1195,10 +1180,9 @@ void PSPSaveDialog::ExecuteNotVisibleIOAction() {
 	}
 }
 
-void PSPSaveDialog::StartIOThread() {
-	if (ioThread.joinable()) {
-		WARN_LOG_REPORT(Log::sceUtility, "Starting a save io thread when one already pending, uh oh.");
-		ioThread.join();
+void PSPSaveDialog::StartIO() {
+	if (ioStatus_ == SAVEIO_READY) {
+		WARN_LOG_REPORT(Log::sceUtility, "Starting save io while the last results weren't taken, uh oh.");
 	}
 
 	// Show save indicator. It's strange how "display" is just as much an action as what to display.
@@ -1208,7 +1192,7 @@ void PSPSaveDialog::StartIOThread() {
 		ShowSaveLoadIndicator(save);
 	}
 
-	// Everything the IO thread needs from the dialog, taken now: it doesn't look at the dialog's state.
+	// Everything the IO needs from the dialog, taken now: it doesn't look at the dialog's state.
 	const SceUtilitySavedataType mode = (SceUtilitySavedataType)(u32)request.mode;
 	ioAction_ = display;
 	ioRequest_ = request;
@@ -1226,29 +1210,18 @@ void PSPSaveDialog::StartIOThread() {
 		ioDeleteDir_ = param.GetSaveDir(param.GetSelectedSave());
 	}
 
-	ioThreadStatus = SAVEIO_PENDING;
-	ioThread = std::thread([this]() {
-		SetCurrentThreadName("SaveIO");
-
-		this->ExecuteIOAction();
-	});
+	ioStatus_ = SAVEIO_PENDING;
+	ExecuteIOAction();
 }
 
-// Takes the IO thread's results back. Without wait, only if it's done: returns whether it was.
-bool PSPSaveDialog::FinishIO(bool wait) {
-	if (ioThreadStatus == SAVEIO_PENDING && !wait) {
-		return false;
-	}
-	if (ioThread.joinable()) {
-		ioThread.join();
-	}
-	if (ioThreadStatus != SAVEIO_READY) {
+// Takes the IO's results back. Returns whether there's no IO left pending.
+bool PSPSaveDialog::FinishIO() {
+	if (ioStatus_ != SAVEIO_READY) {
 		return true;
 	}
 
 	{
 		// Only what the IO changed: the game may have changed its request meanwhile (Update reloads it).
-		std::lock_guard<std::mutex> guard(paramLock);
 		const u8 *before = (const u8 *)&ioRequestStart_;
 		const u8 *after = (const u8 *)&ioRequest_;
 		u8 *live = (u8 *)&request;
@@ -1306,29 +1279,19 @@ bool PSPSaveDialog::FinishIO(bool wait) {
 		display = ioDisplay_;
 		// Show what was saved or deleted in the list.
 		if (display == DS_SAVE_DONE || display == DS_DELETE_DONE) {
-			std::lock_guard<std::mutex> guard(paramLock);
 			param.SetPspParam(param.GetPspParam());
 		}
 	}
 
-	ioThreadStatus = SAVEIO_DONE;
+	ioStatus_ = SAVEIO_DONE;
 	return true;
-}
-
-void PSPSaveDialog::WaitForIO() {
-	if (ioThread.joinable()) {
-		ioThread.join();
-	}
 }
 
 int PSPSaveDialog::Shutdown(bool force) {
 	if (GetStatus() != SCE_UTILITY_STATUS_FINISHED && !force)
 		return SCE_ERROR_UTILITY_INVALID_STATUS;
 
-	if (ioThread.joinable()) {
-		ioThread.join();
-	}
-	ioThreadStatus = SAVEIO_NONE;
+	ioStatus_ = SAVEIO_NONE;
 
 	PSPDialog::Shutdown(force);
 	if (!force) {
@@ -1363,14 +1326,11 @@ static void DoStateOldPendingWrites(PointerWrap &p) {
 }
 
 void PSPSaveDialog::DoState(PointerWrap &p) {
-	if (ioThread.joinable()) {
-		ioThread.join();
-	}
 	PSPDialog::DoState(p);
 
-	// Version 3 activates the s > 2 branch below, so ioThreadStatus survives
-	// a savestate. Safe to restore: the IO thread was joined above, so the
-	// value is never SAVEIO_PENDING. Without this, loading a state taken
+	// Version 3 activates the s > 2 branch below, so ioStatus_ survives
+	// a savestate. The IO runs to completion when it starts, so the value is
+	// never SAVEIO_PENDING. Without this, loading a state taken
 	// while a savedata operation was in flight would restart the operation
 	// instead of resuming from its recorded status. Version 4 keeps the
 	// results of a finished operation that haven't been taken yet. Version 6 keeps originalRequest,
@@ -1392,13 +1352,13 @@ void PSPSaveDialog::DoState(PointerWrap &p) {
 	Do(p, requestAddr);
 	Do(p, currentSelectedSave);
 	Do(p, yesnoChoice);
-	SaveIOStatus ioStatus = ioThreadStatus;
+	SaveIOStatus ioStatus = ioStatus_;
 	if (s > 2) {
 		Do(p, ioStatus);
 	} else {
 		ioStatus = SAVEIO_NONE;
 	}
-	ioThreadStatus = ioStatus;
+	ioStatus_ = ioStatus;
 	if (s >= 4) {
 		Do(p, ioAction_);
 		Do(p, ioDisplay_);

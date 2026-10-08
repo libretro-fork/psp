@@ -896,8 +896,6 @@ NPDRMDemoBlockDevice::NPDRMDemoBlockDevice(FileLoader *fileLoader)
 		return;
 	}
 
-	std::lock_guard<std::mutex> guard(mutex_);
-
 	// Local kirk instance to not clash with other block devices and other decryption things.
 	kirk_init(&kirk_);
 
@@ -984,7 +982,6 @@ NPDRMDemoBlockDevice::NPDRMDemoBlockDevice(FileLoader *fileLoader)
 }
 
 NPDRMDemoBlockDevice::~NPDRMDemoBlockDevice() {
-	std::lock_guard<std::mutex> guard(mutex_);
 	delete [] table_;
 	delete [] tempBuf_;
 	delete [] blockBuf_;
@@ -994,7 +991,6 @@ int lzrc_decompress(void *out, int out_len, void *in, int in_len);
 
 bool NPDRMDemoBlockDevice::ReadBlock(int blockNumber, u8 *outPtr, bool uncached) {
 	FileLoader::Flags flags = uncached ? FileLoader::Flags::HINT_UNCACHED : FileLoader::Flags::NONE;
-	std::lock_guard<std::mutex> guard(mutex_);
 
 	if (blockSize_ == 0) {
 		// Wasn't opened successfully.

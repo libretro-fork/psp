@@ -1,7 +1,6 @@
-#include <mutex>
-
 #include "VulkanFrameData.h"
 #include "Common/Log.h"
+#include "Common/Thread/ParkingLot.h"
 #include "Common/StringUtils.h"
 
 #if 0 // def _DEBUG
@@ -51,7 +50,7 @@ void FrameData::Init(VulkanContext *vulkan, int index) {
 	// Creating the frame fence with true so they can be instantly waited on the first frame
 	fence = vulkan->CreateFence(true);
 	vulkan->SetDebugName(fence, VK_OBJECT_TYPE_FENCE, StringFromFormat("fence%d", index).c_str());
-	readyForFence = true;
+	retro_atomic_store_release_int(&readyForFence, 1);
 
 	VkQueryPoolCreateInfo query_ci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
 	query_ci.queryCount = MAX_TIMESTAMP_QUERIES;
@@ -249,9 +248,8 @@ void FrameData::Submit(VulkanContext *vulkan, FrameSubmitType type, FrameDataSha
 		res = vkQueueSubmit(vulkan->GetGraphicsQueue(), 1, &submit_info, fenceToTrigger);
 		vulkan->UnlockQueue();
 		if (sharedData.useMultiThreading) {
-			std::lock_guard<std::mutex> lock(fenceMutex);
-			readyForFence = true;
-			fenceCondVar.notify_one();
+			retro_atomic_store_release_int(&readyForFence, 1);
+			ParkingLotNotify(&readyForFence);
 		}
 	} else {
 		VLOG("Doing queue submit, fencing something (%p)", fenceToTrigger);
@@ -270,7 +268,8 @@ void FrameData::Submit(VulkanContext *vulkan, FrameSubmitType type, FrameDataSha
 		// Hard stall of the GPU, not ideal, but necessary so the CPU has the contents of the readback.
 		vkWaitForFences(vulkan->GetDevice(), 1, &sharedData.readbackFence, true, UINT64_MAX);
 		vkResetFences(vulkan->GetDevice(), 1, &sharedData.readbackFence);
-		syncDone = true;
+		retro_atomic_store_release_int(&syncDone, 1);
+		ParkingLotNotify(&syncDone);
 	}
 }
 

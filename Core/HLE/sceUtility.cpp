@@ -634,12 +634,6 @@ void __UtilityDoState(PointerWrap &p) {
 	}
 }
 
-void __UtilityWaitForIO() {
-	if (saveDialog) {
-		saveDialog->WaitForIO();
-	}
-}
-
 void __UtilityShutdown() {
 	saveDialog->Shutdown(true);
 	msgDialog->Shutdown(true);

@@ -63,8 +63,6 @@ struct WebSocketInputState : public DebuggerSubscriber {
 	void ButtonsPress(DebuggerRequest &req);
 	void AnalogSend(DebuggerRequest &req);
 
-	void Broadcast(net::WebSocketServer *ws) override;
-
 protected:
 	struct PressInfo {
 		std::string ticket;
@@ -74,8 +72,6 @@ protected:
 
 		std::string Event();
 	};
-
-	std::vector<PressInfo> pressTickets_;
 };
 
 std::string WebSocketInputState::PressInfo::Event() {
@@ -195,23 +191,9 @@ void WebSocketInputState::ButtonsPress(DebuggerRequest &req) {
 	press.button = info->second;
 
 	// Released by sceCtrl after that many vblanks of emulated time, so a scripted press lasts the
-	// same however fast the emulator runs. This thread only reports when it's over.
+	// same however fast the emulator runs. The CPU thread posts the answer once it's over.
 	press.pressId = __CtrlPressFor(press.button, (int)press.duration);
-	pressTickets_.push_back(press);
-}
-
-void WebSocketInputState::Broadcast(net::WebSocketServer *ws) {
-	if (pressTickets_.empty())
-		return;
-	auto done = [](const PressInfo &press) -> bool {
-		return !__CtrlPressActive(press.pressId);
-	};
-	for (PressInfo &press : pressTickets_) {
-		if (done(press)) {
-			ws->Send(press.Event());
-		}
-	}
-	pressTickets_.erase(std::remove_if(pressTickets_.begin(), pressTickets_.end(), done), pressTickets_.end());
+	mailbox->WatchPress(press.pressId, press.Event());
 }
 
 static bool AnalogValue(DebuggerRequest &req, float *value, const char *name) {

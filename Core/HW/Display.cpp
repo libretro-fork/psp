@@ -15,10 +15,9 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <atomic>
 #include <algorithm>
 #include <cmath>
-#include <mutex>
+#include <retro_atomic.h>
 #include <vector>
 #include "Common/CommonTypes.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -37,14 +36,13 @@
 #include "GPU/GPUCommon.h"
 
 // Called when vblank happens (like an internal interrupt.)  Not part of state, should be static.
-static std::mutex listenersLock;
+// Emulation thread only.
 typedef std::pair<FlipCallback, void *> FlipListener;
 static std::vector<FlipListener> flipListeners;
 
 static uint64_t frameStartTicks;
-// Atomic because the WebSocket debugger reads it from its own thread (input.buttons.press uses
-// it to count down frames) while the CPU thread bumps it.
-static std::atomic<int> numVBlanks;
+// Read by the libretro frontend thread for its speed estimate; only the emulation thread writes it.
+static retro_atomic_int_t numVBlanks{ 0 };
 // hCount is computed now.
 static int vCount;
 // The "AccumulatedHcount" can be adjusted, this is the base.
@@ -80,13 +78,13 @@ static void CalculateFPS() {
 	double now = time_now_d();
 
 	if (now >= lastFpsTime + 1.0) {
-		double frames = (numVBlanks - lastFpsFrame);
+		double frames = (retro_atomic_load_relaxed_int(&numVBlanks) - lastFpsFrame);
 		actualFps = (float)(actualFlips - lastActualFlips);
 
 		fps = frames / (now - lastFpsTime);
 		flips = (float)(g_Config.iDisplayRefreshRate * (double)(gpuStats.totals.numFlips - lastNumFlips) / frames);
 
-		lastFpsFrame = numVBlanks;
+		lastFpsFrame = retro_atomic_load_relaxed_int(&numVBlanks);
 		lastNumFlips = gpuStats.totals.numFlips;
 		lastActualFlips = actualFlips;
 		lastFpsTime = now;
@@ -143,7 +141,7 @@ int __DisplayGetFlipCount() {
 }
 
 int __DisplayGetNumVblanks() {
-	return numVBlanks;
+	return retro_atomic_load_relaxed_int(&numVBlanks);
 }
 
 int __DisplayGetVCount() {
@@ -232,7 +230,7 @@ bool DisplayIsRunningSlow() {
 
 void DisplayFireVblankStart() {
 	frameStartTicks = CoreTiming::GetTicks(currentMIPS);
-	numVBlanks++;
+	retro_atomic_fetch_add_int(&numVBlanks, 1);
 
 	isVblank = 1;
 	vCount++; // vCount increases at each VBLANK.
@@ -250,10 +248,8 @@ void DisplayFireVblankEnd() {
 }
 
 void DisplayFireFlip() {
-	std::vector<FlipListener> toCall = [] {
-		std::lock_guard<std::mutex> guard(listenersLock);
-		return flipListeners;
-	}();
+	// A copy, since a listener may unregister itself.
+	std::vector<FlipListener> toCall = flipListeners;
 
 	// This is also the right time to calculate FPS.
 	CalculateFPS();
@@ -268,12 +264,10 @@ void DisplayFireActualFlip() {
 }
 
 void __DisplayListenFlip(FlipCallback callback, void *userdata) {
-	std::lock_guard<std::mutex> guard(listenersLock);
 	flipListeners.emplace_back(callback, userdata);
 }
 
 void __DisplayForgetFlip(FlipCallback callback, void *userdata) {
-	std::lock_guard<std::mutex> guard(listenersLock);
 	flipListeners.erase(std::remove_if(flipListeners.begin(), flipListeners.end(), [&](FlipListener item) {
 		return item.first == callback && item.second == userdata;
 	}), flipListeners.end());
@@ -283,7 +277,7 @@ void __DisplayForgetFlip(FlipCallback callback, void *userdata) {
 void DisplayHWInit() {
 	flipListeners.clear();
 	frameStartTicks = 0;
-	numVBlanks = 0;
+	retro_atomic_store_relaxed_int(&numVBlanks, 0);
 	isVblank = 0;
 	vCount = 0;
 	hCountBase = 0;
@@ -305,7 +299,6 @@ void DisplayHWInit() {
 }
 
 void DisplayHWShutdown() {
-	std::lock_guard<std::mutex> guard(listenersLock);
 	flipListeners.clear();
 }
 

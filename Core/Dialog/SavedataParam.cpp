@@ -2017,12 +2017,10 @@ void SavedataParam::DoState(PointerWrap &p) {
 }
 
 void SavedataParam::ClearSFOCache() {
-	std::lock_guard<std::mutex> guard(cacheLock_);
 	sfoCache_.clear();
 }
 
 std::shared_ptr<ParamSFOData> SavedataParam::LoadCachedSFO(const std::string &path, bool orCreate) {
-	std::lock_guard<std::mutex> guard(cacheLock_);
 	if (sfoCache_.find(path) == sfoCache_.end()) {
 		std::vector<u8> data;
 		if (pspFileSystem.ReadEntireFile(path, data, true) < 0) {

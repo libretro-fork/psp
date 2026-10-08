@@ -19,7 +19,6 @@
 
 #include <string>
 #include <set>
-#include <mutex>
 #include <unordered_map>
 #include "Common/CommonTypes.h"
 #include "Common/Math/expression_parser.h"
@@ -89,14 +88,14 @@ private:
 	bool HitAddressBreakpoint(u32 pc, u32 op);
 	bool HitOpBreakpoint(u32 op);
 
-	std::mutex breaksLock;
-
+	// All of this is the emu thread's: the GE checks it per command, and the only writers are the GE
+	// debugger hooks in GPUCommon.
 	bool breakCmds[256]{};
 	BreakpointInfo breakCmdsInfo[256]{};
 	std::unordered_map<u32, BreakpointInfo> breakPCs;
 	std::set<u32> breakTextures;
 	std::set<u32> breakRenderTargets;
-	// Small optimization to avoid a lock/lookup for the common case.
+	// Small optimization to avoid a lookup for the common case.
 	size_t breakPCsCount = 0;
 	size_t breakTexturesCount = 0;
 	size_t breakRenderTargetsCount = 0;

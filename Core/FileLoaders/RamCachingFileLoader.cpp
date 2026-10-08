@@ -16,11 +16,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include <thread>
 #include <cstring>
 
 #include "Common/Thread/ThreadUtil.h"
-#include "Common/TimeUtil.h"
 #include "Common/Log.h"
 #include "Core/FileLoaders/RamCachingFileLoader.h"
 
@@ -65,29 +63,31 @@ s64 RamCachingFileLoader::FileSize() {
 }
 
 size_t RamCachingFileLoader::ReadAt(s64 absolutePos, size_t bytes, void *data, Flags flags) {
-	size_t readSize = 0;
-	if (cache_ == nullptr || (flags & Flags::HINT_UNCACHED) != 0) {
-		readSize = backend_->ReadAt(absolutePos, bytes, data, flags);
-	} else {
-		readSize = ReadFromCache(absolutePos, bytes, data);
-		// While in case the cache size is too small for the entire read.
-		while (readSize < bytes) {
-			SaveIntoCache(absolutePos + readSize, bytes - readSize, flags);
-			size_t bytesFromCache = ReadFromCache(absolutePos + readSize, bytes - readSize, (u8 *)data + readSize);
-			readSize += bytesFromCache;
-			if (bytesFromCache == 0) {
-				// We can't read any more.
-				break;
-			}
-		}
-
-		StartReadAhead(absolutePos + readSize);
+	if (cache_ == nullptr) {
+		// No cache, so no worker: the backend is ours.
+		return backend_->ReadAt(absolutePos, bytes, data, flags);
 	}
+	if ((flags & Flags::HINT_UNCACHED) != 0) {
+		return RunRequest(absolutePos, bytes, data, flags);
+	}
+
+	size_t readSize = ReadFromCache(absolutePos, bytes, data);
+	// While in case the cache size is too small for the entire read.
+	while (readSize < bytes) {
+		RunRequest(absolutePos + readSize, bytes - readSize, nullptr, flags);
+		size_t bytesFromCache = ReadFromCache(absolutePos + readSize, bytes - readSize, (u8 *)data + readSize);
+		readSize += bytesFromCache;
+		if (bytesFromCache == 0) {
+			// We can't read any more.
+			break;
+		}
+	}
+
+	StartReadAhead(absolutePos + readSize);
 	return readSize;
 }
 
 void RamCachingFileLoader::InitCache() {
-	std::lock_guard<std::mutex> guard(blocksMutex_);
 	u32 blockCount = (u32)((filesize_ + BLOCK_SIZE - 1) >> BLOCK_SHIFT);
 	// Overallocate for the last block.
 	cache_ = (u8 *)malloc((size_t)blockCount << BLOCK_SHIFT);
@@ -96,21 +96,28 @@ void RamCachingFileLoader::InitCache() {
 		return;
 	}
 	aheadRemaining_ = blockCount;
-	blocks_.resize(blockCount);
+	blockCount_ = blockCount;
+	blocks_.reset(new retro_atomic_int_t[blockCount_]);
+	for (size_t i = 0; i < blockCount_; ++i) {
+		retro_atomic_int_init(&blocks_[i], 0);
+	}
+	worker_ = Thread([this] {
+		WorkerLoop();
+	});
 }
 
 void RamCachingFileLoader::ShutdownCache() {
 	Cancel();
 
-	// We can't delete while the thread is running, so have to wait.
-	// This should only happen from the menu.
-	if (aheadThread_.joinable())
-		aheadThread_.join();
+	retro_atomic_store_release_int(&quit_, 1);
+	wake_.Notify();
+	// Waits out any backend read in progress.
+	if (worker_.joinable()) {
+		worker_.join();
+	}
 
-	_dbg_assert_(!aheadThreadRunning_);
-
-	std::lock_guard<std::mutex> guard(blocksMutex_);
-	blocks_.clear();
+	blocks_.reset();
+	blockCount_ = 0;
 	if (cache_ != nullptr) {
 		free(cache_);
 		cache_ = nullptr;
@@ -118,37 +125,31 @@ void RamCachingFileLoader::ShutdownCache() {
 }
 
 void RamCachingFileLoader::Cancel() {
-	if (aheadThreadRunning_) {
-		std::lock_guard<std::mutex> guard(blocksMutex_);
-		aheadCancel_ = true;
-	}
-
+	retro_atomic_store_release_int(&aheadCancel_, 1);
 	ProxiedFileLoader::Cancel();
 }
 
 size_t RamCachingFileLoader::ReadFromCache(s64 pos, size_t bytes, void *data) {
+	// Clamp bytes to what's actually available.
+	if (pos >= filesize_ || bytes == 0) {
+		return 0;
+	}
+	if (pos + (s64)bytes > filesize_) {
+		bytes = (size_t)(filesize_ - pos);
+	}
+
 	s64 cacheStartPos = pos >> BLOCK_SHIFT;
 	s64 cacheEndPos = (pos + bytes - 1) >> BLOCK_SHIFT;
-	if ((size_t)cacheEndPos >= blocks_.size()) {
-		cacheEndPos = blocks_.size() - 1;
+	if ((size_t)cacheEndPos >= blockCount_) {
+		cacheEndPos = blockCount_ - 1;
 	}
 
 	size_t readSize = 0;
 	size_t offset = (size_t)(pos - (cacheStartPos << BLOCK_SHIFT));
 	u8 *p = (u8 *)data;
 
-	// Clamp bytes to what's actually available.
-	if (pos + (s64)bytes > filesize_) {
-		// Should've been caught above, but just in case.
-		if (pos >= filesize_) {
-			return 0;
-		}
-		bytes = (size_t)(filesize_ - pos);
-	}
-
-	std::lock_guard<std::mutex> guard(blocksMutex_);
 	for (s64 i = cacheStartPos; i <= cacheEndPos; ++i) {
-		if (blocks_[(size_t)i] == 0) {
+		if (!BlockReady((size_t)i)) {
 			return readSize;
 		}
 
@@ -163,26 +164,44 @@ size_t RamCachingFileLoader::ReadFromCache(s64 pos, size_t bytes, void *data) {
 	return readSize;
 }
 
-void RamCachingFileLoader::SaveIntoCache(s64 pos, size_t bytes, Flags flags) {
+size_t RamCachingFileLoader::RunRequest(s64 pos, size_t bytes, void *data, Flags flags) {
+	reqPos_ = pos;
+	reqBytes_ = bytes;
+	reqData_ = data;
+	reqFlags_ = flags;
+	const int seq = (int)((unsigned)reqSeqLocal_ + 1);
+	reqSeqLocal_ = seq;
+	retro_atomic_store_release_int(&reqSeq_, seq);
+	wake_.Notify();
+	ParkingLotWait(&doneSeq_, [&] {
+		return retro_atomic_load_acquire_int(&doneSeq_) == seq;
+	});
+	return reqResult_;
+}
+
+u32 RamCachingFileLoader::SaveIntoCache(s64 pos, size_t bytes, Flags flags) {
 	s64 cacheStartPos = pos >> BLOCK_SHIFT;
+	if (bytes == 0 || (size_t)cacheStartPos >= blockCount_) {
+		return 0;
+	}
 	s64 cacheEndPos = (pos + bytes - 1) >> BLOCK_SHIFT;
-	if ((size_t)cacheEndPos >= blocks_.size()) {
-		cacheEndPos = blocks_.size() - 1;
+	if ((size_t)cacheEndPos >= blockCount_) {
+		cacheEndPos = blockCount_ - 1;
 	}
 
+	// Stop at the first loaded block: the reader may be copying it, so it is never rewritten.
 	size_t blocksToRead = 0;
-	{
-		std::lock_guard<std::mutex> guard(blocksMutex_);
-		for (s64 i = cacheStartPos; i <= cacheEndPos; ++i) {
-			if (blocks_[(size_t)i] == 0) {
-				++blocksToRead;
-				if (blocksToRead >= MAX_BLOCKS_PER_READ) {
-					break;
-				}
-
-				// TODO: Shouldn't we break as soon as we see a 1?
-			}
+	for (s64 i = cacheStartPos; i <= cacheEndPos; ++i) {
+		if (BlockReady((size_t)i)) {
+			break;
 		}
+		++blocksToRead;
+		if (blocksToRead >= MAX_BLOCKS_PER_READ) {
+			break;
+		}
+	}
+	if (blocksToRead == 0) {
+		return 0;
 	}
 
 	s64 cacheFilePos = cacheStartPos << BLOCK_SHIFT;
@@ -199,81 +218,79 @@ void RamCachingFileLoader::SaveIntoCache(s64 pos, size_t bytes, Flags flags) {
 	if ((bytesRead & (BLOCK_SIZE - 1)) != 0 && cacheFilePos + (s64)bytesRead == filesize_) {
 		++blocksActuallyRead;
 	}
-	{
-		std::lock_guard<std::mutex> guard(blocksMutex_);
 
-		// In case they were simultaneously read.
-		u32 blocksRead = 0;
-		for (size_t i = 0; i < blocksActuallyRead; ++i) {
-			if (blocks_[(size_t)cacheStartPos + i] == 0) {
-				blocks_[(size_t)cacheStartPos + i] = 1;
-				++blocksRead;
-			}
-		}
-
-		if (aheadRemaining_ != 0) {
-			aheadRemaining_ -= blocksRead;
+	for (size_t i = 0; i < blocksActuallyRead; ++i) {
+		retro_atomic_store_release_int(&blocks_[(size_t)cacheStartPos + i], 1);
+	}
+	if (aheadRemaining_ != 0) {
+		aheadRemaining_ -= blocksActuallyRead;
+		if (aheadRemaining_ == 0) {
+			retro_atomic_store_release_int(&allLoaded_, 1);
 		}
 	}
+	return blocksActuallyRead;
 }
 
 void RamCachingFileLoader::StartReadAhead(s64 pos) {
-	if (cache_ == nullptr) {
+	if (retro_atomic_load_acquire_int(&allLoaded_)) {
 		return;
 	}
-
-	std::lock_guard<std::mutex> guard(blocksMutex_);
-	aheadPos_ = pos;
-	if (aheadThreadRunning_) {
-		// Already going.
-		return;
+	s64 block = pos >> BLOCK_SHIFT;
+	if ((size_t)block > blockCount_) {
+		block = (s64)blockCount_;
 	}
-
-	aheadThreadRunning_ = true;
-	aheadCancel_ = false;
-	if (aheadThread_.joinable())
-		aheadThread_.join();
-	aheadThread_ = std::thread([this] {
-		SetCurrentThreadName("FileLoaderReadAhead");
-
-
-		while (aheadRemaining_ != 0 && !aheadCancel_) {
-			// Where should we look?
-			const u32 cacheStartPos = NextAheadBlock();
-			if (cacheStartPos == 0xFFFFFFFF) {
-				// Must be full.
-				break;
-			}
-			u32 cacheEndPos = cacheStartPos + BLOCK_READAHEAD - 1;
-			if (cacheEndPos >= blocks_.size()) {
-				cacheEndPos = (u32)blocks_.size() - 1;
-			}
-
-			for (u32 i = cacheStartPos; i <= cacheEndPos; ++i) {
-				if (blocks_[i] == 0) {
-					SaveIntoCache((u64)i << BLOCK_SHIFT, BLOCK_SIZE * BLOCK_READAHEAD, Flags::NONE);
-					break;
-				}
-			}
-		}
-
-		aheadThreadRunning_ = false;
-	});
+	retro_atomic_store_release_int(&aheadCancel_, 0);
+	retro_atomic_store_release_int(&aheadBlock_, (int)block);
+	wake_.Notify();
 }
 
-u32 RamCachingFileLoader::NextAheadBlock() {
-	std::lock_guard<std::mutex> guard(blocksMutex_);
+void RamCachingFileLoader::WorkerLoop() {
+	SetCurrentThreadName("FileLoaderReadAhead");
 
-	// If we had an aheadPos_ set, start reading from there and go forward.
-	u32 startFrom = (u32)(aheadPos_ >> BLOCK_SHIFT);
-	// But next time, start from the beginning again.
-	aheadPos_ = 0;
+	int done = 0;
+	bool readingAhead = false;
+	for (;;) {
+		const int seen = wake_.Seen();
+		if (retro_atomic_load_acquire_int(&quit_)) {
+			break;
+		}
 
-	for (u32 i = startFrom; i < blocks_.size(); ++i) {
-		if (blocks_[i] == 0) {
+		const int seq = retro_atomic_load_acquire_int(&reqSeq_);
+		if (seq != done) {
+			if (reqData_) {
+				reqResult_ = backend_->ReadAt(reqPos_, reqBytes_, reqData_, reqFlags_);
+			} else {
+				SaveIntoCache(reqPos_, reqBytes_, reqFlags_);
+			}
+			done = seq;
+			retro_atomic_store_release_int(&doneSeq_, seq);
+			ParkingLotNotify(&doneSeq_);
+			continue;
+		}
+
+		// If a read posted a position, go forward from there, otherwise from the start.
+		const int ahead = retro_atomic_exchange_int(&aheadBlock_, -1);
+		if (ahead >= 0) {
+			readingAhead = true;
+		}
+		if (readingAhead && aheadRemaining_ != 0 && !retro_atomic_load_acquire_int(&aheadCancel_)) {
+			const u32 cacheStartPos = NextAheadBlock(ahead >= 0 ? (u32)ahead : 0);
+			// A failed read stops reading ahead rather than retrying it in a loop.
+			if (cacheStartPos != 0xFFFFFFFF && SaveIntoCache((s64)cacheStartPos << BLOCK_SHIFT, BLOCK_SIZE * BLOCK_READAHEAD, Flags::NONE) != 0) {
+				continue;
+			}
+		}
+		// Done until the next read posts a position.
+		readingAhead = false;
+		wake_.Wait(seen);
+	}
+}
+
+u32 RamCachingFileLoader::NextAheadBlock(u32 startFrom) {
+	for (u32 i = startFrom; i < blockCount_; ++i) {
+		if (!BlockReady(i)) {
 			return i;
 		}
 	}
-
 	return 0xFFFFFFFF;
 }

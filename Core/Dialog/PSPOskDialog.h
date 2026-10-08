@@ -18,7 +18,9 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
+#include <string_view>
+
+#include <retro_atomic.h>
 #include <string>
 
 #include "Core/Dialog/PSPDialog.h"
@@ -184,6 +186,7 @@ enum class PSPOskNativeStatus {
 	WAITING,
 	SUCCESS,
 	FAILURE,
+	FILLING,
 };
 
 class PSPOskDialog: public PSPDialog {
@@ -227,11 +230,25 @@ private:
 	OskKeyboardLanguage currentKeyboardLanguage = OSK_LANGUAGE_ENGLISH;
 	bool isCombinated = false;
 
-	// Shared with the native input box's callbacks, which can come after the dialog is gone.
+	// Shared with the native input box's callbacks, which can come after the dialog is gone and
+	// on another thread. A callback claims WAITING with a CAS (to FILLING), writes value, then
+	// publishes SUCCESS or FAILURE.
 	struct NativeInput {
-		std::mutex mutex;
-		PSPOskNativeStatus status = PSPOskNativeStatus::IDLE;
+		retro_atomic_int_t status{ (int)PSPOskNativeStatus::IDLE };
 		std::string value;
+
+		PSPOskNativeStatus Status() {
+			return (PSPOskNativeStatus)retro_atomic_load_acquire_int(&status);
+		}
+		void SetStatus(PSPOskNativeStatus s) {
+			retro_atomic_store_release_int(&status, (int)s);
+		}
+		void Answer(PSPOskNativeStatus result, std::string_view v) {
+			if (retro_atomic_cas_int(&status, (int)PSPOskNativeStatus::WAITING, (int)PSPOskNativeStatus::FILLING)) {
+				value = v;
+				SetStatus(result);
+			}
+		}
 	};
 	std::shared_ptr<NativeInput> native_ = std::make_shared<NativeInput>();
 

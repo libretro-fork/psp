@@ -38,7 +38,7 @@
 #endif
 
 #ifdef HAVE_LIBRETRO_VFS
-#include <streams/file_stream.h>
+#include "Common/File/PositionalFile.h"
 #endif
 
 #if !defined(_WIN32) && !defined(HAVE_LIBRETRO_VFS)
@@ -85,12 +85,13 @@ LocalFileLoader::LocalFileLoader(const Path &filename)
 #endif
 
 #if defined(HAVE_LIBRETRO_VFS)
-	file_ = File::OpenCFile(filename, "rb");
-	if (!file_) {
+	file_.reset(new PositionalFile(filename));
+	if (!file_->IsOpen()) {
 		ERROR_LOG(Log::FileSystem, "LocalFileLoader: failed to open file: '%s'", filename.c_str());
+		file_.reset();
 		return;
 	}
-	filesize_ = File::GetFileSize(file_);
+	filesize_ = file_->Size();
 #elif PPSSPP_PLATFORM(IOS)
 	if (!File::Exists(filename)) {
 		// Try to "unlock" the path before the file loader hits it
@@ -138,9 +139,7 @@ LocalFileLoader::LocalFileLoader(const Path &filename)
 
 LocalFileLoader::~LocalFileLoader() {
 #if defined(HAVE_LIBRETRO_VFS)
-	if (file_ != nullptr) {
-		fclose(file_);
-	}
+	file_.reset();
 #elif PPSSPP_PLATFORM(IOS)
 	close(fd_);
 	DarwinFileSystemServices::stopAccessingPath(filename_);
@@ -186,22 +185,10 @@ size_t LocalFileLoader::ReadAt(s64 absolutePos, size_t bytes, size_t count, void
 	}
 
 #if defined(HAVE_LIBRETRO_VFS)
-	std::lock_guard<std::mutex> guard(readLock_);
-	// The VFS has no positioned read. Only seek when the read isn't sequential:
-	// a seek also throws away whatever the frontend's stream had buffered.
-	if (filePos_ != absolutePos) {
-		if (File::Fseek(file_, absolutePos, SEEK_SET) != 0) {
-			filePos_ = -1;
-			return 0;
-		}
-		filePos_ = absolutePos;
-	}
-	const size_t done = fread(data, 1, bytes * count, file_);
-	filePos_ = done == bytes * count ? filePos_ + (s64)done : -1;
-	return done / bytes;
+	// The VFS has no positioned read; each thread reads through its own handle.
+	return file_->ReadAt((u64)absolutePos, data, bytes * count) / bytes;
 #elif PPSSPP_PLATFORM(SWITCH)
-	// Toolchain has no fancy IO API.  We must lock.
-	std::lock_guard<std::mutex> guard(readLock_);
+	// Toolchain has no fancy IO API. Seek and read is fine with one reader at a time.
 	lseek(fd_, absolutePos, SEEK_SET);
 	// read() returns -1 on error, not a short count. Dividing that (implicitly
 	// converted to a huge size_t) by bytes would otherwise report a huge bogus
@@ -218,8 +205,7 @@ size_t LocalFileLoader::ReadAt(s64 absolutePos, size_t bytes, size_t count, void
 #endif
 		return retval < 0 ? 0 : (size_t)retval / bytes;
 	} else {
-		// Since pread64 doesn't change the file offset, it should be safe to avoid the lock in the common case.
-		std::lock_guard<std::mutex> guard(readLock_);
+		// Seek and read is fine with one reader at a time.
 		lseek64(fd_, absolutePos, SEEK_SET);
 		ssize_t retval = read(fd_, data, bytes * count);
 		return retval < 0 ? 0 : (size_t)retval / bytes;

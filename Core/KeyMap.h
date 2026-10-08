@@ -184,13 +184,6 @@ namespace KeyMap {
 	bool InputMappingToPspButton(const InputMapping &mapping, std::vector<int> *pspButtons);
 	bool InputMappingsFromPspButton(int btn, std::vector<MultiInputMapping> *keys, bool ignoreMouse);
 
-	// Careful with these.
-	bool InputMappingsFromPspButtonNoLock(int btn, std::vector<MultiInputMapping> *keys, bool ignoreMouse);
-	// Collects every mapping that consists of more than one input, ie. a combo.
-	void GetAllComboMappingsNoLock(std::vector<MultiInputMapping> *combos);
-	void LockMappings();
-	void UnlockMappings();
-
 	// Simplified check.
 	bool PspButtonHasMappings(int btn);
 

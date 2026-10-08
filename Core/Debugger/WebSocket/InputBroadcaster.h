@@ -19,17 +19,16 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
-namespace net {
-class WebSocketServer;
-}
-
+// Notices button/analog changes for one connection. CPU thread only.
 struct InputBroadcaster {
 public:
 	InputBroadcaster() {
 	}
 
-	void Broadcast(net::WebSocketServer *ws);
+	// Appends the events for whatever changed since the last vblank looked at.
+	void Poll(std::vector<std::string> *events);
 
 private:
 	struct Analog {

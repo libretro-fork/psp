@@ -3,10 +3,11 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <mutex>
 #include <functional>
 
 #include "Common/Common.h"
+
+#include <queues/mpsc_stack.h>
 
 // Shows a visible message to the user.
 // The default implementation in NativeApp.cpp uses our "osm" system (on screen messaging).
@@ -48,8 +49,14 @@ enum class OSDMessageFlags {
 ENUM_CLASS_BITOPS(OSDMessageFlags);
 
 // Data holder for on-screen messages.
+// Show/Set/Cancel may be called from any thread: they queue a command. Update(),
+// Entries(), IsEmpty(), ClickEntry() and the ingame nudge belong to the one thread
+// that drives the display, which applies the queued commands in Update().
 class OnScreenDisplay {
 public:
+	OnScreenDisplay();
+	~OnScreenDisplay();
+
 	// If you specify 0.0f as duration, a duration will be chosen automatically depending on type.
 	void Show(OSDType type, std::string_view text, float duration_s = 0.0f, const char *id = nullptr) {
 		Show(type, text, "", duration_s, id);
@@ -122,8 +129,22 @@ public:
 	static float FadeoutTime() { return 0.25f; }
 
 private:
-	std::vector<Entry> entries_;
-	std::mutex mutex_;
+	void Post(std::function<void(OnScreenDisplay &)> fn);
+
+	void ShowNow(OSDType type, std::string_view text, std::string_view text2, std::string_view icon, float duration_s, const char *id);
+	void CancelByIdNow(std::string_view id);
+	void ShowAchievementUnlockedNow(int achievementID);
+	void ShowAchievementProgressNow(int achievementID, bool show);
+	void ShowChallengeIndicatorNow(int achievementID, bool show);
+	void ShowLeaderboardTrackerNow(int leaderboardTrackerID, std::string_view trackerText, bool show);
+	void SetProgressBarNow(std::string_view id, std::string_view message, float minValue, float maxValue, float progress, float delay_s);
+	void RemoveProgressBarNow(std::string_view id, bool success, float delay_s);
+	void ClearAchievementStuffNow();
+	void SetClickCallbackNow(std::string_view id, std::function<void()> callback);
+	void SetFlagsNow(std::string_view id, OSDMessageFlags flags);
+
+	std::vector<Entry> entries_;  // display thread only
+	mpsc_stack_t pending_;
 
 	double sideBarShowTime_ = 0.0;
 };

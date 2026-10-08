@@ -22,6 +22,8 @@
 #include "ppsspp_config.h"
 #include "CommonFuncs.h"
 
+#include <retro_atomic.h>
+
 #define	NOTICE_LEVEL  1  // VERY important information that is NOT errors. Like startup and debugprintfs from the game itself.
 #define	ERROR_LEVEL   2  // Important errors.
 #define	WARNING_LEVEL 3  // Something is suspicious.
@@ -90,19 +92,44 @@ enum class LogLevel : int {
 	LVERBOSE = VERBOSE_LEVEL,
 };
 
+// Level and enabled flag packed in one atomic word: any thread may log while
+// another changes the settings.
 struct LogChannel {
-#if defined(_DEBUG)
-	LogLevel level = LogLevel::LDEBUG;
-#else
-	LogLevel level = LogLevel::LDEBUG;
-#endif
-	bool enabled = true;
+	enum { DISABLED_BIT = 0x100, LEVEL_MASK = 0xFF };
+
+	LogChannel() {
+		retro_atomic_int_init(&state_, (int)LogLevel::LDEBUG);
+	}
+
+	LogLevel Level() const {
+		return (LogLevel)(Load() & LEVEL_MASK);
+	}
+	bool Enabled() const {
+		return (Load() & DISABLED_BIT) == 0;
+	}
+	void SetLevel(LogLevel level) {
+		Store(level, Enabled());
+	}
+	void SetEnabled(bool enabled) {
+		Store(Level(), enabled);
+	}
+	void Set(LogLevel level, bool enabled) {
+		Store(level, enabled);
+	}
 
 	bool IsEnabled(LogLevel logLevel) const {
-		if (logLevel > level || !enabled)
-			return false;
-		return true;
+		const int s = Load();
+		return (s & DISABLED_BIT) == 0 && (int)logLevel <= (s & LEVEL_MASK);
 	}
+
+private:
+	int Load() const {
+		return retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&state_));
+	}
+	void Store(LogLevel level, bool enabled) {
+		retro_atomic_store_relaxed_int(&state_, ((int)level & LEVEL_MASK) | (enabled ? 0 : DISABLED_BIT));
+	}
+	retro_atomic_int_t state_;
 };
 
 extern bool *g_bLogEnabledSetting;

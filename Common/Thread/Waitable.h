@@ -1,55 +1,30 @@
 #pragma once
 
-#include <atomic>
-#include <condition_variable>
-#include <mutex>
+#include <retro_atomic.h>
 
+#include "Common/Thread/ParkingLot.h"
 #include "Common/Thread/ThreadManager.h"
 
 class LimitedWaitable : public Waitable {
 public:
 	LimitedWaitable() {
-		triggered_ = false;
-	}
-
-	~LimitedWaitable() {
-		// Make sure no one is still waiting, and any notify lock is released.
-		Notify();
+		retro_atomic_int_init(&triggered_, 0);
 	}
 
 	void Wait() override {
-		if (triggered_)
-			return;
-
-		std::unique_lock<std::mutex> lock(mutex_);
-		cond_.wait(lock, [&] { return triggered_.load(); });
-	}
-
-	bool WaitFor(double budget_s) {
-		if (triggered_)
-			return true;
-
-		uint32_t us = budget_s > 0 ? (uint32_t)(budget_s * 1000000.0) : 0;
-		if (us == 0) {
-			return false;
-		}
-		std::unique_lock<std::mutex> lock(mutex_);
-		return cond_.wait_for(lock, std::chrono::microseconds(us), [&] { return triggered_.load(); });
+		ParkingLotWait(this, [this] { return Ready(); });
 	}
 
 	void Notify() {
-		std::unique_lock<std::mutex> lock(mutex_);
-		triggered_ = true;
-		cond_.notify_all();
+		retro_atomic_store_release_int(&triggered_, 1);
+		ParkingLotNotify(this);
 	}
 
 	// For simple polling.
 	bool Ready() const {
-		return triggered_;
+		return retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&triggered_)) != 0;
 	}
 
 private:
-	std::condition_variable cond_;
-	std::mutex mutex_;
-	std::atomic<bool> triggered_;
+	retro_atomic_int_t triggered_;
 };

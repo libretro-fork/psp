@@ -1,9 +1,10 @@
 #ifndef HTTPS_NOT_AVAILABLE
 
-#include <atomic>
 #include <cstring>
 #include <memory>
 #include <vector>
+
+#include <retro_atomic.h>
 
 #include "Common/Net/HTTPRequest.h"
 #include "Common/Net/HTTPNaettRequest.h"
@@ -34,7 +35,7 @@ struct NaettBodySink {
 	// naett reads the POST body in place while uploading, so it lives here too.
 	std::string postData;
 	// Written by us, read by the transfer thread.
-	std::atomic<bool> cancelled{false};
+	retro_atomic_int_t cancelled{ 0 };
 };
 
 // Sinks belonging to requests that hadn't finished when they were torn down, which only happens
@@ -54,7 +55,7 @@ void HTTPSShutdown() {
 
 int HTTPSRequest::WriteBodyThunk(const void *source, int bytes, void *userData) {
 	NaettBodySink *sink = (NaettBodySink *)userData;
-	if (sink->cancelled) {
+	if (retro_atomic_load_acquire_int(&sink->cancelled)) {
 		// Taking less than we were given fails the request, which is how naett lets us stop a
 		// transfer. Without this, cancelling only relabelled the result once it finished anyway.
 		return 0;
@@ -70,7 +71,7 @@ int HTTPSRequest::WriteBodyThunk(const void *source, int bytes, void *userData) 
 void HTTPSRequest::Cancel() {
 	Request::Cancel();
 	if (sink_) {
-		sink_->cancelled = true;
+		retro_atomic_store_release_int(&sink_->cancelled, 1);
 	}
 }
 
@@ -82,7 +83,7 @@ void HTTPSRequest::Start() {
 	// it once it finishes.
 	sink_ = std::make_unique<NaettBodySink>();
 	// In case someone managed to cancel us between construction and here.
-	sink_->cancelled = IsCancelled();
+	retro_atomic_store_release_int(&sink_->cancelled, IsCancelled() ? 1 : 0);
 	sink_->postData = postData_;
 
 	std::vector<naettOption *> options;
@@ -152,7 +153,7 @@ void HTTPSRequest::Join() {
 		// that still exists. The process is on its way out; this is the last word on it.
 		WARN_LOG(Log::HTTP, "Abandoning an unfinished request to '%s' - shutting down", url_.c_str());
 		if (sink_) {
-			sink_->cancelled = true;
+			retro_atomic_store_release_int(&sink_->cancelled, 1);
 			if (!g_abandonedSinks) {
 				g_abandonedSinks = new std::vector<std::unique_ptr<NaettBodySink>>();
 			}

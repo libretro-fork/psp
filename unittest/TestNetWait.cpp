@@ -2,7 +2,6 @@
 
 #include "Common/Net/SocketCompat.h"
 
-#include <thread>
 
 #include "Common/Net/Cancel.h"
 #include "Common/Net/HTTPClient.h"
@@ -10,6 +9,7 @@
 #include "Common/TimeUtil.h"
 
 #include "UnitTest.h"
+#include "Common/Thread/Thread.h"
 
 static uintptr_t LoopbackUDP(sockaddr_in *addr) {
 	uintptr_t s = (uintptr_t)socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -29,7 +29,7 @@ bool TestNetWait() {
 	{
 		net::WakeSocket wake;
 		EXPECT_TRUE(wake.Fd() != -1);
-		std::thread waker([&] { wake.Wake(); });
+		Thread waker([&] { wake.Wake(); });
 		EXPECT_EQ_INT((int)net::WaitSocketsOrWake(nullptr, nullptr, 0, false, -1.0, &wake), (int)net::WaitResult::CANCELLED);
 		waker.join();
 		wake.Drain();
@@ -55,7 +55,7 @@ bool TestNetWait() {
 		sockaddr_in addr;
 		uintptr_t a = LoopbackUDP(&addr);
 		net::CancelToken cancel;
-		std::thread canceller([&] { cancel.Cancel(); });
+		Thread canceller([&] { cancel.Cancel(); });
 		EXPECT_EQ_INT((int)net::WaitSocket(a, false, -1.0, &cancel), (int)net::WaitResult::CANCELLED);
 		canceller.join();
 		EXPECT_EQ_INT((int)net::WaitSocket(a, false, -1.0, &cancel), (int)net::WaitResult::CANCELLED);
@@ -68,7 +68,7 @@ bool TestNetWait() {
 		if (client.Resolve("10.255.255.1", 9)) {
 			net::CancelToken cancel;
 			const double start = time_now_d();
-			std::thread canceller([&] { cancel.Cancel(); });
+			Thread canceller([&] { cancel.Cancel(); });
 			EXPECT_FALSE(client.Connect(1, 30.0, &cancel));
 			canceller.join();
 			EXPECT_TRUE(time_now_d() - start < 5.0);

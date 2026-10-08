@@ -17,10 +17,7 @@
 
 #pragma once
 
-#include <atomic>
 #include <string>
-#include <thread>
-#include <mutex>
 
 #include "Core/Dialog/PSPDialog.h"
 #include "Core/Dialog/SavedataParam.h"
@@ -35,8 +32,6 @@ public:
 	int Shutdown(bool force = false) override;
 	void DoState(PointerWrap &p) override;
 	pspUtilityDialogCommon *GetCommonParam() override;
-	// Waits for the IO thread, if any, to be done with PSP memory. Its results are still taken as usual.
-	void WaitForIO();
 
 protected:
 	bool UseAutoStatus() override {
@@ -52,8 +47,8 @@ private:
 	void DisplayMessage(std::string_view text, bool hasYesNo = false);
 	std::string GetSelectedSaveDirName() const;
 
-	void StartIOThread();
-	bool FinishIO(bool wait);
+	void StartIO();
+	bool FinishIO();
 	void ExecuteIOAction();
 	void ExecuteNotVisibleIOAction();
 
@@ -108,13 +103,11 @@ private:
 		SAVEIO_READY,
 	};
 
-	std::thread ioThread;
-	std::mutex paramLock;
-	std::atomic<SaveIOStatus> ioThreadStatus{ SAVEIO_NONE };
+	SaveIOStatus ioStatus_ = SAVEIO_NONE;
 
-	// The IO thread uses these instead of the dialog's own state (it writes its results to PSP
-	// memory directly). StartIOThread sets them up and FinishIO takes the results back, both on the
-	// emulator thread.
+	// The IO runs on these instead of the dialog's own state (it writes its results to PSP memory
+	// directly). StartIO sets them up and runs it, and FinishIO takes the results back on a later
+	// update, as the game would see it finish.
 	DisplayState ioAction_ = DS_NONE;
 	DisplayState ioDisplay_ = DS_NONE;
 	SceUtilitySavedataParam ioRequest_{};

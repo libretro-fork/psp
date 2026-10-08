@@ -1,8 +1,9 @@
 // Ultra-lightweight category profiler with history.
 
-#include <mutex>
 #include <vector>
 #include <cstring>
+
+#include <retro_atomic.h>
 
 #include "ppsspp_config.h"
 
@@ -27,8 +28,9 @@
 #define UNIFIED_CONST_STR
 #endif
 
+// Claimed with a CAS by the first thread to enter that category.
 struct Category {
-	const char *name;
+	retro_atomic_ptr_t name;
 };
 
 struct CategoryFrame {
@@ -48,11 +50,10 @@ struct Profiler {
 	double curFrameStart;
 };
 
+// Each thread only touches its own slots of profiler and history.
 static Profiler profiler;
 static Category categories[MAX_CATEGORIES];
-static std::mutex categoriesLock;
-static int threadIdAfterLast = 0;
-static std::mutex threadsLock;
+static retro_atomic_int_t threadIdAfterLast{ 0 };
 static CategoryFrame *history;
 #if MAX_THREADS > 1
 thread_local int profilerThreadId = -1;
@@ -63,7 +64,7 @@ static int profilerThreadId = 0;
 void internal_profiler_init() {
 	memset(&profiler, 0, sizeof(profiler));
 #if MAX_THREADS == 1
-	threadIdAfterLast = 1;
+	retro_atomic_store_release_int(&threadIdAfterLast, 1);
 #endif
 	for (int i = 0; i < MAX_THREADS; i++) {
 		for (int j = 0; j < MAX_DEPTH; j++) {
@@ -79,40 +80,49 @@ static int internal_profiler_find_thread() {
 		return thread_id;
 	}
 
-	std::lock_guard<std::mutex> guard(threadsLock);
-	if (threadIdAfterLast < MAX_THREADS) {
-		thread_id = threadIdAfterLast++;
-		profilerThreadId = thread_id;
-		return thread_id;
+	thread_id = retro_atomic_fetch_add_int(&threadIdAfterLast, 1);
+	if (thread_id >= MAX_THREADS) {
+		// Just keep reusing the last one.
+		thread_id = MAX_THREADS - 1;
 	}
+	profilerThreadId = thread_id;
+	return thread_id;
+}
 
-	// Just keep reusing the last one.
-	return threadIdAfterLast - 1;
+static int NumThreads() {
+	int n = retro_atomic_load_acquire_int(&threadIdAfterLast);
+	return n < MAX_THREADS ? n : MAX_THREADS;
+}
+
+static const char *CategoryName(int i) {
+	return (const char *)retro_atomic_load_acquire_ptr(&categories[i].name);
+}
+
+static bool SameCategory(const char *a, const char *b) {
+#ifdef UNIFIED_CONST_STR
+	return a == b;
+#else
+	return !strcmp(a, b);
+#endif
 }
 
 int internal_profiler_find_cat(const char *category_name, bool create_missing) {
-	int i;
-	for (i = 0; i < MAX_CATEGORIES; i++) {
-		const char *catname = categories[i].name;
-		if (!catname)
-			break;
-#ifdef UNIFIED_CONST_STR
-		if (catname == category_name) {
-#else
-		if (!strcmp(catname, category_name)) {
-#endif
+	for (int i = 0; i < MAX_CATEGORIES; i++) {
+		const char *catname = CategoryName(i);
+		if (!catname) {
+			if (!category_name || !create_missing) {
+				return -1;
+			}
+			if (retro_atomic_cas_ptr(&categories[i].name, nullptr, (void *)category_name)) {
+				return i;
+			}
+			// Another thread took this slot first, maybe for the same name.
+			catname = CategoryName(i);
+		}
+		if (category_name && SameCategory(catname, category_name)) {
 			return i;
 		}
 	}
-
-	if (i < MAX_CATEGORIES && category_name && create_missing) {
-		std::lock_guard<std::mutex> guard(categoriesLock);
-		int race_check = internal_profiler_find_cat(category_name, false);
-		if (race_check == -1)
-			categories[i].name = category_name;
-		return i;
-	}
-
 	return -1;
 }
 
@@ -195,7 +205,7 @@ void internal_profiler_end_frame() {
 }
 
 const char *Profiler_GetCategoryName(int i) {
-	return i >= 0 ? categories[i].name : "N/A";
+	return i >= 0 ? CategoryName(i) : "N/A";
 }
 
 int Profiler_GetHistoryLength() {
@@ -204,14 +214,14 @@ int Profiler_GetHistoryLength() {
 
 int Profiler_GetNumCategories() {
 	for (int i = 0; i < MAX_CATEGORIES; i++) {
-		if (!categories[i].name)
+		if (!CategoryName(i))
 			return i;
 	}
 	return 0;
 }
 
 int Profiler_GetNumThreads() {
-	return threadIdAfterLast;
+	return NumThreads();
 }
 
 void Profiler_GetSlowestThreads(int *data, int count) {
@@ -225,7 +235,8 @@ void Profiler_GetSlowestThreads(int *data, int count) {
 
 		float slowestTime = 0.0f;
 		data[i] = 0;
-		for (int thread = 0; thread < threadIdAfterLast; ++thread) {
+		const int numThreads = NumThreads();
+		for (int thread = 0; thread < numThreads; ++thread) {
 			float sum = 0.0f;
 			for (int c = 0; c < numCategories; ++c) {
 				sum += history[MAX_THREADS * x + thread].time_taken[c];

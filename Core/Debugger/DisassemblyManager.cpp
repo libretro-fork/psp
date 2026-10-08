@@ -205,7 +205,6 @@ void DisassemblyManager::analyze(u32 address, u32 size = 1024)
 		if (PSP_GetBootState() != BootState::Complete)
 			return;
 
-		std::lock_guard<std::recursive_mutex> guard(entriesLock_);
 		auto it = findDisassemblyEntry(entries, address, false);
 		if (it != entries.end())
 		{
@@ -280,7 +279,6 @@ std::vector<BranchLine> DisassemblyManager::getBranchLines(u32 start, u32 size)
 {
 	std::vector<BranchLine> result;
 
-	std::lock_guard<std::recursive_mutex> guard(entriesLock_);
 	auto it = findDisassemblyEntry(entries,start,false);
 	if (it != entries.end())
 	{
@@ -296,7 +294,6 @@ std::vector<BranchLine> DisassemblyManager::getBranchLines(u32 start, u32 size)
 
 void DisassemblyManager::getLine(u32 address, bool insertSymbols, DisassemblyLineInfo &dest, DebugInterface *cpuDebug)
 {
-	std::lock_guard<std::recursive_mutex> guard(entriesLock_);
 	auto it = findDisassemblyEntry(entries,address,false);
 	if (it == entries.end()) {
 		analyze(address);
@@ -327,7 +324,6 @@ void DisassemblyManager::getLine(u32 address, bool insertSymbols, DisassemblyLin
 
 u32 DisassemblyManager::getStartAddress(u32 address)
 {
-	std::lock_guard<std::recursive_mutex> guard(entriesLock_);
 	auto it = findDisassemblyEntry(entries,address,false);
 	if (it == entries.end())
 	{
@@ -344,7 +340,6 @@ u32 DisassemblyManager::getStartAddress(u32 address)
 
 u32 DisassemblyManager::getNthPreviousAddress(u32 address, int n)
 {
-	std::lock_guard<std::recursive_mutex> guard(entriesLock_);
 	while (Memory::IsValidAddress(address))
 	{
 		auto it = findDisassemblyEntry(entries,address,false);
@@ -371,7 +366,6 @@ u32 DisassemblyManager::getNthPreviousAddress(u32 address, int n)
 
 u32 DisassemblyManager::getNthNextAddress(u32 address, int n)
 {
-	std::lock_guard<std::recursive_mutex> guard(entriesLock_);
 	while (Memory::IsValidAddress(address))
 	{
 		auto it = findDisassemblyEntry(entries,address,false);
@@ -405,7 +399,6 @@ DisassemblyManager::~DisassemblyManager() {
 
 void DisassemblyManager::clear()
 {
-	std::lock_guard<std::recursive_mutex> guard(entriesLock_);
 	for (auto it = entries.begin(); it != entries.end(); it++)
 	{
 		delete it->second;
@@ -442,13 +435,11 @@ void DisassemblyFunction::recheck()
 
 int DisassemblyFunction::getNumLines()
 {
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	return (int) lineAddresses.size();
 }
 
 int DisassemblyFunction::getLineNum(u32 address, bool findStart)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	if (findStart)
 	{
 		int last = (int)lineAddresses.size() - 1;
@@ -478,7 +469,6 @@ int DisassemblyFunction::getLineNum(u32 address, bool findStart)
 
 u32 DisassemblyFunction::getLineAddress(int line)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	// A zero-size function leaves lineAddresses empty (e.g. from a symbol added
 	// with size 0 via the WebSocket debugger API or a crafted ELF symtab entry);
 	// fall back to the function's own base address rather than indexing OOB.
@@ -489,7 +479,6 @@ u32 DisassemblyFunction::getLineAddress(int line)
 
 bool DisassemblyFunction::disassemble(u32 address, DisassemblyLineInfo &dest, bool insertSymbols, DebugInterface *cpuDebug)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	auto it = findDisassemblyEntry(entries,address,false);
 	if (it == entries.end())
 		return false;
@@ -501,7 +490,6 @@ void DisassemblyFunction::getBranchLines(u32 start, u32 size, std::vector<Branch
 {
 	u32 end = start+size;
 
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	for (size_t i = 0; i < lines.size(); i++)
 	{
 		BranchLine& line = lines[i];
@@ -534,7 +522,6 @@ void DisassemblyFunction::generateBranchLines()
 
 	u32 end = address+size;
 
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	DebugInterface *cpu = g_disassemblyManager.getCpu();
 	for (u32 funcPos = address; funcPos < end; funcPos += 4)
 	{
@@ -595,7 +582,6 @@ void DisassemblyFunction::generateBranchLines()
 void DisassemblyFunction::addOpcodeSequence(u32 start, u32 end)
 {
 	DisassemblyOpcode* opcode = new DisassemblyOpcode(start,(end-start)/4);
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	entries[start] = opcode;
 	lineAddresses.reserve((end - start) / 4);
 	for (u32 pos = start; pos < end; pos += 4)
@@ -622,7 +608,6 @@ void DisassemblyFunction::load()
 				addOpcodeSequence(opcodeSequenceStart,funcPos);
 
 			DisassemblyData* data = new DisassemblyData(funcPos,g_symbolMap->GetDataSize(funcPos),g_symbolMap->GetDataType(funcPos));
-			std::lock_guard<std::recursive_mutex> guard(lock_);
 			entries[funcPos] = data;
 			lineAddresses.push_back(funcPos);
 			funcPos += data->getTotalSize();
@@ -638,7 +623,6 @@ void DisassemblyFunction::load()
 			u32 nextPos = (funcPos+3) & ~3;
 
 			DisassemblyComment* comment = new DisassemblyComment(funcPos,nextPos-funcPos,".align","4");
-			std::lock_guard<std::recursive_mutex> guard(lock_);
 			entries[funcPos] = comment;
 			lineAddresses.push_back(funcPos);
 			
@@ -666,7 +650,6 @@ void DisassemblyFunction::load()
 
 void DisassemblyFunction::clear()
 {
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	for (auto it = entries.begin(); it != entries.end(); it++)
 	{
 		delete it->second;
@@ -771,7 +754,6 @@ bool DisassemblyData::disassemble(u32 address, DisassemblyLineInfo &dest, bool i
 		return false;
 	}
 
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	auto it = lines.find(address);
 	if (it == lines.end())
 		return false;
@@ -783,7 +765,6 @@ bool DisassemblyData::disassemble(u32 address, DisassemblyLineInfo &dest, bool i
 
 int DisassemblyData::getLineNum(u32 address, bool findStart)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	auto it = lines.upper_bound(address);
 	if (it != lines.end())
 	{
@@ -798,7 +779,6 @@ int DisassemblyData::getLineNum(u32 address, bool findStart)
 
 void DisassemblyData::createLines()
 {
-	std::lock_guard<std::recursive_mutex> guard(lock_);
 	lines.clear();
 	lineAddresses.clear();
 

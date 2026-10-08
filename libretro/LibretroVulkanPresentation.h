@@ -1,8 +1,8 @@
 #pragma once
 
 #include <vector>
-#include <mutex>
-#include <condition_variable>
+
+#include <retro_atomic.h>
 
 // Must come before <libretro_vulkan.h>: this is what defines VK_USE_PLATFORM_WIN32_KHR (etc.) before
 // the first inclusion of ext/vulkan/vulkan.h - since that header is include-guarded, whichever include
@@ -65,9 +65,10 @@ private:
 
 	std::vector<Image> images_;
 
-	std::mutex mutex_;
-	std::condition_variable condVar_;
-	bool presentPending_ = false;
+	// Set by BeginPresent on the emu thread, cleared by EndPresent on the render thread once
+	// set_image has been called. WaitForPresentation parks on it.
+	retro_atomic_int_t presentPending_{ 0 };
+	void SetPresentPending(bool pending);
 
 	static uint32_t ImageCountFromMask(uint32_t mask);
 	bool IsValidImageIndex(uint32_t imageIndex) const;

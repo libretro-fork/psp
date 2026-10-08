@@ -20,6 +20,7 @@
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
 #include "Common/File/VFS/SevenZipFileReader.h"
+#include "Common/Thread/ParkingLot.h"
 
 static constexpr size_t SEVENZIP_LOOKBUF_SIZE = 1 << 14;
 static constexpr size_t SEVENZIP_STREAM_LOOKAHEAD = 1 << 18;
@@ -384,7 +385,6 @@ SevenZipFileReader::SevenZipFileReader(const Path &archivePath, const std::strin
 }
 
 SevenZipFileReader::~SevenZipFileReader() {
-	std::lock_guard<std::mutex> guard(lock_);
 	CloseArchive();
 }
 
@@ -398,16 +398,20 @@ SevenZipFileReader *SevenZipFileReader::Create(const Path &archivePath, std::str
 }
 
 bool SevenZipFileReader::OpenArchive(bool logErrors) {
-	std::lock_guard<std::mutex> guard(lock_);
-
 	if (valid_) {
 		return true;
 	}
 
-	static bool crcTableGenerated = false;
-	if (!crcTableGenerated) {
+	// The CRC table is process-wide: 0 = not built, 1 = building, 2 = ready.
+	static retro_atomic_int_t crcTableState{ 0 };
+	if (retro_atomic_cas_int(&crcTableState, 0, 1)) {
 		CrcGenerateTable();
-		crcTableGenerated = true;
+		retro_atomic_store_release_int(&crcTableState, 2);
+		ParkingLotNotify(&crcTableState);
+	} else {
+		ParkingLotWait(&crcTableState, [] {
+			return retro_atomic_load_acquire_int(&crcTableState) == 2;
+		});
 	}
 
 	if (OpenArchiveStreamForRead(&archiveStream_, archivePath_) != 0) {
@@ -532,8 +536,6 @@ bool SevenZipFileReader::FindEntry(std::string_view path, UInt32 *index, bool *i
 }
 
 uint8_t *SevenZipFileReader::ExtractFile(UInt32 fileIndex, size_t *size) {
-	std::lock_guard<std::mutex> guard(lock_);
-
 	if (!valid_) {
 		return nullptr;
 	}

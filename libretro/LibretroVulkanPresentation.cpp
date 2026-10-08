@@ -1,3 +1,4 @@
+#include "Common/Thread/ParkingLot.h"
 #include "libretro/LibretroVulkanPresentation.h"
 
 #include "Common/GPU/Vulkan/VulkanContext.h"
@@ -105,9 +106,14 @@ void LibretroVulkanPresentation::Destroy(VulkanContext *context) {
 	}
 	images_.clear();
 	syncIndexMask_ = 0;
-	std::lock_guard<std::mutex> lock(mutex_);
-	presentPending_ = false;
-	condVar_.notify_all();
+	SetPresentPending(false);
+}
+
+void LibretroVulkanPresentation::SetPresentPending(bool pending) {
+	retro_atomic_store_release_int(&presentPending_, pending ? 1 : 0);
+	if (!pending) {
+		ParkingLotNotify(&presentPending_);
+	}
 }
 
 bool LibretroVulkanPresentation::NeedsRecreate() const {
@@ -137,20 +143,16 @@ VkResult LibretroVulkanPresentation::QueuePresent(VulkanContext *vulkan, VkQueue
 	if (vulkan_->get_sync_index_mask(vulkan_->handle) != syncIndexMask_ || !IsValidImageIndex(imageIndex)) {
 		return VK_ERROR_OUT_OF_DATE_KHR;
 	}
-	std::unique_lock<std::mutex> lock(mutex_);
 	vulkan_->set_image(vulkan_->handle, &images_[imageIndex].retroImage, 0, nullptr, vulkan_->queue_index);
 	return VK_SUCCESS;
 }
 
 void LibretroVulkanPresentation::BeginPresent() {
-	std::lock_guard<std::mutex> lock(mutex_);
-	presentPending_ = true;
+	SetPresentPending(true);
 }
 
 void LibretroVulkanPresentation::EndPresent() {
-	std::lock_guard<std::mutex> lock(mutex_);
-	presentPending_ = false;
-	condVar_.notify_all();
+	SetPresentPending(false);
 }
 
 void LibretroVulkanPresentation::LockQueue() {
@@ -169,6 +171,5 @@ void LibretroVulkanPresentation::PrepareSubmit(VkSubmitInfo &submitInfo) {
 }
 
 void LibretroVulkanPresentation::WaitForPresentation() {
-	std::unique_lock<std::mutex> lock(mutex_);
-	condVar_.wait(lock, [this] { return !presentPending_; });
+	ParkingLotWait(&presentPending_, [this] { return retro_atomic_load_acquire_int(&presentPending_) == 0; });
 }

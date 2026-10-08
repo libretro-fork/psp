@@ -3,10 +3,9 @@
 #include "Core/HLE/SocketManager.h"
 #include "Common/Log.h"
 
-#include <mutex>
 
+// sceNetInet only, on the emulation thread.
 SocketManager g_socketManager;
-static std::mutex g_socketMutex;  // TODO: Remove once the adhoc thread is gone
 
 InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketState state, int domain, int type, int protocol) {
 	_dbg_assert_(state != SocketState::Unused);
@@ -20,8 +19,6 @@ InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketS
 		*returned_errno = socket_errno;
 		return nullptr;
 	}
-
-	std::lock_guard<std::mutex> guard(g_socketMutex);
 
 	for (int i = MIN_VALID_INET_SOCKET; i < ARRAY_SIZE(inetSockets_); i++) {
 		if (inetSockets_[i].state == SocketState::Unused) {
@@ -48,8 +45,6 @@ InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketS
 }
 
 InetSocket *SocketManager::AdoptSocket(int *index, SOCKET hostSocket, const InetSocket *derive) {
-	std::lock_guard<std::mutex> guard(g_socketMutex);
-
 	for (int i = MIN_VALID_INET_SOCKET; i < ARRAY_SIZE(inetSockets_); i++) {
 		if (inetSockets_[i].state == SocketState::Unused) {
 			*index = i;
@@ -82,7 +77,6 @@ bool SocketManager::Close(InetSocket *inetSocket) {
 }
 
 bool SocketManager::GetInetSocket(int sock, InetSocket **inetSocket) {
-	std::lock_guard<std::mutex> guard(g_socketMutex);
 	if (sock < MIN_VALID_INET_SOCKET || sock >= ARRAY_SIZE(inetSockets_) || inetSockets_[sock].state == SocketState::Unused) {
 		*inetSocket = nullptr;
 		return false;
@@ -93,7 +87,6 @@ bool SocketManager::GetInetSocket(int sock, InetSocket **inetSocket) {
 
 // Simplified mappers, only really useful in select/poll
 SOCKET SocketManager::GetHostSocketFromInetSocket(int sock) {
-	std::lock_guard<std::mutex> guard(g_socketMutex);
 	if (sock < MIN_VALID_INET_SOCKET || sock >= ARRAY_SIZE(inetSockets_) || inetSockets_[sock].state == SocketState::Unused) {
 		_dbg_assert_(false);
 		return -1;

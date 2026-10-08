@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include <atomic>
+#include <retro_atomic.h>
 #include <cstdint>
 #include <cstddef>
 #include <functional>
@@ -360,18 +360,18 @@ protected:
 class RefCountedObject {
 public:
 	explicit RefCountedObject(const char *name) : name_(name) {
-		refcount_ = 1;
+		retro_atomic_int_init(&refcount_, 1);
 	}
 	RefCountedObject(const RefCountedObject &other) = delete;
 	RefCountedObject& operator=(RefCountedObject const&) = delete;
 	virtual ~RefCountedObject();
 
-	void AddRef() { refcount_++; }
+	void AddRef() { retro_atomic_fetch_add_int(&refcount_, 1); }
 	bool Release();
 	bool ReleaseAssertLast();
 
 private:
-	std::atomic<int> refcount_;
+	retro_atomic_int_t refcount_;
 	const char * const name_;
 };
 

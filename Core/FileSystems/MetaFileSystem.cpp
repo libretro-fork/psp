@@ -164,7 +164,6 @@ static bool RealPath(const std::string &currentDirectory, const std::string &inP
 
 IFileSystem *MetaFileSystem::GetHandleOwner(u32 handle) const
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	for (size_t i = 0; i < fileSystems.size(); i++)
 	{
 		if (fileSystems[i].system->OwnsHandle(handle))
@@ -185,7 +184,6 @@ std::string MetaFileSystem::GetCurrentDirForThread(int threadID) const {
 
 int MetaFileSystem::MapFilePath(std::string_view _inpath, std::string *outpath, MountPoint **system) {
 	int error = SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND;
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string realpath;
 
 	std::string inpath(_inpath);
@@ -282,7 +280,6 @@ std::string_view MetaFileSystem::NormalizePrefix(std::string_view prefix) const 
 }
 
 void MetaFileSystem::Mount(std::string_view prefix, std::shared_ptr<IFileSystem> system, std::string_view subDir) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	for (auto &it : fileSystems) {
 		if (it.prefix == prefix) {
 			// Overwrite the old mount.
@@ -304,7 +301,6 @@ void MetaFileSystem::Mount(std::string_view prefix, std::shared_ptr<IFileSystem>
 	fileSystems.push_back(x);
 }
 
-// Assumes the lock is held
 void MetaFileSystem::UnmountAll() {
 	fileSystems.clear();
 	currentDir.clear();
@@ -312,7 +308,6 @@ void MetaFileSystem::UnmountAll() {
 }
 
 void MetaFileSystem::Unmount(std::string_view prefix) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	if (equalsNoCase(prefix, "host0:")) {
 		host0Mapped_ = false;
 	}
@@ -332,7 +327,6 @@ IFileSystem *MetaFileSystem::GetSystemFromFilename(std::string_view filename) {
 }
 
 IFileSystem *MetaFileSystem::GetSystem(std::string_view prefix) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	for (auto it = fileSystems.begin(); it != fileSystems.end(); ++it) {
 		if (it->prefix == NormalizePrefix(prefix))
 			return it->system.get();
@@ -341,7 +335,6 @@ IFileSystem *MetaFileSystem::GetSystem(std::string_view prefix) {
 }
 
 void MetaFileSystem::Shutdown() {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 
 	UnmountAll();
 	Reset();
@@ -349,7 +342,6 @@ void MetaFileSystem::Shutdown() {
 
 int MetaFileSystem::OpenFile(std::string filename, FileAccess access, const char *devicename)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	MountPoint *mount;
 	int error = MapFilePath(filename, &of, &mount);
@@ -361,7 +353,6 @@ int MetaFileSystem::OpenFile(std::string filename, FileAccess access, const char
 
 PSPFileInfo MetaFileSystem::GetFileInfo(std::string filename)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(filename, &of, &system);
@@ -377,7 +368,6 @@ PSPFileInfo MetaFileSystem::GetFileInfo(std::string filename)
 }
 
 PSPFileInfo MetaFileSystem::GetFileInfoByHandle(u32 handle) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->GetFileInfoByHandle(handle);
@@ -385,7 +375,6 @@ PSPFileInfo MetaFileSystem::GetFileInfoByHandle(u32 handle) {
 }
 
 std::vector<PSPFileInfo> MetaFileSystem::GetDirListing(std::string_view path, bool *exists) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(path, &of, &system);
@@ -401,13 +390,11 @@ std::vector<PSPFileInfo> MetaFileSystem::GetDirListing(std::string_view path, bo
 
 void MetaFileSystem::ThreadEnded(int threadID)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	currentDir.erase(threadID);
 }
 
 int MetaFileSystem::ChDir(const std::string &dir)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	// Retain the old path and fail if the arg is 1023 bytes or longer.
 	if (dir.size() >= 1023)
 		return SCE_KERNEL_ERROR_NAMETOOLONG;
@@ -443,7 +430,6 @@ int MetaFileSystem::ChDir(const std::string &dir)
 
 bool MetaFileSystem::MkDir(const std::string &dirname)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(dirname, &of, &system);
@@ -459,7 +445,6 @@ bool MetaFileSystem::MkDir(const std::string &dirname)
 
 bool MetaFileSystem::RmDir(const std::string &dirname)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(dirname, &of, &system);
@@ -475,7 +460,6 @@ bool MetaFileSystem::RmDir(const std::string &dirname)
 
 int MetaFileSystem::RenameFile(const std::string &from, const std::string &to)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	std::string rf;
 	IFileSystem *osystem;
@@ -509,7 +493,6 @@ int MetaFileSystem::RenameFile(const std::string &from, const std::string &to)
 
 bool MetaFileSystem::SetFileWritable(const std::string &filename, bool writable)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(filename, &of, &system);
@@ -522,7 +505,6 @@ bool MetaFileSystem::SetFileWritable(const std::string &filename, bool writable)
 
 bool MetaFileSystem::RemoveFile(const std::string &filename)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(filename, &of, &system);
@@ -535,7 +517,6 @@ bool MetaFileSystem::RemoveFile(const std::string &filename)
 
 int MetaFileSystem::Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 outdataPtr, u32 outlen, int &usec)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->Ioctl(handle, cmd, indataPtr, inlen, outdataPtr, outlen, usec);
@@ -544,7 +525,6 @@ int MetaFileSystem::Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 out
 
 PSPDevType MetaFileSystem::DevType(u32 handle)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->DevType(handle);
@@ -553,7 +533,6 @@ PSPDevType MetaFileSystem::DevType(u32 handle)
 
 void MetaFileSystem::CloseFile(u32 handle)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		sys->CloseFile(handle);
@@ -561,7 +540,6 @@ void MetaFileSystem::CloseFile(u32 handle)
 
 size_t MetaFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->ReadFile(handle, pointer, size);
@@ -571,7 +549,6 @@ size_t MetaFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size)
 
 size_t MetaFileSystem::WriteFile(u32 handle, const u8 *pointer, s64 size)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->WriteFile(handle, pointer, size);
@@ -581,7 +558,6 @@ size_t MetaFileSystem::WriteFile(u32 handle, const u8 *pointer, s64 size)
 
 size_t MetaFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size, int &usec)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->ReadFile(handle, pointer, size, usec);
@@ -591,7 +567,6 @@ size_t MetaFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size, int &usec)
 
 size_t MetaFileSystem::WriteFile(u32 handle, const u8 *pointer, s64 size, int &usec)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->WriteFile(handle, pointer, size, usec);
@@ -601,7 +576,6 @@ size_t MetaFileSystem::WriteFile(u32 handle, const u8 *pointer, s64 size, int &u
 
 size_t MetaFileSystem::SeekFile(u32 handle, s32 position, FileMove type)
 {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	IFileSystem *sys = GetHandleOwner(handle);
 	if (sys)
 		return sys->SeekFile(handle, position, type);
@@ -633,7 +607,6 @@ int MetaFileSystem::ReadEntireFile(const std::string &filename, std::vector<u8> 
 }
 
 u64 MetaFileSystem::FreeDiskSpace(const std::string &path) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(path, &of, &system);
@@ -644,7 +617,6 @@ u64 MetaFileSystem::FreeDiskSpace(const std::string &path) {
 }
 
 void MetaFileSystem::DoState(PointerWrap &p) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 
 	auto s = p.Section("MetaFileSystem", 1);
 	if (!s)
@@ -716,7 +688,6 @@ int64_t MetaFileSystem::RecursiveSize(std::string_view dirPath) {
 }
 
 int64_t MetaFileSystem::ComputeRecursiveDirectorySize(std::string_view filename) {
-	std::lock_guard<std::recursive_mutex> guard(lock);
 	std::string of;
 	IFileSystem *system;
 	int error = MapFilePath(filename, &of, &system);

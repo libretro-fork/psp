@@ -1,11 +1,12 @@
 #include "ppsspp_config.h"
 #include <cstring>
+#include <algorithm>
 #include <cassert>
-#include <thread>
-#include <atomic>
 #include <vector>
 #include <cstdlib>
-#include <mutex>
+
+#include <retro_atomic.h>
+#include <retro_spsc.h>
 
 #include "Common/CPUDetect.h"
 #include "Common/Log.h"
@@ -25,6 +26,7 @@
 #include "Common/StringUtils.h"
 
 #include "Common/Thread/ParkingLot.h"
+#include "Common/Thread/Thread.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/Core.h"
@@ -68,18 +70,11 @@
 
 #define SAMPLERATE 44100
 
-/* AUDIO output buffer */
-static struct {
-   int16_t *data;
-   int32_t size;
-   int32_t capacity;
-} output_audio_buffer = {NULL, 0, 0};
-// output_audio_buffer is filled by System_AudioPushSamples() on the emu
-// thread (used with the GL backends, where PSP-side audio pushes arrive
-// via the GL command queue) and drained + realloc'd on the libretro
-// thread in retro_run()/init/shutdown — every access must hold this
-// mutex or a realloc can free the pointer mid-read on the other thread.
-static std::mutex output_audio_buffer_mutex;
+// Audio output: System_AudioPushSamples() fills it on whichever thread runs the emulator (the
+// emu thread with the GL backends), retro_run() drains it to the frontend. Stereo int16 frames.
+static retro_spsc_t output_audio_ring;
+static bool output_audio_ring_ok = false;
+static const size_t OUTPUT_AUDIO_RING_FRAMES = 32768;
 
 // Calculated swap interval is 'stable' if the same
 // value is recorded for a number of retro_run()
@@ -130,51 +125,33 @@ namespace Libretro
    static float runSpeed = 0.0f;
    static s64 runTicksLast = 0;
 
-   // Must be called with output_audio_buffer_mutex held.
-   static bool ensure_output_audio_buffer_capacity(int32_t capacity)
+   // With neither side running.
+   static void init_output_audio_buffer()
    {
-      if (capacity <= output_audio_buffer.capacity) {
-         return true;
-      }
-
-      int16_t *data = (int16_t*)realloc(output_audio_buffer.data, capacity * sizeof(*output_audio_buffer.data));
-      if (!data) {
-         // Keep the old buffer, drop the new samples.
-         if (log_cb)
-            log_cb(RETRO_LOG_ERROR, "Failed to grow output audio buffer to %d samples\n", capacity);
-         return false;
-      }
-      output_audio_buffer.data = data;
-      output_audio_buffer.capacity = capacity;
-      if (log_cb)
-         log_cb(RETRO_LOG_DEBUG, "Output audio buffer capacity set to %d\n", capacity);
-      return true;
-   }
-
-   static void init_output_audio_buffer(int32_t capacity)
-   {
-      std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
-      output_audio_buffer.data = NULL;
-      output_audio_buffer.size = 0;
-      output_audio_buffer.capacity = 0;
-      ensure_output_audio_buffer_capacity(capacity);
+      output_audio_ring_ok = retro_spsc_init(&output_audio_ring, OUTPUT_AUDIO_RING_FRAMES * 4);
+      if (!output_audio_ring_ok && log_cb)
+         log_cb(RETRO_LOG_ERROR, "Failed to allocate the output audio buffer\n");
    }
 
    static void free_output_audio_buffer()
    {
-      std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
-      free(output_audio_buffer.data);
-      output_audio_buffer.data = NULL;
-      output_audio_buffer.size = 0;
-      output_audio_buffer.capacity = 0;
+      retro_spsc_free(&output_audio_ring);
+      output_audio_ring_ok = false;
    }
 
+   // The frontend gets the ring in place, in up to two contiguous runs.
    static void upload_output_audio_buffer()
    {
-      std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
-      if (output_audio_buffer.data && output_audio_buffer.size > 0)
-         audio_batch_cb(output_audio_buffer.data, output_audio_buffer.size / 2);
-      output_audio_buffer.size = 0;
+      if (!output_audio_ring_ok)
+         return;
+      const void *ptr;
+      size_t bytes;
+      while ((bytes = retro_spsc_read_begin(&output_audio_ring, &ptr)) >= 4)
+      {
+         bytes &= ~(size_t)3;
+         audio_batch_cb((const int16_t *)ptr, bytes / 4);
+         retro_spsc_read_end(&output_audio_ring, bytes);
+      }
    }
 
 
@@ -1267,7 +1244,7 @@ void retro_init(void)
 
    g_threadManager.Init(cpu_info.num_cores, cpu_info.logical_cpu_count);
 
-   init_output_audio_buffer(2048);
+   init_output_audio_buffer();
 }
 
 void retro_deinit(void)
@@ -1324,9 +1301,9 @@ unsigned retro_api_version(void) { return RETRO_API_VERSION; }
 
 namespace Libretro {
    bool useEmuThread = false;
-   std::atomic<EmuThreadState> emuThreadState(EmuThreadState::DISABLED);
+   retro_atomic_int_t emuThreadState{ (int)EmuThreadState::DISABLED };
 
-   static std::thread emuThread;
+   static Thread emuThread;
    static void EmuFrame() {
       ctx->SetRenderTarget();
       Draw::DrawContext *draw = ctx->GetDrawContext();
@@ -1378,7 +1355,7 @@ namespace Libretro {
       SetCurrentThreadName("EmuThread");
 
       for (;;) {
-         EmuThreadState state = emuThreadState;
+         EmuThreadState state = EmuThreadStateGet();
          switch (state)
          {
             case EmuThreadState::RUNNING:
@@ -1387,15 +1364,15 @@ namespace Libretro {
             case EmuThreadState::PAUSE_REQUESTED:
                // CAS so a concurrent QUIT_REQUESTED is not clobbered; the loop re-reads the state.
                // The marker follows this frame's work, so the frontend has drained it on seeing it.
-               if (emuThreadState.compare_exchange_strong(state, EmuThreadState::PAUSED))
+               if (retro_atomic_cas_int(&emuThreadState, (int)state, (int)EmuThreadState::PAUSED))
                   ctx->NotifyEmuThreadPaused();
                break;
             case EmuThreadState::PAUSED:
-               ParkingLotWait(&emuThreadState, [] { return emuThreadState != EmuThreadState::PAUSED; });
+               ParkingLotWait(&emuThreadState, [] { return EmuThreadStateGet() != EmuThreadState::PAUSED; });
                break;
             case EmuThreadState::QUIT_REQUESTED:
                ctx->NotifyEmuThreadExit();
-               emuThreadState = EmuThreadState::STOPPED;
+               EmuThreadStateSet(EmuThreadState::STOPPED);
                return;
             default:
                _dbg_assert_(false);
@@ -1406,32 +1383,32 @@ namespace Libretro {
    }
 
    void EmuThreadStart() {
-      EmuThreadState state = emuThreadState;
+      EmuThreadState state = EmuThreadStateGet();
       bool wasPaused = state == EmuThreadState::PAUSED;
 
       if (state == EmuThreadState::RUNNING || (emuThread.joinable() && !wasPaused))
          return;
 
-      emuThreadState = EmuThreadState::RUNNING;
+      EmuThreadStateSet(EmuThreadState::RUNNING);
 
       if (wasPaused)
          ParkingLotNotify(&emuThreadState);
       else
       {
          ctx->ThreadStart();
-         emuThread = std::thread(&EmuThreadFunc);
+         emuThread = Thread(&EmuThreadFunc);
       }
    }
 
    void EmuThreadStop() {
       // Stop and join from any live state, not just RUNNING: unloading while
       // PAUSED (the state retro_serialize_size() leaves behind) must not leave
-      // a live thread over freed engine state or a joinable std::thread.
+      // a live thread over freed engine state or a joinable Thread.
       if (!emuThread.joinable())
          return;
 
-      if (emuThreadState != EmuThreadState::STOPPED) {
-         emuThreadState = EmuThreadState::QUIT_REQUESTED;
+      if (EmuThreadStateGet() != EmuThreadState::STOPPED) {
+         EmuThreadStateSet(EmuThreadState::QUIT_REQUESTED);
          ParkingLotNotify(&emuThreadState);
       }
 
@@ -1443,10 +1420,10 @@ namespace Libretro {
    }
 
    void EmuThreadPause() {
-      if (emuThreadState != EmuThreadState::RUNNING)
+      if (EmuThreadStateGet() != EmuThreadState::RUNNING)
          return;
 
-      emuThreadState = EmuThreadState::PAUSE_REQUESTED;
+      EmuThreadStateSet(EmuThreadState::PAUSE_REQUESTED);
 
       // Run queued work, readback syncs included, up to the marker the emu
       // thread queues once it has parked at a frame boundary.
@@ -1728,7 +1705,7 @@ void retro_run(void) {
    if (useEmuThread) {
       // Also resumes from PAUSED, so a retro_serialize_size() without a
       // following retro_serialize() cannot freeze emulation.
-      if (emuThreadState != EmuThreadState::RUNNING) {
+      if (EmuThreadStateGet() != EmuThreadState::RUNNING) {
          EmuThreadStart();
       }
 
@@ -2021,19 +1998,25 @@ void System_AudioPushSamples(const int32_t *audio, int numSamples, float volume)
    if (!audio || numSamples <= 0)
       return;
 
-   std::lock_guard<std::mutex> lock(output_audio_buffer_mutex);
+   if (!output_audio_ring_ok)
+      return;
 
-   int32_t values = numSamples * 2; // stereo
-   if (output_audio_buffer.capacity - output_audio_buffer.size < values) {
-      if (!ensure_output_audio_buffer_capacity((int32_t)((output_audio_buffer.capacity + values) * 1.5f)))
-         return;
+   // Convert straight into the ring. Whole frames only, so every run stays frame-aligned;
+   // what doesn't fit is dropped.
+   int frames = numSamples;
+   while (frames > 0) {
+      void *ptr;
+      const size_t room = retro_spsc_write_begin(&output_audio_ring, &ptr) / 4;
+      if (room == 0)
+         break;
+      const int n = (int)std::min<size_t>(room, (size_t)frames);
+      int16_t *dst = (int16_t *)ptr;
+      for (int i = 0; i < n * 2; i++)
+         dst[i] = Clamp16(audio[i]);
+      retro_spsc_write_end(&output_audio_ring, (size_t)n * 4);
+      audio += n * 2;
+      frames -= n;
    }
-
-   // Convert straight into the output buffer.
-   int16_t *dst = output_audio_buffer.data + output_audio_buffer.size;
-   for (int32_t i = 0; i < values; i++)
-      dst[i] = Clamp16(audio[i]);
-   output_audio_buffer.size += values;
 }
 
 void System_AudioGetDebugStats(char *buf, size_t bufSize) { if (buf) buf[0] = '\0'; }

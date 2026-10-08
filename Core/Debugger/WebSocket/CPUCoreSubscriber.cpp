@@ -73,10 +73,12 @@ void WebSocketCPUStepping(DebuggerRequest &req) {
 		return req.Fail("CPU not started");
 	}
 	if (!Core_IsStepping() && Core_IsActive()) {
-		// Core_Break() is explicitly free-threaded (see Core.cpp), so no need to bounce this to the CPU
-		// thread - and we can't anyway, since queuing to it only makes sense once the CPU actually *is*
-		// stepping, which this call is what triggers in the first place.
-		Core_Break(BreakReason::DebugStep, 0);
+		// The CPU thread drains its queue at least once a frame while running, too.
+		Core_RunOnCPUThread([] {
+			if (!Core_IsStepping() && Core_IsActive()) {
+				Core_Break(BreakReason::DebugStep, 0);
+			}
+		});
 	}
 }
 

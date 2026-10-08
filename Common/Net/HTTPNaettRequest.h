@@ -2,7 +2,6 @@
 
 #include <memory>
 #include <string_view>
-#include <thread>
 
 #include "Common/Net/HTTPRequest.h"
 

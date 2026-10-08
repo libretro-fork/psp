@@ -15,8 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <atomic>
-#include <mutex>
 #include <algorithm>
 
 #include "Common/Common.h"
@@ -44,10 +42,6 @@
 #include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/Util/AudioFormat.h"
-
-// Should be used to lock anything related to the outAudioQueue.
-// atomic locks are used on the lock. TODO: make this lock-free
-std::atomic_flag atomicLock_;
 
 int eventAudioUpdate = -1;
 

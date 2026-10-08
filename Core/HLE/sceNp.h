@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include <mutex>
 #include <deque>
 #include <map>
 #include "Core/HLE/sceRtc.h"
@@ -429,7 +428,6 @@ extern PSPTimeval npSigninTimestamp;
 
 // Used by sceNet.cpp since we're borrowing Apctl's PSPThread to process NP events & callbacks.
 // TODO: NP events should be processed on it's own PSPThread
-extern std::recursive_mutex npAuthEvtMtx;
 
 // Used by sceNp2.cpp
 extern SceNpCommunicationId npTitleId;

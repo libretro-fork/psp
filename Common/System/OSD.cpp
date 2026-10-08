@@ -12,8 +12,47 @@ OnScreenDisplay g_OSD;
 // Effectively forever.
 constexpr double forever_s = 10000000000.0;
 
+namespace {
+struct OSDCommand;
+struct OSDLink {
+	mpsc_stack_node_t node;  // first, so a node pointer is a link pointer
+	OSDCommand *self;
+};
+struct OSDCommand {
+	OSDLink link;
+	std::function<void(OnScreenDisplay &)> fn;
+};
+}
+
+OnScreenDisplay::OnScreenDisplay() {
+	mpsc_stack_init(&pending_);
+}
+
+OnScreenDisplay::~OnScreenDisplay() {
+	mpsc_stack_node_t *node = mpsc_stack_drain(&pending_);
+	while (node) {
+		mpsc_stack_node_t *next = node->next;
+		delete ((OSDLink *)node)->self;
+		node = next;
+	}
+}
+
+void OnScreenDisplay::Post(std::function<void(OnScreenDisplay &)> fn) {
+	OSDCommand *cmd = new OSDCommand{ {}, std::move(fn) };
+	cmd->link.self = cmd;
+	mpsc_stack_push(&pending_, &cmd->link.node);
+}
+
 void OnScreenDisplay::Update() {
-	std::lock_guard<std::mutex> guard(mutex_);
+	// Apply commands oldest first.
+	mpsc_stack_node_t *node = mpsc_stack_reverse(mpsc_stack_drain(&pending_));
+	while (node) {
+		mpsc_stack_node_t *next = node->next;
+		OSDCommand *cmd = ((OSDLink *)node)->self;
+		cmd->fn(*this);
+		delete cmd;
+		node = next;
+	}
 
 	double now = time_now_d();
 	for (auto iter = entries_.begin(); iter != entries_.end(); ) {
@@ -26,8 +65,62 @@ void OnScreenDisplay::Update() {
 }
 
 std::vector<OnScreenDisplay::Entry> OnScreenDisplay::Entries() {
-	std::lock_guard<std::mutex> guard(mutex_);
 	return entries_;  // makes a copy.
+}
+
+void OnScreenDisplay::Show(OSDType type, std::string_view text, std::string_view text2, std::string_view icon, float duration_s, const char *id) {
+	if (text.empty() && type != OSDType::STATUS_ICON) {
+		// The user hacked the translation files to get rid of the message. Let's reward the dedication
+		// by skipping it entirely.
+		return;
+	}
+
+	INFO_LOG(Log::UI, "OSD: %.*s (%.*s)", STR_VIEW(text), STR_VIEW(text2));
+
+	const bool hasId = id != nullptr;
+	Post([type, t = std::string(text), t2 = std::string(text2), ic = std::string(icon), duration_s, hasId, i = std::string(hasId ? id : "")](OnScreenDisplay &osd) {
+		osd.ShowNow(type, t, t2, ic, duration_s, hasId ? i.c_str() : nullptr);
+	});
+}
+
+void OnScreenDisplay::CancelById(std::string_view id) {
+	Post([i = std::string(id)](OnScreenDisplay &osd) { osd.CancelByIdNow(i); });
+}
+
+void OnScreenDisplay::ShowAchievementUnlocked(int achievementID) {
+	Post([=](OnScreenDisplay &osd) { osd.ShowAchievementUnlockedNow(achievementID); });
+}
+
+void OnScreenDisplay::ShowAchievementProgress(int achievementID, bool show) {
+	Post([=](OnScreenDisplay &osd) { osd.ShowAchievementProgressNow(achievementID, show); });
+}
+
+void OnScreenDisplay::ShowChallengeIndicator(int achievementID, bool show) {
+	Post([=](OnScreenDisplay &osd) { osd.ShowChallengeIndicatorNow(achievementID, show); });
+}
+
+void OnScreenDisplay::ShowLeaderboardTracker(int leaderboardTrackerID, std::string_view trackerText, bool show) {
+	Post([=, t = std::string(trackerText)](OnScreenDisplay &osd) { osd.ShowLeaderboardTrackerNow(leaderboardTrackerID, t, show); });
+}
+
+void OnScreenDisplay::SetProgressBar(std::string_view id, std::string_view message, float minValue, float maxValue, float progress, float delay_s) {
+	Post([=, i = std::string(id), m = std::string(message)](OnScreenDisplay &osd) { osd.SetProgressBarNow(i, m, minValue, maxValue, progress, delay_s); });
+}
+
+void OnScreenDisplay::RemoveProgressBar(std::string_view id, bool success, float delay_s) {
+	Post([=, i = std::string(id)](OnScreenDisplay &osd) { osd.RemoveProgressBarNow(i, success, delay_s); });
+}
+
+void OnScreenDisplay::ClearAchievementStuff() {
+	Post([](OnScreenDisplay &osd) { osd.ClearAchievementStuffNow(); });
+}
+
+void OnScreenDisplay::SetClickCallback(std::string_view id, std::function<void()> callback) {
+	Post([i = std::string(id), cb = std::move(callback)](OnScreenDisplay &osd) { osd.SetClickCallbackNow(i, cb); });
+}
+
+void OnScreenDisplay::SetFlags(std::string_view id, OSDMessageFlags flags) {
+	Post([=, i = std::string(id)](OnScreenDisplay &osd) { osd.SetFlagsNow(i, flags); });
 }
 
 void OnScreenDisplay::NudgeIngameNotifications() {
@@ -42,7 +135,6 @@ float OnScreenDisplay::IngameAlpha() const {
 }
 
 void OnScreenDisplay::ClickEntry(size_t index, double now) {
-	std::lock_guard<std::mutex> guard(mutex_);
 	if (index < entries_.size() && entries_[index].type != OSDType::ACHIEVEMENT_CHALLENGE_INDICATOR) {
 		if (entries_[index].clickCallback) {
 			entries_[index].clickCallback();
@@ -52,15 +144,7 @@ void OnScreenDisplay::ClickEntry(size_t index, double now) {
 	}
 }
 
-void OnScreenDisplay::Show(OSDType type, std::string_view text, std::string_view text2, std::string_view icon, float duration_s, const char *id) {
-	if (text.empty() && type != OSDType::STATUS_ICON) {
-		// The user hacked the translation files to get rid of the message. Let's reward the dedication
-		// by skipping it entirely.
-		return;
-	}
-
-	INFO_LOG(Log::UI, "OSD: %.*s (%.*s)", STR_VIEW(text), STR_VIEW(text2));
-
+void OnScreenDisplay::ShowNow(OSDType type, std::string_view text, std::string_view text2, std::string_view icon, float duration_s, const char *id) {
 	// Automatic duration based on type.
 	if (duration_s <= 0.0f) {
 		switch (type) {
@@ -84,7 +168,6 @@ void OnScreenDisplay::Show(OSDType type, std::string_view text, std::string_view
 	}
 
 	double now = time_now_d();
-	std::lock_guard<std::mutex> guard(mutex_);
 	if (id) {
 		for (auto iter = entries_.begin(); iter != entries_.end(); ++iter) {
 			if (iter->id == id) {
@@ -115,8 +198,7 @@ void OnScreenDisplay::Show(OSDType type, std::string_view text, std::string_view
 	entries_.insert(entries_.begin(), msg);
 }
 
-void OnScreenDisplay::CancelById(std::string_view id) {
-	std::lock_guard<std::mutex> guard(mutex_);
+void OnScreenDisplay::CancelByIdNow(std::string_view id) {
 	for (auto iter = entries_.begin(); iter != entries_.end();) {
 		if (iter->id == id) {
 			iter = entries_.erase(iter);
@@ -134,12 +216,11 @@ void OnScreenDisplay::ShowOnOff(std::string_view message, bool on, float duratio
 	Show(OSDType::MESSAGE_INFO, msg, duration_s);
 }
 
-void OnScreenDisplay::ShowAchievementUnlocked(int achievementID) {
+void OnScreenDisplay::ShowAchievementUnlockedNow(int achievementID) {
 	double now = time_now_d();
 
 	double duration_s = 5.0;
 
-	std::lock_guard<std::mutex> guard(mutex_);
 	Entry msg{};
 	msg.numericID = achievementID;
 	msg.type = OSDType::ACHIEVEMENT_UNLOCKED;
@@ -148,10 +229,9 @@ void OnScreenDisplay::ShowAchievementUnlocked(int achievementID) {
 	entries_.insert(entries_.begin(), msg);
 }
 
-void OnScreenDisplay::ShowAchievementProgress(int achievementID, bool show) {
+void OnScreenDisplay::ShowAchievementProgressNow(int achievementID, bool show) {
 	double now = time_now_d();
 
-	std::lock_guard<std::mutex> guard(mutex_);
 	// There can only be one of these at a time.
 	for (auto &entry : entries_) {
 		if (entry.type == OSDType::ACHIEVEMENT_PROGRESS) {
@@ -182,10 +262,9 @@ void OnScreenDisplay::ShowAchievementProgress(int achievementID, bool show) {
 	entries_.insert(entries_.begin(), entry);
 }
 
-void OnScreenDisplay::ShowChallengeIndicator(int achievementID, bool show) {
+void OnScreenDisplay::ShowChallengeIndicatorNow(int achievementID, bool show) {
 	double now = time_now_d();
 
-	std::lock_guard<std::mutex> guard(mutex_);
 	for (auto &entry : entries_) {
 		if (entry.numericID == achievementID && entry.type == OSDType::ACHIEVEMENT_CHALLENGE_INDICATOR && !show) {
 			// Hide and eventually delete it.
@@ -209,10 +288,9 @@ void OnScreenDisplay::ShowChallengeIndicator(int achievementID, bool show) {
 	entries_.insert(entries_.begin(), entry);
 }
 
-void OnScreenDisplay::ShowLeaderboardTracker(int leaderboardTrackerID, std::string_view trackerText, bool show) {   // show=true is used both for create and update.
+void OnScreenDisplay::ShowLeaderboardTrackerNow(int leaderboardTrackerID, std::string_view trackerText, bool show) {   // show=true is used both for create and update.
 	double now = time_now_d();
 
-	std::lock_guard<std::mutex> guard(mutex_);
 	for (auto &entry : entries_) {
 		if (entry.numericID == leaderboardTrackerID && entry.type == OSDType::LEADERBOARD_TRACKER) {
 			if (show) {
@@ -252,7 +330,7 @@ void OnScreenDisplay::ShowLeaderboardSubmitted(std::string_view title, std::stri
 	g_OSD.Show(OSDType::LEADERBOARD_SUBMITTED, title, value, 3.0f);
 }
 
-void OnScreenDisplay::SetProgressBar(std::string_view id, std::string_view message, float minValue, float maxValue, float progress, float delay) {
+void OnScreenDisplay::SetProgressBarNow(std::string_view id, std::string_view message, float minValue, float maxValue, float progress, float delay) {
 	_dbg_assert_(!my_isnanorinf(progress));
 	_dbg_assert_(!my_isnanorinf(minValue));
 	_dbg_assert_(!my_isnanorinf(maxValue));
@@ -260,7 +338,6 @@ void OnScreenDisplay::SetProgressBar(std::string_view id, std::string_view messa
 	double now = time_now_d();
 	bool found = false;
 
-	std::lock_guard<std::mutex> guard(mutex_);
 	for (auto &bar : entries_) {
 		if (bar.type == OSDType::PROGRESS_BAR && bar.id == id) {
 			bar.minValue = minValue;
@@ -284,8 +361,7 @@ void OnScreenDisplay::SetProgressBar(std::string_view id, std::string_view messa
 	entries_.push_back(bar);
 }
 
-void OnScreenDisplay::RemoveProgressBar(std::string_view id, bool success, float delay_s) {
-	std::lock_guard<std::mutex> guard(mutex_);
+void OnScreenDisplay::RemoveProgressBarNow(std::string_view id, bool success, float delay_s) {
 	for (auto &ent : entries_) {
 		if (ent.type == OSDType::PROGRESS_BAR && ent.id == id) {
 			if (success) {
@@ -306,9 +382,8 @@ void OnScreenDisplay::RemoveProgressBar(std::string_view id, bool success, float
 }
 
 // Fades out everything related to achievements. Should be used on game shutdown.
-void OnScreenDisplay::ClearAchievementStuff() {
+void OnScreenDisplay::ClearAchievementStuffNow() {
 	double now = time_now_d();
-	std::lock_guard<std::mutex> guard(mutex_);
 	for (auto &iter : entries_) {
 		switch (iter.type) {
 		case OSDType::ACHIEVEMENT_CHALLENGE_INDICATOR:
@@ -325,9 +400,8 @@ void OnScreenDisplay::ClearAchievementStuff() {
 	}
 }
 
-void OnScreenDisplay::SetClickCallback(std::string_view id, std::function<void()> callback) {
+void OnScreenDisplay::SetClickCallbackNow(std::string_view id, std::function<void()> callback) {
 	_dbg_assert_(callback != nullptr);
-	std::lock_guard<std::mutex> guard(mutex_);
 	for (auto &ent : entries_) {
 		// protect against dupes.
 		if (ent.id == id) {
@@ -336,8 +410,7 @@ void OnScreenDisplay::SetClickCallback(std::string_view id, std::function<void()
 	}
 }
 
-void OnScreenDisplay::SetFlags(std::string_view id, OSDMessageFlags flags) {
-	std::lock_guard<std::mutex> guard(mutex_);
+void OnScreenDisplay::SetFlagsNow(std::string_view id, OSDMessageFlags flags) {
 	for (auto &ent : entries_) {
 		// protect against dupes.
 		if (ent.id == id) {

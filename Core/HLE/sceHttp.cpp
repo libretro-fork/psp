@@ -18,7 +18,6 @@
 #include <sstream>
 #include <iterator>
 #include <numeric>
-#include <mutex>
 #include <algorithm>
 #include <cctype> // for std::tolower
 
@@ -36,7 +35,7 @@
 
 
 static std::vector<std::shared_ptr<HTTPTemplate>> httpObjects;
-static std::mutex httpLock;
+// HLE calls only, on the emulation thread.
 
 bool httpInited = false;
 bool httpsInited = false;
@@ -295,7 +294,6 @@ void __HttpInit() {
 }
 
 void __HttpShutdown() {
-	std::lock_guard<std::mutex> guard(httpLock);
 	httpInited = false;
 	httpsInited = false;
 	httpCacheInited = false;
@@ -325,7 +323,6 @@ static int sceHttpInit(int poolSize) {
 	if (httpInited)
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_ALREADY_INITED, "http already inited");
 
-	std::lock_guard<std::mutex> guard(httpLock);
 	httpObjects.clear();
 	// Reserve at least 1 element to prevent ::begin() from returning null when no element has been added yet
 	httpObjects.reserve(1);
@@ -335,7 +332,6 @@ static int sceHttpInit(int poolSize) {
 
 static int sceHttpEnd() {
 	WARN_LOG(Log::sceNet, "UNTESTED sceHttpEnd()");
-	std::lock_guard<std::mutex> guard(httpLock);
 	httpObjects.clear();
 	httpInited = false;
 	return hleLogDebug(Log::sceNet, 0);
@@ -432,7 +428,6 @@ static int sceHttpSendRequest(int requestID, u32 dataPtr, u32 dataSize) {
 }
 
 static int sceHttpDeleteRequest(int requestID) {
-	std::lock_guard<std::mutex> guard(httpLock);
 	if (requestID <= 0 || requestID > (int)httpObjects.size())
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_INVALID_ID, "invalid id");
 
@@ -453,7 +448,6 @@ static int sceHttpDeleteHeader(int id, const char *name) {
 }
 
 static int sceHttpDeleteConnection(int connectionID) {
-	std::lock_guard<std::mutex> guard(httpLock);
 	if (connectionID <= 0 || connectionID > (int)httpObjects.size())
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_INVALID_ID, "invalid id");
 
@@ -531,7 +525,6 @@ static int sceHttpsDisableOption(int id) {
 // Parameter "method" should be one of PSPHttpMethod's listed entries
 static int sceHttpCreateRequest(int connectionID, int method, const char *path, u64 contentLength) {
 	WARN_LOG(Log::sceNet, "UNTESTED sceHttpCreateRequest(%d, %d, %s, %llx)", connectionID, method, safe_string(path), contentLength);
-	std::lock_guard<std::mutex> guard(httpLock);
 	if (connectionID <= 0 || connectionID > (int)httpObjects.size())
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_INVALID_ID, "invalid id");
 
@@ -549,7 +542,6 @@ static int sceHttpCreateRequest(int connectionID, int method, const char *path, 
 // FIXME: port type is probably u16 (but passed in a single register anyway, so type doesn't matter)
 static int sceHttpCreateConnection(int templateID, const char *hostString, const char *scheme, u32 port, int enableKeepalive) {
 	WARN_LOG(Log::sceNet, "UNTESTED sceHttpCreateConnection(%d, %s, %s, %d, %d)", templateID, safe_string(hostString), safe_string(scheme), port, enableKeepalive);
-	std::lock_guard<std::mutex> guard(httpLock);
 	if (templateID <= 0 || templateID > (int)httpObjects.size())
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_INVALID_ID, "invalid id");
 
@@ -594,7 +586,6 @@ static int sceHttpAbortRequest(int requestID) {
 
 static int sceHttpDeleteTemplate(int templateID) {
 	WARN_LOG(Log::sceNet, "UNTESTED sceHttpDeleteTemplate(%d)", templateID);
-	std::lock_guard<std::mutex> guard(httpLock);
 	if (templateID <= 0 || templateID > (int)httpObjects.size())
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_INVALID_ID, "invalid id");
 
@@ -678,7 +669,6 @@ static int sceHttpCreateTemplate(const char *userAgent, int httpVer, int autoPro
 	WARN_LOG(Log::sceNet, "UNTESTED sceHttpCreateTemplate(%s, %d, %d) at %08x", safe_string(userAgent), httpVer, autoProxyConf, currentMIPS->pc);
 	// Reporting to find more games to be tested
 	WARN_LOG_REPORT_ONCE(sceHttpCreateTemplate, Log::sceNet, "UNTESTED sceHttpCreateTemplate(%s, %d, %d)", safe_string(userAgent), httpVer, autoProxyConf);
-	std::lock_guard<std::mutex> guard(httpLock);
 	httpObjects.push_back(std::make_shared<HTTPTemplate>(userAgent? userAgent:"", httpVer, autoProxyConf));
 	int retid = (int)httpObjects.size();
 	return hleLogDebug(Log::sceNet, retid);
@@ -687,7 +677,6 @@ static int sceHttpCreateTemplate(const char *userAgent, int httpVer, int autoPro
 // Parameter "method" should be one of PSPHttpMethod's listed entries
 static int sceHttpCreateRequestWithURL(int connectionID, int method, const char *url, u64 contentLength) {
 	WARN_LOG(Log::sceNet, "UNTESTED sceHttpCreateRequestWithURL(%d, %d, %s, %llx)", connectionID, method, safe_string(url), contentLength);
-	std::lock_guard<std::mutex> guard(httpLock);
 	if (connectionID <= 0 || connectionID > (int)httpObjects.size())
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_INVALID_ID, "invalid id");
 
@@ -708,7 +697,6 @@ static int sceHttpCreateRequestWithURL(int connectionID, int method, const char 
 
 static int sceHttpCreateConnectionWithURL(int templateID, const char *url, int enableKeepalive) {
 	WARN_LOG(Log::sceNet, "UNTESTED sceHttpCreateConnectionWithURL(%d, %s, %d)", templateID, safe_string(url), enableKeepalive);
-	std::lock_guard<std::mutex> guard(httpLock);
 	if (templateID <= 0 || templateID > (int)httpObjects.size())
 		return hleLogError(Log::sceNet, SCE_HTTP_ERROR_INVALID_ID, "invalid id");
 

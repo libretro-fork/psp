@@ -78,7 +78,7 @@ void LibretroHWRenderContext::ContextDestroy() {
 		gpu->DeviceLost();
 	}
 
-	if (!hw_render_.cache_context && Libretro::useEmuThread && draw_ && Libretro::emuThreadState != Libretro::EmuThreadState::PAUSED) {
+	if (!hw_render_.cache_context && Libretro::useEmuThread && draw_ && Libretro::EmuThreadStateGet() != Libretro::EmuThreadState::PAUSED) {
 		DestroyDrawContext();
 	}
 

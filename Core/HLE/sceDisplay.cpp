@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
-#include <mutex>
 #include <vector>
 
 // TODO: Move this somewhere else, cleanup.

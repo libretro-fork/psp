@@ -16,10 +16,6 @@
 #include "GPU/Debugger/Debugger.h"
 #include "GPU/ge_constants.h"
 
-#if defined(__ANDROID__)
-#include <atomic>
-#endif
-
 // X11, sigh.
 #ifdef None
 #undef None

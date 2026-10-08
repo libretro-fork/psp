@@ -1,4 +1,3 @@
-#include <thread>
 #include <vector>
 #include <cstdio>
 
@@ -13,6 +12,7 @@
 #include "Common/Thread/Waitable.h"
 
 #include "UnitTest.h"
+#include "Common/Thread/Thread.h"
 
 struct ResultObject {
 	bool ok;
@@ -67,7 +67,7 @@ bool TestParallelLoop(ThreadManager *threadMan) {
 const size_t THREAD_COUNT = 9;
 const size_t ITERATIONS = 40000;
 
-static std::atomic<int> g_atomicCounter;
+static retro_atomic_int_t g_atomicCounter{ 0 };
 static ThreadManager *g_threadMan;
 static CountingBarrier g_barrier(THREAD_COUNT + 1);
 
@@ -80,7 +80,7 @@ public:
 		return TaskPriority::NORMAL;
 	}
 	void Run() override {
-		g_atomicCounter++;
+		retro_atomic_fetch_add_int(&g_atomicCounter, 1);
 		waitable_->Notify();
 	}
 private:
@@ -98,20 +98,20 @@ void ThreadFunc() {
 }
 
 bool TestMultithreadedScheduling() {
-	g_atomicCounter = 0;
+	retro_atomic_store_release_int(&g_atomicCounter, 0);
 
 	auto start = Instant::Now();
 
-	std::vector<std::thread> threads;
+	std::vector<Thread> threads;
 	for (int i = 0; i < THREAD_COUNT; i++) {
-		threads.push_back(std::thread(ThreadFunc));
+		threads.push_back(Thread(ThreadFunc));
 	}
 
 	// Just testing the barrier
 	g_barrier.Arrive();
 	// OK, all are done.
 
-	EXPECT_EQ_INT(g_atomicCounter, THREAD_COUNT * ITERATIONS);
+	EXPECT_EQ_INT(retro_atomic_load_acquire_int(&g_atomicCounter), THREAD_COUNT * ITERATIONS);
 
 	for (int i = 0; i < THREAD_COUNT; i++) {
 		threads[i].join();

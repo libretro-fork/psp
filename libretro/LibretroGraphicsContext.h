@@ -1,5 +1,5 @@
 #pragma once
-#include <atomic>
+#include <retro_atomic.h>
 
 #include <libretro.h>
 #include "Common/GPU/GraphicsContext.h"
@@ -119,7 +119,9 @@ enum class EmuThreadState {
 	STOPPED,
 };
 extern bool useEmuThread;
-extern std::atomic<EmuThreadState> emuThreadState;
+extern retro_atomic_int_t emuThreadState;
+inline EmuThreadState EmuThreadStateGet() { return (EmuThreadState)retro_atomic_load_acquire_int(&emuThreadState); }
+inline void EmuThreadStateSet(EmuThreadState state) { retro_atomic_store_release_int(&emuThreadState, (int)state); }
 void EmuThreadStart();
 void EmuThreadStop();
 void EmuThreadPause();

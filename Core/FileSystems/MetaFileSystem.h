@@ -20,11 +20,12 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include <mutex>
 #include <memory>
 
 #include "Core/FileSystems/FileSystem.h"
 
+// The emulation thread's view of the PSP devices. Not thread safe: everything that touches it runs
+// on the emulation thread (sceIo, the utility dialogs, savestates, boot).
 class MetaFileSystem : public IHandleAllocator, public IFileSystem {
 private:
 	s32 current;
@@ -47,13 +48,11 @@ private:
 	std::map<int, std::string> currentDir;
 
 	std::string startingDirectory;
-	mutable std::recursive_mutex lock;  // must be recursive. TODO: fix that
 
 	// For the UMD host0 hack.
 	bool host0Mapped_ = false;
 
-	// Assumes the lock is held
-	void Reset() {
+		void Reset() {
 		// This used to be 6, probably an attempt to replicate PSP handles.
 		// However, that's an artifact of using psplink anyway...
 		current = 1;
@@ -147,7 +146,6 @@ public:
 	int ReadEntireFile(const std::string &filename, std::vector<u8> &data, bool quiet = false);
 
 	void SetStartingDirectory(std::string_view dir) {
-		std::lock_guard<std::recursive_mutex> guard(lock);
 		startingDirectory = dir;
 	}
 

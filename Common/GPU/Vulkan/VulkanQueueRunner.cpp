@@ -71,12 +71,13 @@ void VulkanQueueRunner::DestroyDeviceObjects() {
 
 	syncReadback_.Destroy(vulkan_);
 
-	renderPasses_.IterateMut([&](const RPKey &rpkey, VKRRenderPass *rp) {
-		_dbg_assert_(rp);
-		rp->Destroy(vulkan_);
-		delete rp;
-	});
-	renderPasses_.Clear();
+	for (int i = 0; i < RPKey::INDEX_COUNT; i++) {
+		VKRRenderPass *rp = (VKRRenderPass *)retro_atomic_exchange_ptr(&renderPasses_[i], nullptr);
+		if (rp) {
+			rp->Destroy(vulkan_);
+			delete rp;
+		}
+	}
 }
 
 bool VulkanQueueRunner::InitBackbufferFramebuffers(int width, int height, FrameDataShared &frameDataShared) {
@@ -200,20 +201,19 @@ VKRRenderPass *VulkanQueueRunner::GetRenderPass(const RPKey &key) {
 	// Called from the main thread (EndCurRenderStep, CreateGraphicsPipeline) and from the render thread
 	// (PerformBindFramebufferAsRenderTarget). The render thread really does insert new keys, not just hit
 	// existing ones - PreprocessSteps rewrites the load actions to CLEAR when it merges a clear-only pass
-	// into a later one, after the main thread already looked up the pre-merge key. Insert() can Grow(),
-	// which reallocates the buckets out from under a concurrent Get().
-	std::lock_guard<std::mutex> lock(renderPassesMutex_);
-
-	VKRRenderPass *foundPass;
-	if (renderPasses_.Get(key, &foundPass)) {
-		return foundPass;
+	// into a later one, after the main thread already looked up the pre-merge key.
+	retro_atomic_ptr_t *slot = &renderPasses_[key.Index()];
+	VKRRenderPass *found = (VKRRenderPass *)retro_atomic_load_acquire_ptr(slot);
+	if (found) {
+		return found;
 	}
-
 	VKRRenderPass *pass = new VKRRenderPass(key);
-	renderPasses_.Insert(key, pass);
-	// Safe to hand out the pointer once the lock is dropped - entries are never erased individually,
-	// only all at once in DestroyDeviceObjects.
-	return pass;
+	if (retro_atomic_cas_ptr(slot, nullptr, (void *)pass)) {
+		return pass;
+	}
+	// Lost the race. Ours never created any Vulkan objects.
+	delete pass;
+	return (VKRRenderPass *)retro_atomic_load_acquire_ptr(slot);
 }
 
 void VulkanQueueRunner::PreprocessSteps(std::vector<VKRStep *> &steps) {
@@ -1108,21 +1108,17 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 						"expected %d sample count, got %d", fbSampleCount, graphicsPipeline->SampleCount());
 				}
 
-				VkPipeline pipeline;
-
-				{
-					std::lock_guard<std::mutex> lock(graphicsPipeline->mutex_);
-					if (!graphicsPipeline->pipeline[(size_t)rpType]) {
-						// NOTE: If render steps got merged, it can happen that, as they ended during recording,
-						// they didn't know their final render pass type so they created the wrong pipelines in EndCurRenderStep().
-						// Unfortunately I don't know if we can fix it in any more sensible place than here.
-						// Maybe a middle pass. But let's try to just block and compile here for now, this doesn't
-						// happen all that much.
-						graphicsPipeline->pipeline[(size_t)rpType] = Promise<VkPipeline>::CreateEmpty();
-						graphicsPipeline->Create(vulkan_, renderPass->Get(vulkan_, rpType, fbSampleCount), rpType, fbSampleCount, time_now_d(), -1);
-					}
-					pipeline = graphicsPipeline->pipeline[(size_t)rpType]->BlockUntilReady();
+				// NOTE: If render steps got merged, it can happen that, as they ended during recording,
+				// they didn't know their final render pass type so they created the wrong pipelines in EndCurRenderStep().
+				// Unfortunately I don't know if we can fix it in any more sensible place than here.
+				// Maybe a middle pass. But let's try to just block and compile here for now, this doesn't
+				// happen all that much.
+				bool created;
+				Promise<VkPipeline> *promise = graphicsPipeline->ClaimVariant(rpType, &created);
+				if (created) {
+					graphicsPipeline->Create(vulkan_, promise, renderPass->Get(vulkan_, rpType, fbSampleCount), rpType, fbSampleCount, time_now_d(), -1);
 				}
+				VkPipeline pipeline = promise->BlockUntilReady();
 
 				if (pipeline != VK_NULL_HANDLE) {
 					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

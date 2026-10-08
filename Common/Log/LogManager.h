@@ -19,7 +19,6 @@
 
 #include "ppsspp_config.h"
 
-#include <mutex>
 #include <vector>
 #include <cstdio>
 
@@ -27,10 +26,12 @@
 #include "Common/CommonFuncs.h"
 #include "Common/Log.h"
 #include "Common/File/Path.h"
+#include "Common/Thread/ParkingLot.h"
 
 #define	MAX_MESSAGES 8000   
 
-extern const char *hleCurrentThreadName;
+// The running PSP thread, for log headers. Thread local: only the thread running the PSP sets it.
+extern thread_local const char *hleCurrentThreadName;
 
 // Struct that listeners can output how they want. For example, on Android we don't want to add
 // timestamp or write the level as a string, those already exist.
@@ -52,34 +53,33 @@ enum class LogOutput {
 };
 ENUM_CLASS_BITOPS(LogOutput);
 
+// Lock-free ring of recent messages. Writers claim a slot with fetch_add and
+// guard it with a per-slot sequence (odd while being written). Readers that
+// catch a slot mid-write get an empty string instead of waiting.
 class RingbufferLog {
 public:
+	RingbufferLog();
 	void Log(const LogMessage &msg);
-	int GetCount() const { return count_ < MAX_LOGS ? count_ : MAX_LOGS; }
-	std::string TextAt(int i) const {
-		std::lock_guard<std::mutex> lock(ringLock_);
-		return messages_[(curMessage_ - i - 1) & (MAX_LOGS - 1)].msg;
-	}
-	LogLevel LevelAt(int i) const {
-		std::lock_guard<std::mutex> lock(ringLock_);
-		return messages_[(curMessage_ - i - 1) & (MAX_LOGS - 1)].level;
-	}
-
-	void Clear() {
-		std::lock_guard<std::mutex> lock(ringLock_);
-		curMessage_ = 0;
-		count_ = 0;
-	}
+	int GetCount() const;
+	std::string TextAt(int i) const;
+	LogLevel LevelAt(int i) const;
+	void Clear();
 
 private:
-	enum { MAX_LOGS = 256 };
-	LogMessage messages_[MAX_LOGS];
-	int curMessage_ = 0;
-	int count_ = 0;
-	mutable std::mutex ringLock_;
+	enum { MAX_LOGS = 256, MAX_TEXT = 512 };
+	struct Slot {
+		retro_atomic_int_t seq;
+		retro_atomic_int_t level;
+		char text[MAX_TEXT];
+	};
+	bool Read(int i, std::string *text, LogLevel *level) const;
+	Slot slots_[MAX_LOGS];
+	retro_atomic_int_t head_;
+	retro_atomic_int_t count_;
 };
 
 class Section;
+
 typedef void (*LogCallback)(const LogMessage &message, void *userdata);
 extern bool *g_bLogEnabledSetting;
 
@@ -90,15 +90,15 @@ public:
 
 	void SetOutputsEnabled(LogOutput outputs);
 	LogOutput GetOutputsEnabled() const {
-		return outputs_;
+		return (LogOutput)retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&outputs_));
 	}
 	void EnableOutput(LogOutput output) {
-		SetOutputsEnabled(outputs_ | output);
+		retro_atomic_fetch_or_int(&outputs_, (int)output);
+		if (output & LogOutput::File)
+			SetFileLogPath(logFilename_);
 	}
 	void DisableOutput(LogOutput output) {
-		LogOutput temp = outputs_;
-		temp &= ~output;
-		SetOutputsEnabled(temp);
+		retro_atomic_fetch_and_int(&outputs_, ~(int)output);
 	}
 	void EnableOutput(LogOutput output, bool enabled) {
 		if (enabled) {
@@ -119,29 +119,28 @@ public:
 	}
 
 	void SetLogLevel(Log type, LogLevel level) {
-		g_log[(size_t)type].level = level;
+		g_log[(size_t)type].SetLevel(level);
 	}
 
 	void SetAllLogLevels(LogLevel level) {
 		for (int i = 0; i < (int)Log::NUMBER_OF_LOGS; ++i) {
-			g_log[i].level = level;
+			g_log[i].SetLevel(level);
 		}
 	}
 
 	void SetAllLogEnable(bool enable) {
 		for (int i = 0; i < (int)Log::NUMBER_OF_LOGS; ++i) {
-			g_log[i].enabled = enable;
+			g_log[i].SetEnabled(enable);
 		}
 	}
 
 	void SetEnabled(Log type, bool enable) {
-		g_log[(size_t)type].enabled = enable;
+		g_log[(size_t)type].SetEnabled(enable);
 	}
 
 	LogLevel GetLogLevel(Log type) {
-		return g_log[(size_t)type].level;
+		return g_log[(size_t)type].Level();
 	}
-
 
 	const RingbufferLog &GetRingbuffer() const {
 		return ringLog_;
@@ -157,6 +156,8 @@ public:
 	// first, and then the first one to disconnect cleared the slot and stopped delivery to the
 	// other as well.
 	// Returns a handle to hand back to RemoveExternalLogCallback(), or -1 if it wasn't added.
+	// Add/Remove/SetFileLogPath/Shutdown are control-side calls: one thread at a time.
+	// Logging itself may happen from any thread, concurrently with them.
 	int AddExternalLogCallback(LogCallback callback, void *userdata);
 	void RemoveExternalLogCallback(int handle);
 
@@ -195,29 +196,30 @@ private:
 
 	// Stdio logging
 	void StdioLog(const LogMessage &message);
-	std::mutex stdioLock_;
 	bool stdioUseColor_ = true;
 
-	LogOutput outputs_ = (LogOutput)0;
+	retro_atomic_int_t outputs_;
 
-	// File logging
-	std::mutex logFileLock_;
-	FILE *fp_ = nullptr;
+	// File logging. fp_ is published to loggers, closed only after a drain.
+	void CloseLogFile();
+	retro_atomic_ptr_t fp_;
 	bool logFileOpenFailed_ = false;
 	Path logFilename_;
 
 	// Ring buffer
 	RingbufferLog ringLog_;
 
-	// Callbacks
+	// Callbacks: published entries, freed only after a drain.
 	struct ExternalCallbackEntry {
-		int handle;
 		LogCallback callback;
 		void *userdata;
 	};
-	std::mutex externalLock_;
-	std::vector<ExternalCallbackEntry> externalCallbacks_;
-	int nextExternalHandle_ = 1;
+	enum { MAX_EXTERNAL_CALLBACKS = 8 };
+	retro_atomic_ptr_t externalCallbacks_[MAX_EXTERNAL_CALLBACKS];
+	retro_atomic_int_t externalCount_;
+
+	// Loggers hold this while touching fp_ or a callback entry.
+	ReaderGate gate_;
 };
 
 extern LogManager g_logManager;

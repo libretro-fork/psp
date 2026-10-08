@@ -22,7 +22,6 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/mman.h>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #endif
@@ -36,25 +35,41 @@
 
 #include <cstdint>
 
+#include <retro_atomic.h>
+
 uint8_t PPSSPP_ID = 0;
 
 #if PPSSPP_PLATFORM(WINDOWS)
 static HANDLE hIDMapFile = nullptr;
-static HANDLE mapLock = nullptr;
 #else
 static int hIDMapFile = -1;
 static long BUF_SIZE = 4096;
 #endif
 
+// Shared between processes. One little-endian word: two pad bytes, then next, then total. Updated with
+// CAS, which works across processes on the shared mapping.
 struct InstanceInfo {
-	uint8_t pad[2];
-	uint8_t next;
-	uint8_t total;
+	retro_atomic_int_t word;
 };
+
+static uint8_t InstanceNext(uint32_t word) { return (uint8_t)(word >> 16); }
+static uint8_t InstanceTotal(uint32_t word) { return (uint8_t)(word >> 24); }
+static uint32_t MakeInstanceWord(uint32_t word, uint8_t next, uint8_t total) {
+	return (word & 0xFFFF) | ((uint32_t)next << 16) | ((uint32_t)total << 24);
+}
+
+// update returns the new word for the old one. It may run more than once; the last run is the one
+// that took effect.
+static void ApplyInstanceUpdate(InstanceInfo *buf, uint32_t (*update)(uint32_t)) {
+	uint32_t cur = (uint32_t)retro_atomic_load_acquire_int(&buf->word);
+	while (!retro_atomic_cas_int(&buf->word, (int)cur, (int)update(cur))) {
+		cur = (uint32_t)retro_atomic_load_acquire_int(&buf->word);
+	}
+}
 
 #define ID_SHM_NAME "/PPSSPP_ID"
 
-static bool UpdateInstanceCounter(void (*callback)(volatile InstanceInfo *)) {
+static bool UpdateInstanceCounter(uint32_t (*update)(uint32_t)) {
 #if PPSSPP_PLATFORM(WINDOWS)
 	if (!hIDMapFile) {
 		return false;
@@ -71,17 +86,9 @@ static bool UpdateInstanceCounter(void (*callback)(volatile InstanceInfo *)) {
 		return false;
 	}
 
-	bool result = false;
-	if (!mapLock || WaitForSingleObject(mapLock, INFINITE) == 0) {
-		callback(buf);
-		if (mapLock) {
-			ReleaseMutex(mapLock);
-		}
-		result = true;
-	}
+	ApplyInstanceUpdate(buf, update);
 	UnmapViewOfFile(buf);
-
-	return result;
+	return true;
 #elif PPSSPP_PLATFORM(ANDROID) || defined(__LIBRETRO__) || PPSSPP_PLATFORM(SWITCH)
 	// TODO: replace shm_open & shm_unlink with ashmem or android-shmem
 	return false;
@@ -96,28 +103,19 @@ static bool UpdateInstanceCounter(void (*callback)(volatile InstanceInfo *)) {
 		return false;
 	}
 
-	bool result = false;
-	// An actual advisory lock on the shm object. This used to call mlock(), which only pins
-	// pages in RAM and provides no mutual exclusion whatsoever - two instances starting at the
-	// same moment could both read the counter and come away with the same PPSSPP_ID, then both
-	// believe they were the first instance and write the config over each other.
-	if (flock(hIDMapFile, LOCK_EX) == 0) {
-		callback(buf);
-		flock(hIDMapFile, LOCK_UN);
-		result = true;
-	} else {
-		ERROR_LOG(Log::sceNet, "flock(%s) failure: %s", ID_SHM_NAME, GetLastErrorMsg().c_str());
-	}
-
+	// Two instances starting at the same moment must not get the same PPSSPP_ID, so the whole
+	// update is one CAS.
+	ApplyInstanceUpdate(buf, update);
 	munmap(buf, BUF_SIZE);
-	return result;
+	return true;
 #endif
 }
 
 int GetInstancePeerCount() {
 	static int c = 0;
-	UpdateInstanceCounter([](volatile InstanceInfo *buf) {
-		c = buf->total;
+	UpdateInstanceCounter([](uint32_t word) {
+		c = InstanceTotal(word);
+		return word;
 	});
 	return c;
 }
@@ -132,8 +130,6 @@ void InitInstanceCounter() {
 	GetSystemInfo(&sysInfo);
 	int gran = sysInfo.dwAllocationGranularity ? sysInfo.dwAllocationGranularity : 0x10000;
 	BUF_SIZE = (BUF_SIZE + gran - 1) & ~(gran - 1);
-
-	mapLock = CreateMutex(nullptr, FALSE, L"PPSSPP_ID_mutex");
 
 	hIDMapFile = CreateFileMapping(
 		INVALID_HANDLE_VALUE,    // use paging file
@@ -163,16 +159,17 @@ void InitInstanceCounter() {
 	}
 #endif
 
-	bool success = UpdateInstanceCounter([](volatile InstanceInfo *buf) {
+	bool success = UpdateInstanceCounter([](uint32_t word) {
 		// The shared segment outlives the processes that used it (see the shm_unlink comment),
 		// so next keeps climbing across runs and eventually wraps this uint8_t. ID 0 is not a
 		// valid instance - it fails the IsFirstInstance() check, which quietly disables config
 		// saving - so skip past it.
-		if (++buf->next == 0) {
-			buf->next = 1;
+		uint8_t next = InstanceNext(word) + 1;
+		if (next == 0) {
+			next = 1;
 		}
-		PPSSPP_ID = buf->next;
-		buf->total++;
+		PPSSPP_ID = next;
+		return MakeInstanceWord(word, next, InstanceTotal(word) + 1);
 	});
 	if (!success) {
 		PPSSPP_ID = 1;
@@ -180,18 +177,14 @@ void InitInstanceCounter() {
 }
 
 void ShutdownInstanceCounter() {
-	UpdateInstanceCounter([](volatile InstanceInfo *buf) {
-		buf->total--;
+	UpdateInstanceCounter([](uint32_t word) {
+		return MakeInstanceWord(word, InstanceNext(word), InstanceTotal(word) - 1);
 	});
 
 #if PPSSPP_PLATFORM(WINDOWS)
 	if (hIDMapFile) {
 		CloseHandle(hIDMapFile); // If program exited(or crashed?) or the last handle reference closed the shared memory object will be deleted.
 		hIDMapFile = nullptr;
-	}
-	if (mapLock) {
-		CloseHandle(mapLock);
-		mapLock = nullptr;
 	}
 #elif PPSSPP_PLATFORM(ANDROID) || defined(__LIBRETRO__) || PPSSPP_PLATFORM(SWITCH)
 	// Do nothing

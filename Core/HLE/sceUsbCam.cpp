@@ -16,9 +16,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include <atomic>
-#include <mutex>
 #include <vector>
+
+#include <retro_atomic.h>
 
 #include "ppsspp_config.h"
 
@@ -43,11 +43,30 @@ unsigned int nextVideoFrame = 0;
 // When video capture started, which the frame clock counts from. Not saved in states, it only sets the phase.
 static u64 videoStartUs = 0;
 uint8_t *videoBuffer;
-std::mutex videoBufferMutex;
 
 enum {
 	VIDEO_BUFFER_SIZE = 40 * 1000,
 };
+
+// A frame from Camera::pushCameraImage, which can come from any thread. The newest one waits here
+// until the emulation thread takes it into videoBuffer.
+struct PushedFrame {
+	std::vector<uint8_t> data;
+};
+static retro_atomic_ptr_t g_pushedFrame{};
+
+static void TakePushedFrame() {
+	PushedFrame *frame = (PushedFrame *)retro_atomic_exchange_ptr(&g_pushedFrame, nullptr);
+	if (!frame) {
+		return;
+	}
+	if (videoBuffer) {
+		memset(videoBuffer, 0, VIDEO_BUFFER_SIZE);
+		videoBufferLength = (unsigned int)frame->data.size();
+		memcpy(videoBuffer, frame->data.data(), frame->data.size());
+	}
+	delete frame;
+}
 
 void __UsbCamInit() {
 	config       = new Camera::Config();
@@ -90,6 +109,7 @@ void __UsbCamShutdown() {
 	videoBuffer = nullptr;
 	delete config;
 	config = nullptr;
+	delete (PushedFrame *)retro_atomic_exchange_ptr(&g_pushedFrame, nullptr);
 }
 
 // TODO: Technically, we should store the videoBuffer into the savestate, if this
@@ -189,7 +209,8 @@ static int sceUsbCamSetupVideoEx(u32 paramAddr, u32 workareaAddr, int wasize) {
 }
 
 static int sceUsbCamStartVideo() {
-	std::lock_guard<std::mutex> lock(videoBufferMutex);
+	// Whatever was pushed before is stale.
+	delete (PushedFrame *)retro_atomic_exchange_ptr(&g_pushedFrame, nullptr);
 
 	int width, height;
 	getCameraResolution(config->type, &width, &height);
@@ -227,7 +248,7 @@ static int getFrameIntervalUs() {
 }
 
 static int sceUsbCamReadVideoFrameBlocking(u32 bufAddr, u32 size) {
-	std::lock_guard<std::mutex> lock(videoBufferMutex);
+	TakePushedFrame();
 	u32 transferSize = std::min(videoBufferLength, size);
 	if (Memory::IsValidRange(bufAddr, size)) {
 		Memory::Memcpy(bufAddr, videoBuffer, transferSize);
@@ -241,7 +262,7 @@ static int sceUsbCamReadVideoFrameBlocking(u32 bufAddr, u32 size) {
 }
 
 static int sceUsbCamReadVideoFrame(u32 bufAddr, u32 size) {
-	std::lock_guard<std::mutex> lock(videoBufferMutex);
+	TakePushedFrame();
 	u32 transferSize = std::min(videoBufferLength, size);
 	if (Memory::IsValidRange(bufAddr, size)) {
 		Memory::Memcpy(bufAddr, videoBuffer, transferSize);
@@ -410,10 +431,10 @@ int Camera::getMaxFrameSize() {
 
 // The JPEG quality that fit the last frame. Frames of one scene are similar in size, so it's usually
 // right first time. Only the capture thread uses it, but atomic in case a platform has several.
-static std::atomic<int> g_jpegQuality{ 80 };
+static retro_atomic_int_t g_jpegQuality{ 80 };
 
 int Camera::encodeToFit(int maxSize, const std::function<int(int quality)> &encode) {
-	int quality = g_jpegQuality;
+	int quality = retro_atomic_load_relaxed_int(&g_jpegQuality);
 	int size = encode(quality);
 	while ((size < 0 || size > maxSize) && quality > 10) {
 		quality = std::max(10, quality - 10);
@@ -423,7 +444,7 @@ int Camera::encodeToFit(int maxSize, const std::function<int(int quality)> &enco
 	if (size >= 0 && size < maxSize / 2 && quality < 90) {
 		quality += 10;
 	}
-	g_jpegQuality = quality;
+	retro_atomic_store_relaxed_int(&g_jpegQuality, quality);
 	return size;
 }
 
@@ -458,16 +479,12 @@ void Camera::pushCameraImage(long long length, unsigned char* image) {
 		length = (long long)recompressed.size();
 	}
 
-	std::lock_guard<std::mutex> lock(videoBufferMutex);
-	if (!videoBuffer) {
-		return;
-	}
-	memset(videoBuffer, 0, VIDEO_BUFFER_SIZE);
-	if (length > VIDEO_BUFFER_SIZE) {
-		videoBufferLength = 0;
+	PushedFrame *frame = new PushedFrame();
+	if (length > VIDEO_BUFFER_SIZE || length < 0) {
 		ERROR_LOG(Log::HLE, "pushCameraImage: length error: %lld > %d", length, VIDEO_BUFFER_SIZE);
 	} else {
-		videoBufferLength = length;
-		memcpy(videoBuffer, image, length);
+		frame->data.assign(image, image + length);
 	}
+	// Replaces a frame the game hasn't read yet. Nothing else holds it once it's swapped out.
+	delete (PushedFrame *)retro_atomic_exchange_ptr(&g_pushedFrame, (void *)frame);
 }

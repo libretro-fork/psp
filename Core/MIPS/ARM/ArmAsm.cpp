@@ -53,7 +53,6 @@ static const bool disasm = false;
 // R10 : MIPS state
 // R11 : Memory base pointer.
 // R7 :  Down counter
-extern volatile CoreState coreState;
 
 void ShowPC(u32 sp) {
 	ERROR_LOG(Log::JIT, "ShowPC : %08x  ArmSP : %08x", currentMIPS->pc, sp);

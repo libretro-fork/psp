@@ -17,12 +17,14 @@
 
 #pragma once
 
-#include <mutex>
+#include <memory>
 
 #include "Common/CommonTypes.h"
 #include "Common/File/Path.h"
 #include "Common/StringUtils.h"
 #include "Core/Loaders.h"
+
+class PositionalFile;
 
 #if defined(_WIN32) && !defined(HAVE_LIBRETRO_VFS)
 typedef void *HANDLE;
@@ -30,6 +32,7 @@ typedef void *HANDLE;
 
 // This one accepts directories as well as files.
 // Later we handle the discrepancy in MountGameISO.
+// ReadAt from one thread at a time (a caching wrapper reads it from its own worker only).
 class LocalFileLoader : public FileLoader {
 public:
 	LocalFileLoader(const Path &filename);
@@ -45,8 +48,7 @@ public:
 
 private:
 #ifdef HAVE_LIBRETRO_VFS
-	FILE *file_ = nullptr;
-	s64 filePos_ = -1;  // where file_ is; -1 when unknown
+	std::unique_ptr<PositionalFile> file_;
 #elif !defined(_WIN32)
 	void DetectSizeFd();
 	int fd_ = -1;
@@ -56,5 +58,4 @@ private:
 	u64 filesize_ = 0;
 	Path filename_;
 	bool isDirectory_ = false;
-	std::mutex readLock_;
 };

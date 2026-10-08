@@ -23,7 +23,6 @@
 // The ISOFileSystemReader reads from a BlockDevice, so it automatically works
 // with CISO images.
 
-#include <mutex>
 #include <memory>
 #include <vector>
 
@@ -178,9 +177,7 @@ public:
 	bool IsDisc() const override { return false; }
 
 private:
-	// This is in case two threads hit this same block device, which shouldn't really happen.
-	std::mutex mutex_;
-
+	// Used from one thread at a time (the emulation thread, or the loader thread before it).
 	u32 lbaSize_ = 0;
 
 	u32 psarOffset = 0;

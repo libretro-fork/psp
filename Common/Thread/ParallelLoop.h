@@ -1,38 +1,39 @@
 #pragma once
 
 #include <functional>
-#include <mutex>
-#include <condition_variable>
 
+#include <retro_atomic.h>
+
+#include "Common/Thread/ParkingLot.h"
 #include "Common/Thread/ThreadManager.h"
 
-// Same as the latch from C++21.
+// Same as the latch from C++20.
 struct WaitableCounter : public Waitable {
 public:
-	WaitableCounter(int count) : count_(count) {}
+	WaitableCounter(int count) {
+		retro_atomic_int_init(&count_, count);
+	}
 
 	void Count() {
-		std::unique_lock<std::mutex> lock(mutex_);
-		if (count_ == 0) {
-			return;
-		}
-		count_--;
-		if (count_ == 0) {
-			// We were the last one to increment
-			cond_.notify_all();
+		for (;;) {
+			const int count = retro_atomic_load_acquire_int(&count_);
+			if (count == 0)
+				return;
+			if (retro_atomic_cas_int(&count_, count, count - 1)) {
+				if (count == 1) {
+					// We were the last one; the waiter may free us as soon as it sees zero.
+					ParkingLotNotify(this);
+				}
+				return;
+			}
 		}
 	}
 
 	void Wait() override {
-		std::unique_lock<std::mutex> lock(mutex_);
-		while (count_ != 0) {
-			cond_.wait(lock);
-		}
+		ParkingLotWait(this, [this] { return retro_atomic_load_acquire_int(&count_) == 0; });
 	}
 
-	int count_;
-	std::mutex mutex_;
-	std::condition_variable cond_;
+	retro_atomic_int_t count_;
 };
 
 // Note that upper bounds are non-inclusive: range is [lower, upper)

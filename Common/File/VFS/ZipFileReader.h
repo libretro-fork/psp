@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include <set>
 #include <string>
 #include <string_view>
@@ -94,12 +93,12 @@ private:
 	// Path has to be either an empty string, or a string ending with a /.
 	bool GetZipListings(const std::string &path, std::set<std::string> &files, std::set<std::string> &directories);
 
+	// The directory is parsed at open and never changes, and every read goes through
+	// a handle of the reading thread's own, so readers on any thread need no lock.
 	ZipContainer zip_file_;
-	std::mutex lock_;
 	std::string inZipPath_;
 	Path zipPath_;
 };
 
 // When you just want a single file from a ZIP, and don't care about accurate error reporting, use this.
-// Mutex will be locked while updating data, if non-null.
-bool ReadSingleFileFromZip(Path zipFile, const char *path, std::string *data, std::mutex *mutex);
+bool ReadSingleFileFromZip(Path zipFile, const char *path, std::string *data);

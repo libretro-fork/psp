@@ -20,7 +20,7 @@
 // All credit goes to him!
 
 
-#include <mutex>
+#include <chrono>
 #include <string>
 
 #include "Common/Net/SocketCompat.h"
@@ -61,6 +61,8 @@
 
 #include "Common/Net/Cancel.h"
 #include "ext/aemu_postoffice_client/postoffice_client.h"
+#include "Common/Thread/Thread.h"
+#include "Common/Thread/MpscQueue.h"
 
 #ifdef _WIN32
 #undef errno
@@ -96,7 +98,12 @@ std::chrono::time_point<std::chrono::steady_clock> relayLastFailure;
 bool trackingRelayFailure = false;
 bool relayDisabled = false;
 bool relayFirstConnect = true;
-bool g_serverListLoaded = false;
+// Set by whichever thread loaded the list (the download callback can run elsewhere).
+static retro_atomic_int_t g_serverListLoadedFlag{ 0 };
+
+static void MarkServerListLoaded() {
+	retro_atomic_store_release_int(&g_serverListLoadedFlag, 1);
+}
 
 int gameModeNotifyEvent = -1;
 
@@ -119,8 +126,23 @@ static const char *AdhocDataModeToString(AdhocDataMode mode) {
 // We download the list and cache it on disk.
 // The URL can also be a local file path, in which case the download doesn't happen. This is only
 // for power users / debugging.
-std::mutex g_proAdhocServerListMutex;
-std::vector<AdhocServerListEntry> g_proAdhocServerList;
+// The current list, replaced whole by whoever parses a new one. A replaced list is kept until exit
+// instead of freed, since readers copy it without any grace period and it changes a few times
+// per session at most.
+typedef std::vector<AdhocServerListEntry> AdhocServerList;
+static retro_atomic_ptr_t g_proAdhocServerList{};
+struct RetiredServerLists {
+	~RetiredServerLists() {
+		lists.Drain([](AdhocServerList *&&list) { delete list; });
+		delete (AdhocServerList *)retro_atomic_exchange_ptr(&g_proAdhocServerList, nullptr);
+	}
+	MpscQueue<AdhocServerList *> lists;
+};
+static RetiredServerLists g_retiredServerLists;
+
+static const AdhocServerList *CurrentServerList() {
+	return (const AdhocServerList *)retro_atomic_load_acquire_ptr(&g_proAdhocServerList);
+}
 
 // TODO: Should convert this to use rapidjson
 static bool ParseServerListEntriesJSON(std::string_view json) {
@@ -171,9 +193,9 @@ static bool ParseServerListEntriesJSON(std::string_view json) {
 		newList.push_back(entry);
 	}
 
-	{
-		std::lock_guard<std::mutex> guard(g_proAdhocServerListMutex);
-		g_proAdhocServerList = newList;
+	AdhocServerList *old = (AdhocServerList *)retro_atomic_exchange_ptr(&g_proAdhocServerList, (void *)new AdhocServerList(std::move(newList)));
+	if (old) {
+		g_retiredServerLists.lists.Push(old);
 	}
 	System_PostUIMessage(UIMessage::ADHOC_SERVER_LIST_CHANGED);
 	return true;
@@ -190,13 +212,13 @@ static void LoadFallbackServerList() {
 		return;
 	}
 	ParseServerListEntriesJSON(std::string_view((char*)jsonStr.get(), jsonSize));
-	g_serverListLoaded = true;
+	MarkServerListLoaded();
 }
 
 void AdhocLoadServerList(AdhocLoadListMode loadMode) {
 	if (loadMode == AdhocLoadListMode::CacheOnlySync) {
-		std::lock_guard<std::mutex> guard(g_proAdhocServerListMutex);
-		if (!g_proAdhocServerList.empty()) {
+		const AdhocServerList *list = CurrentServerList();
+		if (list && !list->empty()) {
 			return;
 		}
 	}
@@ -209,7 +231,7 @@ void AdhocLoadServerList(AdhocLoadListMode loadMode) {
 			std::string json;
 			if (g_DownloadManager.ReadFileFromCache(g_Config.sAdhocServerListUrl, &json)) {
 				if (ParseServerListEntriesJSON(std::string_view(json.data(), json.size()))) {
-					g_serverListLoaded = true;
+					MarkServerListLoaded();
 					return;
 				}
 			}
@@ -235,7 +257,7 @@ void AdhocLoadServerList(AdhocLoadListMode loadMode) {
 				return;
 			}
 		});
-		g_serverListLoaded = true;
+		MarkServerListLoaded();
 	} else if (!g_Config.sAdhocServerListUrl.empty()) {
 		// Try to read local file.
 		std::string json;
@@ -254,14 +276,14 @@ void AdhocLoadServerList(AdhocLoadListMode loadMode) {
 }
 
 std::vector<AdhocServerListEntry> AdhocGetServerList(AdhocLoadListMode loadMode) {
-	if (!g_serverListLoaded) {
+	if (!retro_atomic_load_acquire_int(&g_serverListLoadedFlag)) {
 		// We're probably in-game - so we don't want to do a download and risk blocking.
 		// Instead we read out of cache, it should be good enough.
 		AdhocLoadServerList(loadMode);
 	}
 
-	std::lock_guard<std::mutex> guard(g_proAdhocServerListMutex);
-	return g_proAdhocServerList;
+	const AdhocServerList *list = CurrentServerList();
+	return list ? *list : AdhocServerList();
 }
 
 bool AdhocGetServerByHost(std::string_view host, AdhocServerListEntry *dest) {
@@ -326,7 +348,7 @@ bool __NetAdhocConnected() {
 
 void __NetAdhocShutdown() {
 	// Kill AdhocServer Thread
-	adhocServerRunning = false;
+	retro_atomic_store_release_int(&adhocServerRunning, 0);
 	AdhocServerWake();
 	if (adhocServerThread.joinable()) {
 		adhocServerThread.join();
@@ -465,13 +487,11 @@ static void __GameModeNotify(u64 userdata, int cyclesLate) {
 					if (senderport != ADHOC_GAMEMODE_PORT && senderport != gameModePeerPorts[sendermac]) {
 						char name[9] = {};
 						auto n = GetI18NCategory(I18NCat::NETWORKING);
-						peerlock.lock();
 						SceNetAdhocctlPeerInfo* peer = findFriend(&sendermac);
 						if (peer != NULL)
 							truncate_cpy(name, sizeof(name), (const char*)peer->nickname.data);
 						WARN_LOG(Log::sceNet, "GameMode: Unknown Source Port from [%s][%s:%u -> %u] (Result=%i, Size=%i)", name, mac2str(&sendermac).c_str(), senderport, ADHOC_GAMEMODE_PORT, ret, bufsz);
 						g_OSD.Show(OSDType::MESSAGE_WARNING, std::string(n->T("GM: Data from Unknown Port")) + std::string(" [") + std::string(name) + std::string("]:") + std::to_string(senderport) + std::string(" -> ") + std::to_string(ADHOC_GAMEMODE_PORT) + std::string(" (") + std::to_string(portOffset) + std::string(")"), 0.0f, "unknownport");
-						peerlock.unlock();
 					}
 					// Keeping track of the source port for further communication, in case it was re-mapped by router or ISP for some reason.
 					gameModePeerPorts[sendermac] = senderport;
@@ -502,6 +522,7 @@ static void __GameModeNotify(u64 userdata, int cyclesLate) {
 }
 
 static void __AdhocctlNotify(u64 userdata, int cyclesLate) {
+	FriendFinderProcess();
 	SceUID threadID = userdata >> 32;
 	int uid = (int)(userdata & 0xFFFFFFFF);
 
@@ -549,8 +570,8 @@ static void __AdhocctlNotify(u64 userdata, int cyclesLate) {
 			ret = SOCKET_ERROR;
 			sockerr = EAGAIN;
 			// Don't send anything yet if connection to Adhoc Server is still in progress
-			if (!isAdhocctlNeedLogin && IsSocketReady((int)metasocket, false, true) > 0) {
-				ret = send((int)metasocket, (const char*)&packet, len, MSG_NOSIGNAL);
+			if (!isAdhocctlNeedLogin && IsSocketReady(MetaSocket(), false, true) > 0) {
+				ret = send(MetaSocket(), (const char*)&packet, len, MSG_NOSIGNAL);
 				sockerr = socket_errno;
 				// Successfully Sent or Connection has been closed or Connection failure occurred
 				if (ret >= 0 || (ret == SOCKET_ERROR && sockerr != EAGAIN && sockerr != EWOULDBLOCK)) {
@@ -617,7 +638,7 @@ static void __AdhocctlState(u64 userdata, int cyclesLate) {
 
 // Used to simulate blocking on metasocket when send OP code to AdhocServer
 int WaitBlockingAdhocctlSocket(AdhocctlRequest request, int usec, const char* reason) {
-	int uid = (metasocket <= 0) ? 1 : (int)metasocket;
+	int uid = (MetaSocket() <= 0) ? 1 : MetaSocket();
 
 	if (adhocctlRequests.find(uid) != adhocctlRequests.end()) {
 		WARN_LOG(Log::sceNet, "sceNetAdhocctl - WaitID[%d] already existed, Socket is busy!", uid);
@@ -876,10 +897,8 @@ int DoBlockingPdpRecv(AdhocSocketRequest& req, s64& result) {
 				*req.length = ret;
 
 				// Update last recv timestamp
-				peerlock.lock();
 				auto peer = findFriend(&mac);
 				if (peer != NULL) peer->last_recv = CoreTiming::GetGlobalTimeUsScaled();
-				peerlock.unlock();
 			}
 			// Unknown Peer
 			else {
@@ -913,10 +932,8 @@ int DoBlockingPdpRecv(AdhocSocketRequest& req, s64& result) {
 			*req.remotePort = ntohs(sin.sin_port) - portOffset;
 
 			// FIXME: Do we need to update last recv timestamp? eventhough data hasn't been retrieved yet (ie. peeked)
-			peerlock.lock();
 			auto peer = findFriend(&mac);
 			if (peer != NULL) peer->last_recv = CoreTiming::GetGlobalTimeUsScaled();
-			peerlock.unlock();
 		}
 		result = SCE_NET_ADHOC_ERROR_NOT_ENOUGH_SPACE;
 	}
@@ -1211,10 +1228,8 @@ int DoBlockingPtpRecv(AdhocSocketRequest& req, s64& result) {
 		*req.length = ret;
 
 		// Update last recv timestamp
-		peerlock.lock();
 		auto peer = findFriend(&ptpsocket.paddr);
 		if (peer != NULL) peer->last_recv = CoreTiming::GetGlobalTimeUsScaled();
-		peerlock.unlock();
 
 		// Set to Established on successful Recv when an attempt to Connect was initiated
 		if (ptpsocket.state == ADHOC_PTP_STATE_SYN_SENT)
@@ -1323,6 +1338,7 @@ static int ptp_accept_postoffice(int idx, SceNetEtherAddr *saddr, uint16_t *spor
 	internal->flags = 0;
 	internal->connectThread = NULL;
 	internal->connectCancel = NULL;
+	internal->connectState = NULL;
 
 	AdhocSocket **slot = NULL;
 	int i;
@@ -1425,38 +1441,39 @@ static int ptp_connect_postoffice(int idx, const char *caller) {
 	addr.addr = g_adhocServerIP.in.sin_addr.s_addr;
 	addr.port = htons(AEMU_POSTOFFICE_PORT);
 
+	const bool finished = PostofficeConnectFinished(internal);
 	if (internal->postofficeHandle != NULL) {
 		return 0;
 	}
 
-	if (internal->connectThreadDone) {
+	if (finished) {
 		// The last attempt is over, so this join returns at once.
 		JoinPostofficeConnect(internal, false);
 
-		internal->connectThreadDone = false;
-		internal->connectThreadResult = 0;
-
 		internal->connectCancel = new net::CancelToken();
 		const int cancelFd = (int)internal->connectCancel->WakeFd();
-		internal->connectThread = new std::thread([internal, addr, idx, cancelFd] {
+		PostofficeConnectState *st = new PostofficeConnectState();
+		internal->connectState = st;
+		// The thread only reads the socket's addresses, which don't change while it connects.
+		internal->connectThread = new Thread([internal, st, addr, idx, cancelFd] {
 			int state;
 			SceNetEtherAddr fixed_daddr = internal->data.ptp.paddr;
 			fixGameMac(&fixed_daddr);
 			void *ptp_socket = ptp_connect_v4(&addr, (const char *)&internal->data.ptp.laddr, offset_port_simple(internal->data.ptp.lport), (const char *)&fixed_daddr, offset_port_simple(internal->data.ptp.pport), &state, cancelFd);
 			if (ptp_socket == NULL) {
-				internal->connectThreadResult = SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
+				st->result = SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
 				ERROR_LOG(Log::sceNet, "%s: failed connecting to ptp socket, %d", __func__, state);
 				// do not count ptp connect failure as relay failure, since it could be the other client not accepting the connection
 				//handle_relay_connect_failure();
-				internal->connectThreadDone = true;
+				retro_atomic_store_release_int(&st->done, 1);
 				return;
 			}
 			// see above, ptp connect result is not used for checking if relay is working
 			//handle_relay_connect_success();
-			internal->postofficeHandle = ptp_socket;
-			internal->connectThreadResult = 0;
-			INFO_LOG(Log::sceNet, "%s: connected ptp socket with id %d %p", __func__, idx + 1, internal->postofficeHandle);
-			internal->connectThreadDone = true;
+			st->handle = ptp_socket;
+			st->result = 0;
+			INFO_LOG(Log::sceNet, "%s: connected ptp socket with id %d %p", __func__, idx + 1, ptp_socket);
+			retro_atomic_store_release_int(&st->done, 1);
 			return;
 		});;
 
@@ -1508,9 +1525,11 @@ int DoBlockingPtpConnect(AdhocSocketRequest& req, s64& result, AdhocSendTargets&
 	// Note: On Linux "select" can return > 0 (with SO_ERROR = 0) even when the connection is not accepted yet, thus need "getpeername" to ensure
 	else {
 		if (serverHasRelay) {
+			int connectResult = 0;
+			const bool connectFinished = PostofficeConnectFinished(sock, &connectResult);
 			if (sock->postofficeHandle == NULL) {
 				ret = SOCKET_ERROR;
-				if (sock->connectThreadDone && sock->connectThreadResult == SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED){
+				if (connectFinished && connectResult == SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED){
 					sockerr = ECONNREFUSED;
 				} else {
 					sockerr = EAGAIN;
@@ -1885,7 +1904,6 @@ void __NetAdhocDoState(PointerWrap &p) {
 	if (p.mode == p.MODE_READ) {
 		// Discard leftover events
 		{
-			std::lock_guard<std::recursive_mutex> adhocGuard(adhocEvtMtx);
 			adhocctlEvents.clear();
 		}
 		adhocSocketRequests.clear();
@@ -1904,7 +1922,6 @@ void __NetAdhocDoState(PointerWrap &p) {
 }
 
 void __UpdateAdhocctlHandlers(u32 flag, u32 error) {
-	std::lock_guard<std::recursive_mutex> adhocGuard(adhocEvtMtx);
 	adhocctlEvents.push_back({ flag, error });
 }
 
@@ -1920,7 +1937,7 @@ void __AdhocNotifInit() {
 }
 
 void __NetAdhocInit() {
-	friendFinderRunning = false;
+	retro_atomic_store_release_int(&friendFinderRunning, 0);
 	netAdhocInited = false;
 	netAdhocctlInited = false;
 	adhocctlHandlers.clear();
@@ -1929,15 +1946,15 @@ void __NetAdhocInit() {
 
 	// Create built-in AdhocServer Thread. The flag is set here rather than by the thread, so that a
 	// shutdown that clears it before the thread gets going can't be undone (see friendFinder).
-	adhocServerRunning = false;
+	retro_atomic_store_release_int(&adhocServerRunning, 0);
 	AdhocServerWake();
 	if (adhocServerThread.joinable()) {
 		adhocServerThread.join();
 	}
 	if (g_Config.bEnableWlan && g_Config.bEnableAdhocServer) {
 		AdhocServerPrepare();
-		adhocServerRunning = true;
-		adhocServerThread = std::thread(proAdhocServerThread, SERVER_PORT);
+		retro_atomic_store_release_int(&adhocServerRunning, 1);
+		adhocServerThread = Thread(proAdhocServerThread, SERVER_PORT);
 	}
 }
 
@@ -2022,15 +2039,16 @@ int sceNetAdhocctlInit(int stackSize, int prio, u32 productAddr) {
 	}
 
 	// TODO: Merging friendFinder (real) thread to AdhocThread (fake) thread on PSP side
-	if (!friendFinderRunning) {
+	if (!FriendFinderIsRunning()) {
 		// Set before the thread starts, not by it: shutting down before it got going used to clear
 		// the flag first, and then the thread set it again and never stopped, hanging the join.
 		if (friendFinderThread.joinable()) {
 			friendFinderThread.join();
+			FriendFinderStopped();
 		}
 		FriendFinderPrepare();
-		friendFinderRunning = true;
-		friendFinderThread = std::thread(friendFinder);
+		retro_atomic_store_release_int(&friendFinderRunning, 1);
+		friendFinderThread = Thread(friendFinder);
 	}
 
 	// Need to make sure to be connected to Adhoc Server (indicated by networkInited) before returning to prevent GTA VCS failed to create/join a group and unable to see any game room
@@ -2039,7 +2057,7 @@ int sceNetAdhocctlInit(int stackSize, int prio, u32 productAddr) {
 		AdhocctlRequest dummyreq = { OPCODE_LOGIN, {0} };
 		return hleLogDebugOrWarn(Log::sceNet, WaitBlockingAdhocctlSocket(dummyreq, us, "adhocctl init"));
 	}
-	// Give a little time for friendFinder thread to be ready before the game use the next sceNet functions, should've checked for friendFinderRunning status instead of guessing the time?
+	// Give a little time for friendFinder thread to be ready before the game use the next sceNet functions, should've checked for FriendFinderIsRunning() status instead of guessing the time?
 	hleEatMicro(us);
 
 	return hleLogDebug(Log::sceNet, 0);
@@ -2458,7 +2476,6 @@ int sceNetAdhocPdpSend(int id, const char *mac, u32 port, void *data, int len, i
 #endif
 
 								// Acquire Peer Lock
-								peerlock.lock();
 								AdhocSendTargets dest = { len, {}, true };
 								// Iterate Peers
 								SceNetAdhocctlPeerInfo* peer = friends;
@@ -2470,7 +2487,6 @@ int sceNetAdhocPdpSend(int id, const char *mac, u32 port, void *data, int len, i
 									dest.peers.push_back({ peer->ip_addr, dport, peer->port_offset, peer->mac_addr });
 								}
 								// Free Peer Lock
-								peerlock.unlock();
 
 								// Send Data
 								// Simulate blocking behaviour with non-blocking socket
@@ -2709,10 +2725,8 @@ int sceNetAdhocPdpRecv(int id, void *addr, void * port, void *buf, void *dataLen
 					*sport = ntohs(sin.sin_port) - portOffset;
 
 					// Update last recv timestamp, may cause disconnection not detected properly tho
-					peerlock.lock();
 					auto peer = findFriend(&mac);
 					if (peer != NULL) peer->last_recv = CoreTiming::GetGlobalTimeUsScaled();
-					peerlock.unlock();
 
 					return hleLogVerbose(Log::sceNet, SCE_NET_ADHOC_ERROR_NOT_ENOUGH_SPACE, "not enough space");
 				}
@@ -2752,10 +2766,8 @@ int sceNetAdhocPdpRecv(int id, void *addr, void * port, void *buf, void *dataLen
 						*len = received; // Kurok homebrew seems to use the new value of len than returned value as data length
 
 						// Update last recv timestamp, may cause disconnection not detected properly tho
-						peerlock.lock();
 						auto peer = findFriend(&mac);
 						if (peer != NULL) peer->last_recv = CoreTiming::GetGlobalTimeUsScaled();
-						peerlock.unlock();
 
 						// Free Network Lock
 						//_freeNetworkLock();
@@ -3209,12 +3221,10 @@ int sceNetAdhocctlScan() {
 			adhocctlCurrentMode = ADHOCCTL_MODE_NORMAL;
 
 			// Reset Networks/Group list to prevent other threads from using these soon to be replaced networks
-			peerlock.lock();
 			freeGroupsRecursive(networks);
 			networks = NULL;
-			peerlock.unlock();
 
-			if (friendFinderRunning) {
+			if (FriendFinderIsRunning()) {
 				AdhocctlRequest req = { OPCODE_SCAN, {0} };
 				return hleLogDebugOrError(Log::sceNet, WaitBlockingAdhocctlSocket(req, us, "adhocctl scan"));
 			}
@@ -3262,8 +3272,6 @@ int sceNetAdhocctlGetScanInfo(u32 sizeAddr, u32 bufAddr) {
 			// FIXME: Do we need to exclude Groups created by this device it's self?
 			bool excludeSelf = false;
 
-			// Multithreading Lock
-			peerlock.lock();
 
 			// FIXME: When already connected to a group GetScanInfo will return size = 0 ? or may be only hides the group created by it's self?
 			if (adhocctlState == ADHOCCTL_STATE_CONNECTED || adhocctlState == ADHOCCTL_STATE_GAMEMODE) {
@@ -3325,8 +3333,6 @@ int sceNetAdhocctlGetScanInfo(u32 sizeAddr, u32 bufAddr) {
 				DEBUG_LOG(Log::sceNet, "NetworkList [Requested: %i][Discovered: %i]", requestcount, discovered);
 			}
 
-			// Multithreading Unlock
-			peerlock.unlock();
 
 			hleEatMicro(200);
 			// Return Success
@@ -3411,7 +3417,7 @@ u32 NetAdhocctl_Disconnect() {
 			//_acquireNetworkLock();
 
 			// Send Disconnect Request Packet
-			iResult = send((int)metasocket, (const char*)&opcode, 1, MSG_NOSIGNAL);
+			iResult = send(MetaSocket(), (const char*)&opcode, 1, MSG_NOSIGNAL);
 			error = socket_errno;
 
 			// Sending may get socket error 10053 if the AdhocServer is already shutted down
@@ -3421,7 +3427,7 @@ u32 NetAdhocctl_Disconnect() {
 					// Set Disconnected State
 					adhocctlState = ADHOCCTL_STATE_DISCONNECTED;
 				}
-				else if (friendFinderRunning) {
+				else if (FriendFinderIsRunning()) {
 					AdhocctlRequest req = { OPCODE_DISCONNECT, {0} };
 					WaitBlockingAdhocctlSocket(req, 0, "adhocctl disconnect");
 				}
@@ -3435,9 +3441,7 @@ u32 NetAdhocctl_Disconnect() {
 			//_freeNetworkLock();
 		}
 
-		// Multithreading Lock
-		//peerlock.lock();
-
+		//
 		// Clear Peer List, since games are moving to a different a group when the mission started may be we shouldn't free all peers yet
 		int32_t peercount = 0;
 		timeoutFriendsRecursive(friends, &peercount);
@@ -3451,9 +3455,7 @@ u32 NetAdhocctl_Disconnect() {
 		// Delete Group Reference
 		//networks = NULL;
 
-		// Multithreading Unlock
-		//peerlock.unlock();
-
+		//
 		adhocctlCurrentMode = ADHOCCTL_MODE_NONE;
 		// Notify Event Handlers (even if we weren't connected, not doing this will freeze games like God Eater, which expect this behaviour)
 		// FIXME: When there are no handler the state will immediately became ADHOCCTL_STATE_DISCONNECTED ?
@@ -3499,11 +3501,12 @@ int NetAdhocctl_Term() {
 		}
 
 		// Terminate Adhoc Threads
-		friendFinderRunning = false;
+		retro_atomic_store_release_int(&friendFinderRunning, 0);
 		FriendFinderWake();
 		if (friendFinderThread.joinable()) {
 			friendFinderThread.join();
 		}
+		FriendFinderStopped();
 
 		// TODO: May need to block current thread to make sure all Adhocctl callbacks have been fully executed before terminating Adhoc PSPThread (ie. threadAdhocID).
 
@@ -3521,9 +3524,7 @@ int NetAdhocctl_Term() {
 		adhocctlHandlers.clear();
 		// Free stuff here
 		g_adhocServerConnected = false;
-		shutdown((int)metasocket, SD_BOTH);
-		closesocket((int)metasocket);
-		metasocket = (int)INVALID_SOCKET;
+		CloseMetaSocket();
 		// Delete fake PSP Thread.
 		// kernelObjects may already been cleared early during a Shutdown, thus trying to access it may generates Warning/Error in the log
 		if (threadAdhocID > 0 && strcmp(__KernelGetThreadName(threadAdhocID), "ERROR") != 0) {
@@ -3575,8 +3576,6 @@ static int sceNetAdhocctlGetNameByAddr(const char *mac, u32 nameAddr) {
 				return 0;
 			}
 
-			// Multithreading Lock
-			peerlock.lock();
 
 			// Peer Reference
 			SceNetAdhocctlPeerInfo * peer = friends;
@@ -3590,8 +3589,6 @@ static int sceNetAdhocctlGetNameByAddr(const char *mac, u32 nameAddr) {
 					// Write Data
 					*nickname = peer->nickname;
 
-					// Multithreading Unlock
-					peerlock.unlock();
 
 					DEBUG_LOG(Log::sceNet, "sceNetAdhocctlGetNameByAddr - [PeerName:%s]", (char*)nickname);
 
@@ -3600,8 +3597,6 @@ static int sceNetAdhocctlGetNameByAddr(const char *mac, u32 nameAddr) {
 				}
 			}
 
-			// Multithreading Unlock
-			peerlock.unlock();
 
 			// Player not found
 			return hleLogDebug(Log::sceNet, SCE_NET_ADHOC_ERROR_NO_ENTRY, "PlayerName not found");
@@ -3651,8 +3646,6 @@ int sceNetAdhocctlGetPeerInfo(const char *mac, int size, u32 peerInfoAddr) {
 		// Find Peer by MAC
 		else
 		{
-			// Multithreading Lock
-			peerlock.lock();
 
 			SceNetAdhocctlPeerInfo * peer = findFriend(maddr);
 			if (peer != NULL && peer->last_recv != 0) {
@@ -3671,8 +3664,6 @@ int sceNetAdhocctlGetPeerInfo(const char *mac, int size, u32 peerInfoAddr) {
 				retval = 0;
 			}
 
-			// Multithreading Unlock
-			peerlock.unlock();
 		}
 		hleEatMicro(50);
 		return hleNoLog(retval);
@@ -3714,7 +3705,7 @@ int NetAdhocctl_Create(const char *groupName) {
 
 				// Wait for Status to be connected to prevent Ford Street Racing from Failed to create game session
 				int us = adhocDefaultDelay;
-				if (friendFinderRunning) {
+				if (FriendFinderIsRunning()) {
 					AdhocctlRequest req = { OPCODE_CONNECT, parameter.group_name };
 					return WaitBlockingAdhocctlSocket(req, us, "adhocctl connect");
 				}
@@ -4336,7 +4327,7 @@ static int ptp_open_postoffice(const SceNetEtherAddr *saddr, uint16_t sport, con
 	internal->flags = 0;
 	internal->connectThread = NULL;
 	internal->connectCancel = NULL;
-	internal->connectThreadDone = true;
+	internal->connectState = NULL;
 	internal->lastAttempt = 0;
 	internal->internalLastAttempt = 0;
 
@@ -5029,6 +5020,7 @@ static int ptp_listen_postoffice(const SceNetEtherAddr *saddr, uint16_t sport, u
 	internal->flags = 0;
 	internal->connectThread = NULL;
 	internal->connectCancel = NULL;
+	internal->connectState = NULL;
 	internal->lastAttempt = 0;
 	internal->internalLastAttempt = 0;
 
@@ -5453,10 +5445,8 @@ static int sceNetAdhocPtpRecv(int id, u32 dataAddr, u32 dataSizeAddr, int timeou
 						*len = received;
 
 						// Update last recv timestamp, may cause disconnection not detected properly tho
-						peerlock.lock();
 						auto peer = findFriend(&ptpsocket.paddr);
 						if (peer != NULL) peer->last_recv = CoreTiming::GetGlobalTimeUsScaled();
-						peerlock.unlock();
 
 						DEBUG_LOG(Log::sceNet, "sceNetAdhocPtpRecv[%i:%u]: Received %u bytes from %s:%u\n", id, ptpsocket.lport, received, mac2str(&ptpsocket.paddr).c_str(), ptpsocket.pport);
 
@@ -5839,7 +5829,7 @@ int sceNetAdhocGetSocketAlert(int id, u32 flagPtr) {
 
 void __NetTriggerCallbacks()
 {
-	std::lock_guard<std::recursive_mutex> adhocGuard(adhocEvtMtx);
+	FriendFinderProcess();
 	hleSkipDeadbeef();
 	int delayus = adhocDefaultDelay;
 
@@ -6023,8 +6013,6 @@ static int sceNetAdhocctlGetPeerList(u32 sizeAddr, u32 bufAddr) {
 		if (buflen != NULL) {
 			// FIXME: Sometimes returing 0x80410682 when Adhocctl is still BUSY or before AdhocctlGetState became ADHOCCTL_STATE_CONNECTED or related to Auth/Library ?
 
-			// Multithreading Lock
-			peerlock.lock();
 
 			bool excludeTimedout = true;
 			// Length Calculation Mode
@@ -6085,8 +6073,6 @@ static int sceNetAdhocctlGetPeerList(u32 sizeAddr, u32 bufAddr) {
 				DEBUG_LOG(Log::sceNet, "PeerList [Requested: %i][Discovered: %i]", requestcount, discovered);
 			}
 
-			// Multithreading Unlock
-			peerlock.unlock();
 
 			// Return Success
 			return hleDelayResult(0, "delay 100 ~ 1000us", 100); // seems to have different thread running within the delay duration
@@ -6121,8 +6107,6 @@ static int sceNetAdhocctlGetAddrByName(const char *nickName, u32 sizeAddr, u32 b
 			SceNetAdhocctlPeerInfoEmu *buf = NULL;
 			if (Memory::IsValidAddress(bufAddr)) buf = (SceNetAdhocctlPeerInfoEmu *)Memory::GetPointerOrException(bufAddr);
 
-			// Multithreading Lock
-			peerlock.lock();
 
 			// Length Calculation Mode
 			if (buf == NULL) {
@@ -6204,8 +6188,6 @@ static int sceNetAdhocctlGetAddrByName(const char *nickName, u32 sizeAddr, u32 b
 				DEBUG_LOG(Log::sceNet, "PeerNameList [%s][Requested: %i][Discovered: %i]", nickName, requestcount, discovered);
 			}
 
-			// Multithreading Unlock
-			peerlock.unlock();
 
 			// Return Success
 			return hleDelayResult(hleLogDebug(Log::sceNet, 0, "success"), "delay 100 ~ 1000us", 100); // FIXME: Might have similar delay with GetPeerList? need to know which games using this tho

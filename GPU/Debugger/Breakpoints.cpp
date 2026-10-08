@@ -16,7 +16,6 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <functional>
-#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -164,7 +163,6 @@ bool GPUBreakpoints::HitAddressBreakpoint(u32 pc, u32 op) {
 	if (breakPCsCount == 0)
 		return false;
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	auto entry = breakPCs.find(pc);
 	if (entry == breakPCs.end())
 		return false;
@@ -181,7 +179,6 @@ bool GPUBreakpoints::HitOpBreakpoint(u32 op) {
 		return false;
 
 	if (breakCmdsInfo[cmd].isConditional) {
-		std::lock_guard<std::mutex> guard(breaksLock);
 		return HitBreakpointCond(breakCmdsInfo[cmd], op);
 	}
 
@@ -210,7 +207,6 @@ bool GPUBreakpoints::IsAddressBreakpoint(u32 addr, bool &temp) {
 		return false;
 	}
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	temp = breakPCsTemp.find(addr) != breakPCsTemp.end();
 	return breakPCs.find(addr) != breakPCs.end();
 }
@@ -220,7 +216,6 @@ bool GPUBreakpoints::IsAddressBreakpoint(u32 addr) {
 		return false;
 	}
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	return breakPCs.find(addr) != breakPCs.end();
 }
 
@@ -230,7 +225,6 @@ bool GPUBreakpoints::IsTextureBreakpoint(u32 addr, bool &temp) {
 		return false;
 	}
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	temp = breakTexturesTemp.find(addr) != breakTexturesTemp.end();
 	return breakTextures.find(addr) != breakTextures.end();
 }
@@ -240,7 +234,6 @@ bool GPUBreakpoints::IsTextureBreakpoint(u32 addr) {
 		return false;
 	}
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	return breakTextures.find(addr) != breakTextures.end();
 }
 
@@ -252,7 +245,6 @@ bool GPUBreakpoints::IsRenderTargetBreakpoint(u32 addr, bool &temp) {
 
 	addr &= 0x001FFFF0;
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	temp = breakRenderTargetsTemp.find(addr) != breakRenderTargetsTemp.end();
 	return breakRenderTargets.find(addr) != breakRenderTargets.end();
 }
@@ -264,7 +256,6 @@ bool GPUBreakpoints::IsRenderTargetBreakpoint(u32 addr) {
 
 	addr &= 0x001FFFF0;
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	return breakRenderTargets.find(addr) != breakRenderTargets.end();
 }
 
@@ -300,8 +291,6 @@ bool GPUBreakpoints::HasAnyBreakpoints() const {
 }
 
 void GPUBreakpoints::AddAddressBreakpoint(u32 addr, bool temp) {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	if (temp) {
 		if (breakPCs.find(addr) == breakPCs.end()) {
 			breakPCsTemp.insert(addr);
@@ -319,8 +308,6 @@ void GPUBreakpoints::AddAddressBreakpoint(u32 addr, bool temp) {
 }
 
 void GPUBreakpoints::AddCmdBreakpoint(u8 cmd, bool temp) {
-	// Debuggers call this from their own threads, racing ClearTempBreakpoints on the emu thread.
-	std::lock_guard<std::mutex> guard(breaksLock);
 	if (temp) {
 		if (!breakCmds[cmd]) {
 			breakCmdsTemp[cmd] = true;
@@ -340,8 +327,6 @@ void GPUBreakpoints::AddCmdBreakpoint(u8 cmd, bool temp) {
 }
 
 void GPUBreakpoints::AddTextureBreakpoint(u32 addr, bool temp) {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	if (temp) {
 		if (breakTextures.find(addr) == breakTextures.end()) {
 			breakTexturesTemp.insert(addr);
@@ -357,8 +342,6 @@ void GPUBreakpoints::AddTextureBreakpoint(u32 addr, bool temp) {
 }
 
 void GPUBreakpoints::AddRenderTargetBreakpoint(u32 addr, bool temp) {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	addr &= 0x001FFFF0;
 
 	if (temp) {
@@ -376,7 +359,6 @@ void GPUBreakpoints::AddRenderTargetBreakpoint(u32 addr, bool temp) {
 }
 
 void GPUBreakpoints::AddTextureChangeTempBreakpoint() {
-	std::lock_guard<std::mutex> guard(breaksLock);
 	textureChangeTemp = true;
 	hasBreakpoints_ = true;
 }
@@ -389,8 +371,6 @@ void GPUBreakpoints::AddAnyTempBreakpoint() {
 }
 
 void GPUBreakpoints::RemoveAddressBreakpoint(u32 addr) {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	breakPCsTemp.erase(addr);
 	breakPCs.erase(addr);
 
@@ -399,16 +379,12 @@ void GPUBreakpoints::RemoveAddressBreakpoint(u32 addr) {
 }
 
 void GPUBreakpoints::RemoveCmdBreakpoint(u8 cmd) {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	breakCmdsTemp[cmd] = false;
 	breakCmds[cmd] = false;
 	hasBreakpoints_ = HasAnyBreakpoints();
 }
 
 void GPUBreakpoints::RemoveTextureBreakpoint(u32 addr) {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	breakTexturesTemp.erase(addr);
 	breakTextures.erase(addr);
 
@@ -417,8 +393,6 @@ void GPUBreakpoints::RemoveTextureBreakpoint(u32 addr) {
 }
 
 void GPUBreakpoints::RemoveRenderTargetBreakpoint(u32 addr) {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	addr &= 0x001FFFF0;
 
 	breakRenderTargetsTemp.erase(addr);
@@ -429,8 +403,6 @@ void GPUBreakpoints::RemoveRenderTargetBreakpoint(u32 addr) {
 }
 
 void GPUBreakpoints::RemoveTextureChangeTempBreakpoint() {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	textureChangeTemp = false;
 	hasBreakpoints_ = HasAnyBreakpoints();
 }
@@ -457,13 +429,11 @@ bool GPUBreakpoints::SetAddressBreakpointCond(u32 addr, const std::string &expre
 	// Must have one in the first place, make sure it's not temporary.
 	AddAddressBreakpoint(addr);
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	auto &bp = breakPCs[addr];
 	return SetupCond(breakPCs[addr], expression, error);
 }
 
 bool GPUBreakpoints::GetAddressBreakpointCond(u32 addr, std::string *expression) {
-	std::lock_guard<std::mutex> guard(breaksLock);
 	auto entry = breakPCs.find(addr);
 	if (entry != breakPCs.end() && entry->second.isConditional) {
 		if (expression)
@@ -477,14 +447,12 @@ bool GPUBreakpoints::SetCmdBreakpointCond(u8 cmd, const std::string &expression,
 	// Must have one in the first place, make sure it's not temporary.
 	AddCmdBreakpoint(cmd);
 
-	std::lock_guard<std::mutex> guard(breaksLock);
 	return SetupCond(breakCmdsInfo[cmd], expression, error);
 }
 
 bool GPUBreakpoints::GetCmdBreakpointCond(u8 cmd, std::string *expression) {
 	if (breakCmds[cmd] && breakCmdsInfo[cmd].isConditional) {
 		if (expression) {
-			std::lock_guard<std::mutex> guard(breaksLock);
 			*expression = breakCmdsInfo[cmd].expressionString;
 		}
 		return true;
@@ -497,8 +465,6 @@ void GPUBreakpoints::UpdateLastTexture(u32 addr) {
 }
 
 void GPUBreakpoints::ClearAllBreakpoints() {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	for (int i = 0; i < 256; ++i) {
 		breakCmds[i] = false;
 		breakCmdsTemp[i] = false;
@@ -520,8 +486,6 @@ void GPUBreakpoints::ClearAllBreakpoints() {
 }
 
 void GPUBreakpoints::ClearTempBreakpoints() {
-	std::lock_guard<std::mutex> guard(breaksLock);
-
 	// Reset ones that were temporary back to non-breakpoints in the primary arrays.
 	for (int i = 0; i < 256; ++i) {
 		if (breakCmdsTemp[i]) {

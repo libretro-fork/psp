@@ -16,13 +16,12 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include <atomic>
 #include <cstring>
 #include <functional>
 #include <set>
 #include <vector>
-#include <mutex>
 #include <encodings/rzstd.h>
+#include <retro_atomic.h>
 
 #include "Common/CommonTypes.h"
 #include "Common/File/FileUtil.h"
@@ -134,7 +133,6 @@ void Recorder::DirtyDrawnVRAM() {
 }
 
 bool Recorder::BeginRecording() {
-	std::unique_lock<std::mutex> guard(callbackLock_);
 	nextFrame = false;
 	if (PSP_CoreParameter().fileType == IdentifiedFileType::PPSSPP_GE_DUMP) {
 		// Can't record a GE dump. RecordNextFrame refuses this too.
@@ -143,7 +141,6 @@ bool Recorder::BeginRecording() {
 	}
 
 	active = true;
-	guard.unlock();
 	lastTextures.clear();
 	lastRenderTargets.clear();
 	flipLastAction = gpuStats.totals.numFlips;
@@ -245,8 +242,8 @@ static const u8 *mymemmem(const u8 *haystack, size_t off, size_t hlen, const u8 
 	const u8 *first_possible = haystack + off;
 	int first = *needle;
 
-	const u8 *result = nullptr;
-	std::mutex resultLock;
+	retro_atomic_ptr_t result;
+	retro_atomic_ptr_init(&result, nullptr);
 
 	int range = (int)(last_possible - first_possible);
 	ParallelRangeLoop(&g_threadManager, [&](int l, int h) {
@@ -270,10 +267,14 @@ static const u8 *mymemmem(const u8 *haystack, size_t off, size_t hlen, const u8 
 				return;
 			}
 			if (poffset() == 0 && !memcmp(p, needle, nlen)) {
-				std::lock_guard<std::mutex> guard(resultLock);
 				// Take the lowest result so we get the same file for any # of threads.
-				if (!result || p < result)
-					result = p;
+				void *cur = retro_atomic_load_acquire_ptr(&result);
+				while (!cur || p < (const u8 *)cur) {
+					if (retro_atomic_cas_ptr(&result, cur, (void *)p)) {
+						break;
+					}
+					cur = retro_atomic_load_acquire_ptr(&result);
+				}
 				return;
 			}
 
@@ -282,7 +283,7 @@ static const u8 *mymemmem(const u8 *haystack, size_t off, size_t hlen, const u8 
 		}
 	}, 0, range, 128 * 1024, TaskPriority::LOW);
 
-	return result;
+	return (const u8 *)retro_atomic_load_acquire_ptr(&result);
 }
 
 Command Recorder::EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 align) {
@@ -589,7 +590,6 @@ bool Recorder::RecordNextFrame(const std::function<void(const Path &)> callback)
 	if (PSP_CoreParameter().fileType == IdentifiedFileType::PPSSPP_GE_DUMP) {
 		return false;
 	}
-	std::lock_guard<std::mutex> guard(callbackLock_);
 	// Don't take over a recording in progress, it would get the wrong callback and end point.
 	if (nextFrame || active) {
 		return false;
@@ -618,12 +618,9 @@ void Recorder::FinishRecording() {
 	lastEdramTrans = 0x400;
 
 	std::function<void(const Path &)> callback;
-	{
-		std::lock_guard<std::mutex> guard(callbackLock_);
-		callback = std::move(writeCallback);
-		writeCallback = nullptr;
-		active = false;
-	}
+	callback = std::move(writeCallback);
+	writeCallback = nullptr;
+	active = false;
 
 	if (callback && !filename.empty()) {
 		callback(filename);

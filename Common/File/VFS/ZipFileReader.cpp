@@ -11,6 +11,7 @@
 
 #include "Common/Common.h"
 #include "Common/Log.h"
+#include "Common/File/PositionalFile.h"
 #include "Common/File/VFS/ZipFileReader.h"
 #include "Common/StringUtils.h"
 
@@ -28,20 +29,18 @@ static std::string AsciiLower(std::string_view s) {
 }
 
 // Heap-allocated so the context rzip holds survives moves of the container.
+// Reads come from any thread; each reads through a handle of its own.
 struct ZipFileSource {
-	FILE *file;
+	explicit ZipFileSource(const Path &path) : file(path) {}
+	PositionalFile file;
 };
 
 ZipContainer::ZipContainer(const Path &path) {
-	FILE *file = File::OpenCFile(path, "rb");
-	if (!file)
-		return;
-	const int64_t size = File::GetFileSize(file);
-	source_ = new ZipFileSource{ file };
+	source_ = new ZipFileSource(path);
 	read_ = &FileRead;
 	userdata_ = source_;
-	if (size > 0)
-		Open((uint64_t)size);
+	if (source_->file.Size() > 0)
+		Open((uint64_t)source_->file.Size());
 	if (!zip_)
 		close();
 }
@@ -63,10 +62,7 @@ void ZipContainer::Open(uint64_t size) {
 }
 
 int64_t ZipContainer::FileRead(void *userdata, uint64_t off, void *dst, size_t len) {
-	FILE *file = ((ZipFileSource *)userdata)->file;
-	if (File::Fseek(file, (int64_t)off, SEEK_SET) != 0)
-		return -1;
-	return (int64_t)fread(dst, 1, len, file);
+	return (int64_t)((ZipFileSource *)userdata)->file.ReadAt(off, dst, len);
 }
 
 ZipContainer::ZipContainer(ZipContainer &&other) noexcept {
@@ -94,11 +90,8 @@ void ZipContainer::close() noexcept {
 		rzip_archive_close(zip_);
 		zip_ = nullptr;
 	}
-	if (source_) {
-		fclose(source_->file);
-		delete source_;
-		source_ = nullptr;
-	}
+	delete source_;
+	source_ = nullptr;
 	read_ = nullptr;
 	userdata_ = nullptr;
 	lowerIndex_.clear();
@@ -226,7 +219,6 @@ ZipFileReader *ZipFileReader::Create(const Path &zipFile, std::string_view inZip
 }
 
 ZipFileReader::~ZipFileReader() {
-	std::lock_guard<std::mutex> guard(lock_);
 	zip_file_.close();
 }
 
@@ -245,12 +237,7 @@ uint8_t *ZipFileReader::ReadFile(std::string_view path, size_t *size) {
 		return 0;
 	}
 	uint8_t *contents = new uint8_t[entrySize + 1];
-	bool ok;
-	{
-		std::lock_guard<std::mutex> guard(lock_);
-		ok = zip_file_.ExtractInto(index, contents, (size_t)entrySize);
-	}
-	if (!ok) {
+	if (!zip_file_.ExtractInto(index, contents, (size_t)entrySize)) {
 		ERROR_LOG(Log::IO, "Error reading %s from ZIP", temp_path.c_str());
 		delete[] contents;
 		return 0;
@@ -456,7 +443,6 @@ size_t ZipFileReader::Read(VFSOpenFile *vfsOpenFile, void *buffer, size_t length
 		return 0;
 	if (!file->decoded && file->pos == 0 && length >= file->size) {
 		// The whole member in one read: decode it where it's going.
-		std::lock_guard<std::mutex> guard(lock_);
 		if (!zip_file_.ExtractInto(file->reference->zi, (uint8_t *)buffer, file->size))
 			return 0;
 		file->pos = file->size;
@@ -464,7 +450,6 @@ size_t ZipFileReader::Read(VFSOpenFile *vfsOpenFile, void *buffer, size_t length
 	}
 	if (!file->decoded) {
 		file->data.resize(file->size);
-		std::lock_guard<std::mutex> guard(lock_);
 		if (!zip_file_.ExtractInto(file->reference->zi, file->data.data(), file->size))
 			return 0;
 		file->decoded = true;
@@ -481,7 +466,7 @@ void ZipFileReader::CloseFile(VFSOpenFile *vfsOpenFile) {
 	delete file;
 }
 
-bool ReadSingleFileFromZip(Path zipFile, const char *path, std::string *data, std::mutex *mutex) {
+bool ReadSingleFileFromZip(Path zipFile, const char *path, std::string *data) {
 	ZipContainer zip(zipFile);
 	if (!zip) {
 		return false;
@@ -501,12 +486,6 @@ bool ReadSingleFileFromZip(Path zipFile, const char *path, std::string *data, st
 	if (!zip.ExtractInto(index, (uint8_t *)&contents[0], contents.size())) {
 		return false;
 	}
-	if (mutex) {
-		mutex->lock();
-	}
 	data->swap(contents);
-	if (mutex) {
-		mutex->unlock();
-	}
 	return true;
 }

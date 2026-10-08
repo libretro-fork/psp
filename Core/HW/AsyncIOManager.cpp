@@ -15,8 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <condition_variable>
-#include <mutex>
 
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -28,96 +26,13 @@
 #include "Core/FileSystems/MetaFileSystem.h"
 
 bool AsyncIOManager::HasOperation(u32 handle) {
-	std::lock_guard<std::mutex> guard(resultsLock_);
-	if (resultsPending_.find(handle) != resultsPending_.end()) {
-		return true;
-	}
-	if (results_.find(handle) != results_.end()) {
-		return true;
-	}
-	return false;
+	return resultsPending_.find(handle) != resultsPending_.end() || results_.find(handle) != results_.end();
 }
 
 void AsyncIOManager::ScheduleOperation(const AsyncIOEvent &ev) {
-	{
-		std::lock_guard<std::mutex> guard(resultsLock_);
-		if (!resultsPending_.insert(ev.handle).second) {
-			ERROR_LOG_REPORT(Log::sceIo, "Scheduling operation for file %d while one is pending (type %d)", ev.handle, ev.type);
-		}
+	if (!resultsPending_.insert(ev.handle).second) {
+		ERROR_LOG_REPORT(Log::sceIo, "Scheduling operation for file %d while one is pending (type %d)", ev.handle, ev.type);
 	}
-	ScheduleEvent(ev);
-}
-
-void AsyncIOManager::Shutdown() {
-	std::lock_guard<std::mutex> guard(resultsLock_);
-	resultsPending_.clear();
-	results_.clear();
-}
-
-bool AsyncIOManager::HasResult(u32 handle) {
-	std::lock_guard<std::mutex> guard(resultsLock_);
-	return results_.find(handle) != results_.end();
-}
-
-bool AsyncIOManager::PopResult(u32 handle, AsyncIOResult &result) {
-	// This is called under lock from WaitResult, no need to lock again.
-	if (results_.find(handle) != results_.end()) {
-		result = results_[handle];
-		results_.erase(handle);
-		resultsPending_.erase(handle);
-
-		if (result.invalidateAddr && result.result > 0) {
-			currentMIPS->InvalidateICacheRangeImmediate(result.invalidateAddr, (int)result.result);
-		}
-		return true;
-	} else {
-		return false;
-	}
-}
-
-bool AsyncIOManager::ReadResult(u32 handle, AsyncIOResult &result) {
-	// This is called under lock from WaitResult, no need to lock again.
-	if (results_.find(handle) != results_.end()) {
-		result = results_[handle];
-		return true;
-	} else {
-		return false;
-	}
-}
-
-bool AsyncIOManager::WaitResult(u32 handle, AsyncIOResult &result) {
-	ScheduleEvent(IO_EVENT_SYNC);
-	for (;;) {
-		const int seen = retro_atomic_load_acquire_int(&progress_);
-		{
-			std::lock_guard<std::mutex> guard(resultsLock_);
-			if (PopResult(handle, result))
-				return true;
-			if (!HasEvents() || !ThreadEnabled() || resultsPending_.find(handle) == resultsPending_.end())
-				return false;
-		}
-		ParkingLotWait(&progress_, [&] { return retro_atomic_load_acquire_int(&progress_) != seen; });
-	}
-}
-
-u64 AsyncIOManager::ResultFinishTicks(u32 handle) {
-	AsyncIOResult result;
-
-	ScheduleEvent(IO_EVENT_SYNC);
-	for (;;) {
-		const int seen = retro_atomic_load_acquire_int(&progress_);
-		{
-			std::lock_guard<std::mutex> guard(resultsLock_);
-			if (ReadResult(handle, result))
-				return result.finishTicks;
-			if (!HasEvents() || !ThreadEnabled() || resultsPending_.find(handle) == resultsPending_.end())
-				return 0;
-		}
-		ParkingLotWait(&progress_, [&] { return retro_atomic_load_acquire_int(&progress_) != seen; });
-	}
-}
-
-void AsyncIOManager::ProcessEvent(AsyncIOEvent ev) {
 	switch (ev.type) {
 	case IO_EVENT_READ:
 		Read(ev.handle, ev.buf, ev.bytes, ev.invalidateAddr);
@@ -129,7 +44,43 @@ void AsyncIOManager::ProcessEvent(AsyncIOEvent ev) {
 
 	default:
 		ERROR_LOG_REPORT(Log::sceIo, "Unsupported IO event type");
+		resultsPending_.erase(ev.handle);
+		break;
 	}
+}
+
+void AsyncIOManager::Shutdown() {
+	resultsPending_.clear();
+	results_.clear();
+}
+
+bool AsyncIOManager::HasResult(u32 handle) {
+	return results_.find(handle) != results_.end();
+}
+
+bool AsyncIOManager::PopResult(u32 handle, AsyncIOResult &result) {
+	auto iter = results_.find(handle);
+	if (iter == results_.end()) {
+		return false;
+	}
+	result = iter->second;
+	results_.erase(iter);
+	resultsPending_.erase(handle);
+
+	if (result.invalidateAddr && result.result > 0) {
+		currentMIPS->InvalidateICacheRangeImmediate(result.invalidateAddr, (int)result.result);
+	}
+	return true;
+}
+
+bool AsyncIOManager::WaitResult(u32 handle, AsyncIOResult &result) {
+	// Operations finish as they're scheduled, so there's nothing to wait for.
+	return PopResult(handle, result);
+}
+
+u64 AsyncIOManager::ResultFinishTicks(u32 handle) {
+	auto iter = results_.find(handle);
+	return iter != results_.end() ? iter->second.finishTicks : 0;
 }
 
 void AsyncIOManager::Read(u32 handle, u8 *buf, size_t bytes, u32 invalidateAddr) {
@@ -145,14 +96,10 @@ void AsyncIOManager::Write(u32 handle, const u8 *buf, size_t bytes) {
 }
 
 void AsyncIOManager::EventResult(u32 handle, const AsyncIOResult &result) {
-	{
-		std::lock_guard<std::mutex> guard(resultsLock_);
-		if (results_.find(handle) != results_.end()) {
-			ERROR_LOG_REPORT(Log::sceIo, "Overwriting previous result for file action on handle %d", handle);
-		}
-		results_[handle] = result;
+	if (results_.find(handle) != results_.end()) {
+		ERROR_LOG_REPORT(Log::sceIo, "Overwriting previous result for file action on handle %d", handle);
 	}
-	Progress();
+	results_[handle] = result;
 }
 
 void AsyncIOManager::DoState(PointerWrap &p) {
@@ -160,8 +107,6 @@ void AsyncIOManager::DoState(PointerWrap &p) {
 	if (!s)
 		return;
 
-	SyncThread();
-	std::lock_guard<std::mutex> guard(resultsLock_);
 	Do(p, resultsPending_);
 	if (s >= 2) {
 		Do(p, results_);

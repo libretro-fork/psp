@@ -22,8 +22,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <unordered_set>
-#include "Common/Data/Collections/Hashmaps.h"
+#include <retro_atomic.h>
+#include "Common/Thread/MpscQueue.h"
 #include "GPU/Math3D.h"
 #include "GPU/Software/FuncId.h"
 #include "GPU/Software/RasterizerRegCache.h"
@@ -71,7 +71,7 @@ public:
 	void Clear() override;
 	void Flush();
 	// Changes whenever the code space is cleared, which frees all previously returned functions.
-	static int ClearGeneration() { return clearGen_; }
+	static int ClearGeneration() { return retro_atomic_load_relaxed_int(&clearGen_); }
 
 	std::string DescribeCodePtr(const u8 *ptr) override;
 
@@ -128,10 +128,13 @@ private:
 		}
 	};
 
-	DenseHashMap<size_t, SingleFunc> cache_;
+	// Compiled and cleared on the GPU thread, looked up by any (see JitFuncTable).
+	JitFuncTable<SingleFunc, 4096> cache_;
+	// GPU thread only.
 	std::unordered_map<PixelFuncID, const u8 *> addresses_;
-	std::unordered_set<PixelFuncID> compileQueue_;
-	static int clearGen_;
+	// Lookups that missed without a binner to flush, compiled on the GPU thread at the next chance.
+	MpscQueue<PixelFuncID> compileQueue_;
+	static retro_atomic_int_t clearGen_;
 	static thread_local LastCache lastSingle_;
 
 	const u8 *constBlendHalf_11_4s_ = nullptr;

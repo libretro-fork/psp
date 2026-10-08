@@ -20,10 +20,12 @@
 namespace http {
 class ServerRequest;
 }
+namespace net {
+class CancelToken;
+}
 
-void HandleDebuggerRequest(const http::ServerRequest &request);
-// Note: blocks.
-void StopAllDebuggers();
+// Runs one debugger connection on the calling thread until the client leaves or stop is set.
+void HandleDebuggerRequest(const http::ServerRequest &request, const net::CancelToken *stop);
 
 struct BreakpointHit;
 

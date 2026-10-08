@@ -139,21 +139,22 @@ int DataFormatNumChannels(DataFormat fmt) {
 }
 
 RefCountedObject::~RefCountedObject() {
-	const int rc = refcount_.load();
+	const int rc = retro_atomic_load_acquire_int(&refcount_);
 	_dbg_assert_msg_(rc == 0xDEDEDE, "Unexpected refcount %d in object of type '%s'", rc, name_);
 }
 
 bool RefCountedObject::Release() {
-	if (refcount_ > 0 && refcount_ < 10000) {
-		if (--refcount_ == 0) {
+	const int before = retro_atomic_fetch_sub_int(&refcount_, 1);
+	if (before > 0 && before < 10000) {
+		if (before == 1) {
 			// Make it very obvious if we try to free this again.
-			refcount_ = 0xDEDEDE;
+			retro_atomic_store_relaxed_int(&refcount_, 0xDEDEDE);
 			delete this;
 			return true;
 		}
 	} else {
 		// No point in printing the name here if the object has already been free-d, it'll be corrupt and dangerous to print.
-		_dbg_assert_msg_(false, "Refcount (%d) invalid for object %p - corrupt?", refcount_.load(), this);
+		_dbg_assert_msg_(false, "Refcount (%d) invalid for object %p - corrupt?", before, this);
 	}
 	return false;
 }

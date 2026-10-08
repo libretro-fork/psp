@@ -15,7 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <mutex>
 #include <deque>
 #include <StringUtils.h>
 #include "Core/MemMapHelpers.h"
@@ -29,7 +28,6 @@
 bool npMatching2Inited = false;
 SceNpAuthMemoryStat npMatching2MemStat = {};
 
-std::recursive_mutex npMatching2EvtMtx;
 std::deque<NpMatching2Args> npMatching2Events;
 std::map<int, NpMatching2Handler> npMatching2Handlers;
 //std::map<int, NpMatching2Context> npMatching2Contexts;
@@ -44,7 +42,6 @@ std::map<int, NpMatching2Handler> npMatching2Handlers;
 //		0x09 on 0x0101, 0x0A on 0x0102, 0x0C on 0x0103, 0x0D on 0x0104, 0x0E on 0x0105, 0x0F on 0x0106, 0x10 on 0x0107, 0x11 on 0x0108,
 //		0x12 on 0x0109, 0x13 on 0x010a, 0x14 on 0x010b, 0x15 on 0x010c, 0x16 on 0x010d, 0x17 on 0x010e, 0x18 on 0xa102
 void notifyNpMatching2Handlers(NpMatching2Args &args, u32 ctxId, u32 serverId, u32 cbFuncAddr, u32 cbArgAddr, u32 unk3, u32 unk4, u32 unk5, u8 unk6) {
-	std::lock_guard<std::recursive_mutex> npMatching2Guard(npMatching2EvtMtx);
 	// TODO: separate/map each list per ctxId
 	npMatching2Events.push_back(args);
 }

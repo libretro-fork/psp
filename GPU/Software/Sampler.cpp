@@ -17,7 +17,6 @@
 
 #include "ppsspp_config.h"
 #include <unordered_map>
-#include <mutex>
 #include "Common/Common.h"
 #include "Common/Data/Convert/ColorConv.h"
 #include "Common/LogReporting.h"
@@ -38,7 +37,6 @@ static Vec4IntResult SOFTRAST_CALL SampleNearest(float s, float t, Vec4IntArg pr
 static Vec4IntResult SOFTRAST_CALL SampleLinear(float s, float t, Vec4IntArg prim_color, const u8 *const *tptr, const uint16_t *bufw, int level, int levelFrac, const SamplerID &samplerID);
 static Vec4IntResult SOFTRAST_CALL SampleFetch(int u, int v, const u8 *tptr, int bufw, int level, const SamplerID &samplerID);
 
-std::mutex jitCacheLock;
 SamplerJitCache *jitCache = nullptr;
 
 void Init() {
@@ -100,18 +98,18 @@ FetchFunc GetFetchFunc(SamplerID id, BinManager *binner) {
 thread_local SamplerJitCache::LastCache SamplerJitCache::lastFetch_;
 thread_local SamplerJitCache::LastCache SamplerJitCache::lastNearest_;
 thread_local SamplerJitCache::LastCache SamplerJitCache::lastLinear_;
-int SamplerJitCache::clearGen_ = 0;
+retro_atomic_int_t SamplerJitCache::clearGen_{ 0 };
 
 // 256k should be enough.
-SamplerJitCache::SamplerJitCache() : Rasterizer::CodeBlock(1024 * 64 * 4), cache_(64) {
+SamplerJitCache::SamplerJitCache() : Rasterizer::CodeBlock(1024 * 64 * 4) {
 	lastFetch_.gen = -1;
 	lastNearest_.gen = -1;
 	lastLinear_.gen = -1;
-	clearGen_++;
+	retro_atomic_fetch_add_int(&clearGen_, 1);
 }
 
 void SamplerJitCache::Clear() {
-	clearGen_++;
+	retro_atomic_fetch_add_int(&clearGen_, 1);
 	CodeBlock::Clear();
 	cache_.Clear();
 	addresses_.clear();
@@ -153,14 +151,17 @@ std::string SamplerJitCache::DescribeCodePtr(const u8 *ptr) {
 }
 
 void SamplerJitCache::Flush() {
-	std::unique_lock<std::mutex> guard(jitCacheLock);
-	for (const auto &queued : compileQueue_) {
+	CompileQueued();
+}
+
+void SamplerJitCache::CompileQueued() {
+	compileQueue_.Drain([this](SamplerID &&queued) {
 		// Might've been compiled after enqueue, but before now.
 		size_t queuedKey = std::hash<SamplerID>()(queued);
-		if (!cache_.ContainsKey(queuedKey))
+		if (!cache_.ContainsKey(queuedKey)) {
 			Compile(queued);
-	}
-	compileQueue_.clear();
+		}
+	});
 }
 
 // Without a backend nothing ever compiles, and a lookup would flush the binner for nothing.
@@ -177,8 +178,6 @@ static bool CanJit(const SamplerID &id) {
 }
 
 NearestFunc SamplerJitCache::GetByID(const SamplerID &id, size_t key, BinManager *binner) {
-	std::unique_lock<std::mutex> guard(jitCacheLock);
-	
 	NearestFunc func;
 	if (cache_.Get(key, &func)) {
 		return func;
@@ -186,21 +185,13 @@ NearestFunc SamplerJitCache::GetByID(const SamplerID &id, size_t key, BinManager
 
 	if (!binner) {
 		// Can't compile, let's try to do it later when there's an opportunity.
-		compileQueue_.insert(id);
+		compileQueue_.Push(id);
 		return nullptr;
 	}
 
-	guard.unlock();
+	// The GPU thread, with nothing drawing after this.
 	binner->Flush("compile");
-	guard.lock();
-
-	for (const auto &queued : compileQueue_) {
-		// Might've been compiled after enqueue, but before now.
-		size_t queuedKey = std::hash<SamplerID>()(queued);
-		if (!cache_.ContainsKey(queuedKey))
-			Compile(queued);
-	}
-	compileQueue_.clear();
+	CompileQueued();
 
 	if (!cache_.ContainsKey(key))
 		Compile(id);
@@ -218,11 +209,11 @@ NearestFunc SamplerJitCache::GetNearest(const SamplerID &id, BinManager *binner)
 		return nullptr;
 
 	const size_t key = std::hash<SamplerID>()(id);
-	if (lastNearest_.Match(key, clearGen_))
+	if (lastNearest_.Match(key, ClearGeneration()))
 		return (NearestFunc)lastNearest_.func;
 
 	auto func = GetByID(id, key, binner);
-	lastNearest_.Set(key, func, clearGen_);
+	lastNearest_.Set(key, func, ClearGeneration());
 	return (NearestFunc)func;
 }
 
@@ -231,11 +222,11 @@ LinearFunc SamplerJitCache::GetLinear(const SamplerID &id, BinManager *binner) {
 		return nullptr;
 
 	const size_t key = std::hash<SamplerID>()(id);
-	if (lastLinear_.Match(key, clearGen_))
+	if (lastLinear_.Match(key, ClearGeneration()))
 		return (LinearFunc)lastLinear_.func;
 
 	auto func = GetByID(id, key, binner);
-	lastLinear_.Set(key, func, clearGen_);
+	lastLinear_.Set(key, func, ClearGeneration());
 	return (LinearFunc)func;
 }
 
@@ -244,17 +235,17 @@ FetchFunc SamplerJitCache::GetFetch(const SamplerID &id, BinManager *binner) {
 		return nullptr;
 
 	const size_t key = std::hash<SamplerID>()(id);
-	if (lastFetch_.Match(key, clearGen_))
+	if (lastFetch_.Match(key, ClearGeneration()))
 		return (FetchFunc)lastFetch_.func;
 
 	auto func = GetByID(id, key, binner);
-	lastFetch_.Set(key, func, clearGen_);
+	lastFetch_.Set(key, func, ClearGeneration());
 	return (FetchFunc)func;
 }
 
 void SamplerJitCache::Compile(const SamplerID &id) {
 	// This should be sufficient.
-	if (GetSpaceLeft() < 16384) {
+	if (GetSpaceLeft() < 16384 || cache_.NearFull()) {
 		Clear();
 	}
 

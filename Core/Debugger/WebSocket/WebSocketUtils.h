@@ -143,12 +143,32 @@ private:
 	bool responsePartial_ = false;
 };
 
+// A connection's inbox for things other threads produce. It outlives the connection's
+// subscribers, and stays valid for callbacks running on the CPU thread until that thread lets go.
+class DebuggerMailbox {
+public:
+	// Any thread. Queues json for the connection to send (unless the client disallowed category;
+	// nullptr means always send) and wakes it.
+	virtual void Post(const char *category, std::string json) = 0;
+	// Any thread. Wakes the connection so its subscribers' Broadcast() runs.
+	virtual void Wake() = 0;
+	// Any thread. Posts json once the sceCtrl timed press pressId is over.
+	virtual void WatchPress(int pressId, std::string json) = 0;
+
+protected:
+	~DebuggerMailbox() {}
+};
+
 class DebuggerSubscriber {
 public:
 	virtual ~DebuggerSubscriber() {}
 
-	// Subscribers can also broadcast if they have simple cases to.
+	// Runs on the connection's thread each time it wakes. Whatever feeds it from another thread
+	// calls mailbox->Wake() after publishing.
 	virtual void Broadcast(net::WebSocketServer *ws) {}
+
+	// Set by the connection right after the subscriber is created.
+	DebuggerMailbox *mailbox = nullptr;
 };
 
 typedef std::function<void(DebuggerRequest &req)> DebuggerEventHandler;

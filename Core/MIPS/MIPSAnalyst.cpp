@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
-#include <mutex>
 
 #include "ext/cityhash/city.h"
 #include "Common/File/FileUtil.h"
@@ -42,8 +41,9 @@ using namespace MIPSCodeUtils;
 
 // Not in a namespace because MSVC's debugger doesn't like it
 typedef std::vector<MIPSAnalyst::AnalyzedFunction> FunctionsVector;
+// functions, hashToFunction and hashMap are the CPU thread's (module loading, and the debugger
+// through Core_RunOnCPUThread()).
 static FunctionsVector functions;
-std::recursive_mutex functions_lock;
 
 // One function can appear in multiple copies in memory, and they will all have 
 // the same hash and should all be replaced if possible.
@@ -753,13 +753,11 @@ namespace MIPSAnalyst {
 	}
 	
 	void Reset() {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 		functions.clear();
 		hashToFunction.clear();
 	}
 
 	void UpdateHashToFunctionMap() {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 		hashToFunction.clear();
 		// Really need to detect C++11 features with better defines.
 #if !PPSSPP_PLATFORM(IOS)
@@ -881,7 +879,6 @@ namespace MIPSAnalyst {
 	}
 
 	void HashFunctions() {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 		std::vector<u32> buffer;
 
 		for (auto iter = functions.begin(), end = functions.end(); iter != end; iter++) {
@@ -1010,7 +1007,6 @@ skip:
 		_assert_((startAddr & 3) == 0);
 		_assert_((endAddr & 3) == 0);
 
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 
 		FunctionsVector new_functions;
 
@@ -1194,7 +1190,6 @@ skip:
 		_assert_((startAddr & 3) == 0);
 		_assert_((size & 3) == 0);
 
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 
 		// Check if we have this already
 		for (auto iter = functions.begin(); iter != functions.end(); iter++) {
@@ -1229,7 +1224,6 @@ skip:
 
 	// endAddr is exclusive.
 	void ForgetFunctions(u32 startAddr, u32 endAddr) {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 
 		_assert_((startAddr & 3) == 0);
 		_assert_((endAddr & 3) == 0);
@@ -1269,7 +1263,6 @@ skip:
 	}
 
 	bool GetAnalyzedFunctionAt(u32 addr, AnalyzedFunction *out) {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 		for (auto iter = functions.begin(), end = functions.end(); iter != end; ++iter) {
 			if (iter->start <= addr && iter->end >= addr) {
 				*out = *iter;
@@ -1280,13 +1273,11 @@ skip:
 	}
 
 	void RehashFunctions() {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 		HashFunctions();
 		UpdateHashToFunctionMap();
 	}
 
 	void ReplaceFunctions() {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 
 		for (size_t i = 0; i < functions.size(); i++) {
 			WriteReplaceInstructions(functions[i].start, functions[i].hash, functions[i].size);
@@ -1294,7 +1285,6 @@ skip:
 	}
 
 	void UpdateHashMap() {
-		std::lock_guard<std::recursive_mutex> guard(functions_lock);
 
 		for (auto it = functions.begin(), end = functions.end(); it != end; ++it) {
 			const AnalyzedFunction &f = *it;

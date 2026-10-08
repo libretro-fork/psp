@@ -46,7 +46,6 @@
 #include "Core/HLE/sceNetResolver.h"
 
 #include <iostream>
-#include <mutex>
 
 #include "Core/HLE/sceNet.h"
 #include "Core/HLE/sceNp.h"

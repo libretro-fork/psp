@@ -17,7 +17,6 @@
 
 #include "ppsspp_config.h"
 #include <algorithm>
-#include <mutex>
 
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
@@ -184,7 +183,6 @@ QueueBuf::~QueueBuf() {
 int QueueBuf::push(const u8 *buf, int size) {
 	int addedSize = 0;
 	// This will overwrite the old data if the size prepare to add more than remaining size.
-	std::unique_lock<std::recursive_mutex> lock(mutex);
 	if (size > capacity)
 		resize(size);
 	while (end + size > capacity) {
@@ -197,7 +195,6 @@ int QueueBuf::push(const u8 *buf, int size) {
 	addedSize += size;
 	end = (end + size) % capacity;
 	available = std::min(capacity, available + addedSize);
-	lock.unlock();
 	return addedSize;
 }
 
@@ -206,7 +203,6 @@ int QueueBuf::pop(u8 *buf, int size) {
 		return 0;
 	}
 	int ret = 0;
-	std::unique_lock<std::recursive_mutex> lock(mutex);
 	if (getAvailableSize() < size)
 		size = getAvailableSize();
 	ret = size;
@@ -219,7 +215,6 @@ int QueueBuf::pop(u8 *buf, int size) {
 		memcpy(buf + capacity - startPos, buf_, size - (capacity - startPos));
 	}
 	available -= size;
-	lock.unlock();
 	return ret;
 }
 
@@ -239,10 +234,8 @@ void QueueBuf::resize(int newSize) {
 }
 
 void QueueBuf::flush() {
-	std::unique_lock<std::recursive_mutex> lock(mutex);
 	available = 0;
 	end = 0;
-	lock.unlock();
 }
 
 int QueueBuf::getRemainingSize() const {

@@ -17,8 +17,8 @@
 
 #pragma once
 
-#include <atomic>
 #include <unordered_map>
+#include <retro_atomic.h>
 #include "GPU/Software/Rasterizer.h"
 
 struct BinWaitable;
@@ -168,10 +168,11 @@ struct BinQueue {
 		return items_[index];
 	}
 
+	// Indices are the GPU thread's; workers only read items it published through the tiles.
 	T *items_ = nullptr;
-	std::atomic<size_t> head_;
-	std::atomic<size_t> tail_ ;
-	std::atomic<size_t> size_;
+	size_t head_;
+	size_t tail_;
+	size_t size_;
 	size_t capacity_ = N;
 };
 
@@ -283,11 +284,12 @@ private:
 
 	int maxTasks_ = 1;
 	BinTaskList taskLists_[MAX_POSSIBLE_TASKS];
-	std::atomic<bool> taskStatus_[MAX_POSSIBLE_TASKS];
+	retro_atomic_int_t taskStatus_[MAX_POSSIBLE_TASKS];
 	// Threads whose tasks the first one woken enqueues: waking a thread is a system call, kept off this one.
-	std::atomic<uint64_t> chainWake_{ 0 };
+	// A bitmask, 32 tasks per word.
+	retro_atomic_int_t chainWake_[(MAX_POSSIBLE_TASKS + 31) / 32];
 	// Up while MakeRoom() is parked; workers letting go of a tile then wake it.
-	std::atomic<bool> roomWaiting_{ false };
+	retro_atomic_int_t roomWaiting_{ 0 };
 
 	// With threads, queued items are binned into screen tiles. Any thread can take a tile with work and
 	// draws its items in order; only one at a time, so each pixel still sees the primitives in order.
@@ -307,17 +309,17 @@ private:
 	int tilesY_ = TILES_Y;
 	struct Tile {
 		// Indices into queue_, as a ring: head_ is how many have been drawn, tail_ how many were pushed.
-		std::atomic<uint32_t> head;
-		std::atomic<uint32_t> tail;
-		std::atomic<bool> busy;
+		retro_atomic_int_t head;
+		retro_atomic_int_t tail;
+		retro_atomic_int_t busy;
 		uint16_t items[QUEUED_PRIMS];
 	};
 	Tile *tiles_ = nullptr;
 	// For each queued item, how many tiles still have to draw it. It's reclaimed at zero.
-	std::atomic<int> itemRefs_[QUEUED_PRIMS];
+	retro_atomic_int_t itemRefs_[QUEUED_PRIMS];
 	// The tiles given work since the last flush, for the threads to look through.
 	uint16_t activeTiles_[TILES_X * TILES_Y];
-	std::atomic<int> activeCount_{ 0 };
+	retro_atomic_int_t activeCount_{ 0 };
 	bool tileActive_[TILES_X * TILES_Y]{};
 	// The queue_ index of the first item not yet put in tiles, and how many have been added since.
 	size_t distributePos_ = 0;

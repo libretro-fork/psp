@@ -16,7 +16,6 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include "ppsspp_config.h"
-#include <mutex>
 #include "Common/Common.h"
 #include "Common/Data/Convert/ColorConv.h"
 #include "Core/Config.h"
@@ -30,7 +29,6 @@ using namespace Math3D;
 
 namespace Rasterizer {
 
-std::mutex jitCacheLock;
 PixelJitCache *jitCache = nullptr;
 
 void Init() {
@@ -839,16 +837,16 @@ SingleFunc PixelJitCache::GenericSingle(const PixelFuncID &id) {
 }
 
 thread_local PixelJitCache::LastCache PixelJitCache::lastSingle_;
-int PixelJitCache::clearGen_ = 0;
+retro_atomic_int_t PixelJitCache::clearGen_{ 0 };
 
 // 256k should be plenty of space for plenty of variations.
-PixelJitCache::PixelJitCache() : CodeBlock(1024 * 64 * 4), cache_(64) {
+PixelJitCache::PixelJitCache() : CodeBlock(1024 * 64 * 4) {
 	lastSingle_.gen = -1;
-	clearGen_++;
+	retro_atomic_fetch_add_int(&clearGen_, 1);
 }
 
 void PixelJitCache::Clear() {
-	clearGen_++;
+	retro_atomic_fetch_add_int(&clearGen_, 1);
 	CodeBlock::Clear();
 	cache_.Clear();
 	addresses_.clear();
@@ -876,15 +874,15 @@ std::string PixelJitCache::DescribeCodePtr(const u8 *ptr) {
 	return CodeBlock::DescribeCodePtr(ptr);
 }
 
+// GPU thread.
 void PixelJitCache::Flush() {
-	std::unique_lock<std::mutex> guard(jitCacheLock);
-	for (const auto &queued : compileQueue_) {
+	compileQueue_.Drain([this](PixelFuncID &&queued) {
 		// Might've been compiled after enqueue, but before now.
 		size_t queuedKey = std::hash<PixelFuncID>()(queued);
-		if (!cache_.ContainsKey(queuedKey))
+		if (!cache_.ContainsKey(queuedKey)) {
 			Compile(queued);
-	}
-	compileQueue_.clear();
+		}
+	});
 }
 
 // Without a backend nothing ever compiles, and a lookup would flush the binner for nothing.
@@ -899,40 +897,31 @@ SingleFunc PixelJitCache::GetSingle(const PixelFuncID &id, BinManager *binner) {
 		return nullptr;
 
 	const size_t key = std::hash<PixelFuncID>()(id);
-	if (lastSingle_.Match(key, clearGen_))
+	if (lastSingle_.Match(key, ClearGeneration()))
 		return lastSingle_.func;
 
-	std::unique_lock<std::mutex> guard(jitCacheLock);
 	SingleFunc singleFunc;
 	if (cache_.Get(key, &singleFunc)) {
-		lastSingle_.Set(key, singleFunc, clearGen_);
+		lastSingle_.Set(key, singleFunc, ClearGeneration());
 		return singleFunc;
 	}
 
 	if (!binner) {
 		// Can't compile, let's try to do it later when there's an opportunity.
-		compileQueue_.insert(id);
+		compileQueue_.Push(id);
 		return nullptr;
 	}
 
-	guard.unlock();
+	// The GPU thread, with nothing drawing after this.
 	binner->Flush("compile");
-	guard.lock();
-
-	for (const auto &queued : compileQueue_) {
-		// Might've been compiled after enqueue, but before now.
-		size_t queuedKey = std::hash<PixelFuncID>()(queued);
-		if (!cache_.ContainsKey(queuedKey))
-			Compile(queued);
-	}
-	compileQueue_.clear();
+	Flush();
 
 	// Might've been in the queue.
 	if (!cache_.ContainsKey(key))
 		Compile(id);
 
 	if (cache_.Get(key, &singleFunc)) {
-		lastSingle_.Set(key, singleFunc, clearGen_);
+		lastSingle_.Set(key, singleFunc, ClearGeneration());
 		return singleFunc;
 	} else {
 		return nullptr;
@@ -941,7 +930,7 @@ SingleFunc PixelJitCache::GetSingle(const PixelFuncID &id, BinManager *binner) {
 
 void PixelJitCache::Compile(const PixelFuncID &id) {
 	// x64 is typically 200-500 bytes, but let's be safe.
-	if (GetSpaceLeft() < 65536) {
+	if (GetSpaceLeft() < 65536 || cache_.NearFull()) {
 		Clear();
 	}
 

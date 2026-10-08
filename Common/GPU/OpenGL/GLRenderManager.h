@@ -1,15 +1,14 @@
 #pragma once
 
-#include <thread>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 #include <functional>
 #include <set>
 #include <string>
 #include <string_view>
-#include <mutex>
-#include <queue>
-#include <condition_variable>
+
+#include <retro_atomic.h>
 
 #include "Common/GPU/MiscTypes.h"
 #include "Common/Data/Convert/SmallDataConvert.h"
@@ -18,6 +17,8 @@
 #include "Common/GPU/OpenGL/GLFrameData.h"
 #include "Common/GPU/OpenGL/GLCommon.h"
 #include "Common/GPU/OpenGL/GLMemory.h"
+#include "Common/Thread/MpscQueue.h"
+#include "Common/Thread/ParkingLot.h"
 
 class GLRInputLayout;
 class GLPushBuffer;
@@ -222,6 +223,8 @@ struct GLRRenderThreadTask {
 
 	std::vector<GLRStep *> steps;
 	FastVec<GLRInitStep> initSteps;
+	// Push buffers created since the last task: frame index and buffer.
+	std::vector<std::pair<int, GLPushBuffer *>> newPushBuffers;
 
 	int frame = -1;
 	GLRRunType runType;
@@ -277,7 +280,6 @@ public:
 	// and then we'll also need formats and stuff.
 	GLRTexture *CreateTexture(GLenum target, int width, int height, int depth, int numMips) {
 		_dbg_assert_(target != 0);
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::CREATE_TEXTURE;
 		step.create_texture.texture = new GLRTexture(caps_, width, height, depth, numMips);
@@ -286,7 +288,6 @@ public:
 	}
 
 	GLRBuffer *CreateBuffer(GLuint target, size_t size, GLuint usage) {
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::CREATE_BUFFER;
 		step.create_buffer.buffer = new GLRBuffer(target, size);
@@ -296,7 +297,6 @@ public:
 	}
 
 	GLRShader *CreateShader(GLuint stage, const std::string &code, std::string_view desc) {
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::CREATE_SHADER;
 		step.create_shader.shader = new GLRShader(desc);
@@ -309,7 +309,6 @@ public:
 	GLRFramebuffer *CreateFramebuffer(int width, int height, bool z_stencil, const char *tag) {
 		_dbg_assert_(width > 0 && height > 0 && tag != nullptr);
 
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::CREATE_FRAMEBUFFER;
 		step.create_framebuffer.framebuffer = new GLRFramebuffer(caps_, width, height, z_stencil, tag);
@@ -321,7 +320,6 @@ public:
 	GLRProgram *CreateProgram(
 		std::vector<GLRShader *> shaders, std::vector<GLRProgram::Semantic> semantics, std::vector<GLRProgram::UniformLocQuery> queries,
 		std::vector<GLRProgram::Initializer> initializers, GLRProgramLocData *locData, const GLRProgramFlags &flags) {
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::CREATE_PROGRAM;
 		_assert_(shaders.size() <= ARRAY_SIZE(step.create_program.shaders));
@@ -351,7 +349,6 @@ public:
 	}
 
 	GLRInputLayout *CreateInputLayout(const std::vector<GLRInputLayout::Entry> &entries, int stride) {
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::CREATE_INPUT_LAYOUT;
 		step.create_input_layout.inputLayout = new GLRInputLayout();
@@ -431,7 +428,6 @@ public:
 	void BufferSubdata(GLRBuffer *buffer, size_t offset, size_t size, uint8_t *data, bool deleteData = true) {
 		// TODO: Maybe should be a render command instead of an init command? When possible it's better as
 		// an init command, that's for sure.
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::BUFFER_SUBDATA;
 		_dbg_assert_(offset <= buffer->size_ - size);
@@ -444,7 +440,6 @@ public:
 
 	// Takes ownership over the data pointer and delete[]-s it.
 	void TextureImage(GLRTexture *texture, int level, int width, int height, int depth, Draw::DataFormat format, uint8_t *data, GLRAllocType allocType = GLRAllocType::NEW, bool linearFilter = false) {
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::TEXTURE_IMAGE;
 		step.texture_image.texture = texture;
@@ -461,7 +456,6 @@ public:
 	// Takes ownership over the data pointer and delete[]-s it. Runs as an init step, so unlike
 	// TextureSubImage below, it doesn't have to happen inside a render pass.
 	void TextureSubImageInit(GLRTexture *texture, int level, int x, int y, int width, int height, Draw::DataFormat format, uint8_t *data, GLRAllocType allocType = GLRAllocType::NEW) {
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::TEXTURE_SUBIMAGE;
 		step.texture_subimage.texture = texture;
@@ -492,7 +486,6 @@ public:
 	}
 
 	void FinalizeTexture(GLRTexture *texture, int loadedLevels, bool genMips) {
-		std::lock_guard<std::mutex> lock(initStepsMutex_);
 		GLRInitStep &step = initSteps_.push_uninitialized();
 		step.stepType = GLRInitStepType::TEXTURE_FINALIZE;
 		step.texture_finalize.texture = texture;
@@ -842,8 +835,8 @@ public:
 		queueRunner_.Resize(width, height);
 	}
 
+	// Render thread only (GLDeleter).
 	void UnregisterPushBuffer(GLPushBuffer *buffer) {
-		std::lock_guard<std::mutex> lock(pushBuffersMutex_);
 		int foundCount = 0;
 		for (int i = 0; i < MAX_INFLIGHT_FRAMES; i++) {
 			auto iter = frameData_[i].activePushBuffers.find(buffer);
@@ -893,9 +886,32 @@ private:
 
 	// When using legacy functionality for push buffers (glBufferData), we need to flush them
 	// before actually making the glDraw* calls. It's best if the render manager handles that.
+	// The render thread owns the active sets, so the buffer travels there with the next task.
 	void RegisterPushBuffer(int frame, GLPushBuffer *buffer) {
-		std::lock_guard<std::mutex> lock(pushBuffersMutex_);
-		frameData_[frame].activePushBuffers.insert(buffer);
+		newPushBuffers_.emplace_back(frame, buffer);
+	}
+
+	// Render thread.
+	void AddNewPushBuffers(std::vector<std::pair<int, GLPushBuffer *>> &added) {
+		for (auto &entry : added) {
+			frameData_[entry.first].activePushBuffers.insert(entry.second);
+		}
+		added.clear();
+	}
+
+	// Moves what the recording thread has gathered into a task.
+	void TakeRecordedWork(GLRRenderThreadTask *task) {
+		task->initSteps = std::move(initSteps_);
+		initSteps_.clear();
+		task->steps = std::move(steps_);
+		steps_.clear();
+		task->newPushBuffers = std::move(newPushBuffers_);
+		newPushBuffers_.clear();
+	}
+
+	void PushTask(GLRRenderThreadTask *task) {
+		renderThreadQueue_.Push(task);
+		renderThreadWork_.Notify();
 	}
 
 	GLFrameData frameData_[MAX_INFLIGHT_FRAMES];
@@ -905,34 +921,23 @@ private:
 
 	GLRStep *curRenderStep_ = nullptr;
 	std::vector<GLRStep *> steps_;
-	// Guards initSteps_. Recorded into from the emu thread, but also from the loader thread during
-	// boot (InitGPU runs there, and GL has to record device object creation rather than just doing
-	// it), and moved out on the emu thread in Finish/FlushSync. Uncontended in practice.
-	// Lock ordering: taken while pushMutex_ is held, never the other way around.
-	std::mutex initStepsMutex_;
+	// Recorded on the thread that records the steps (InitGPU runs there too), and moved into the
+	// next task with them.
 	FastVec<GLRInitStep> initSteps_;
-
-	// Guards frameData_[].activePushBuffers, which is inserted into from whichever thread creates a
-	// push buffer, erased from on the render thread (GLDeleter), and walked on the render thread.
-	// Lock ordering: taken before initStepsMutex_ (Flush() below records init steps), never after.
-	std::mutex pushBuffersMutex_;
+	std::vector<std::pair<int, GLPushBuffer *>> newPushBuffers_;
 
 	// Execution time state
 
 	// Thread is managed elsewhere, and should call ThreadFrame.
 	GLQueueRunner queueRunner_;
 
-	// For pushing data on the queue.
-	std::mutex pushMutex_;
-	std::condition_variable pushCondVar_;
-
-	std::queue<GLRRenderThreadTask *> renderThreadQueue_;
+	// Tasks for the render thread, oldest first. The render thread drains them into its own list.
+	MpscQueue<GLRRenderThreadTask *> renderThreadQueue_;
+	EventCounter renderThreadWork_;
+	std::deque<GLRRenderThreadTask *> renderThreadTasks_;
 
 	// For readbacks and other reasons we need to sync with the render thread.
-	std::mutex syncMutex_;
-	std::condition_variable syncCondVar_;
-
-	bool syncDone_ = false;
+	retro_atomic_int_t syncDone_{ 0 };
 
 	GLDeleter deleter_;
 	bool skipGLCalls_ = false;

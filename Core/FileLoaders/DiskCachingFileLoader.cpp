@@ -19,9 +19,9 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <set>
-#include <mutex>
 #include <cstring>
+
+#include <retro_atomic.h>
 
 #include "Common/Data/Encoding/Utf8.h"
 #include "Common/File/DiskFree.h"
@@ -44,8 +44,47 @@ static const u32 CACHE_SPACE_FLEX = 4;
 
 Path DiskCachingFileLoaderCache::cacheDir_;
 
-std::map<Path, DiskCachingFileLoaderCache *> DiskCachingFileLoader::caches_;
-std::mutex DiskCachingFileLoader::cachesMutex_;
+// Cache files open in this process, as a nonzero hash of the file name; 0 is a free slot.
+// A hash collision only means a file goes uncached or is kept by garbage collection.
+static const int MAX_OPEN_CACHES = 32;
+static retro_atomic_int_t g_openCaches[MAX_OPEN_CACHES];
+
+static int CacheNameHash(const std::string &name) {
+	u32 hash = 2166136261U;
+	for (char c : name) {
+		hash ^= (u8)c;
+		hash *= 16777619U;
+	}
+	return hash == 0 ? 1 : (int)hash;
+}
+
+static bool IsCacheOpen(int hash, int exceptSlot) {
+	for (int i = 0; i < MAX_OPEN_CACHES; ++i) {
+		if (i != exceptSlot && retro_atomic_load_acquire_int(&g_openCaches[i]) == hash) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Returns the claimed slot, or -1 if the file is already open (or too many are).
+static int ClaimCacheFile(int hash) {
+	if (IsCacheOpen(hash, -1)) {
+		return -1;
+	}
+	for (int i = 0; i < MAX_OPEN_CACHES; ++i) {
+		if (retro_atomic_cas_int(&g_openCaches[i], 0, hash)) {
+			// Two loaders claiming the same file at once see each other here at worst, and both back off.
+			retro_atomic_thread_fence_seq_cst();
+			if (IsCacheOpen(hash, i)) {
+				retro_atomic_store_release_int(&g_openCaches[i], 0);
+				return -1;
+			}
+			return i;
+		}
+	}
+	return -1;
+}
 
 // Takes ownership of backend.
 DiskCachingFileLoader::DiskCachingFileLoader(FileLoader *backend)
@@ -53,12 +92,14 @@ DiskCachingFileLoader::DiskCachingFileLoader(FileLoader *backend)
 }
 
 void DiskCachingFileLoader::Prepare() {
-	std::call_once(preparedFlag_, [this]() {
-		filesize_ = ProxiedFileLoader::FileSize();
-		if (filesize_ > 0) {
-			InitCache();
-		}
-	});
+	if (prepared_) {
+		return;
+	}
+	prepared_ = true;
+	filesize_ = ProxiedFileLoader::FileSize();
+	if (filesize_ > 0) {
+		InitCache();
+	}
 }
 
 DiskCachingFileLoader::~DiskCachingFileLoader() {
@@ -117,42 +158,29 @@ size_t DiskCachingFileLoader::ReadAt(s64 absolutePos, size_t bytes, void *data, 
 	return readSize;
 }
 
-std::vector<Path> DiskCachingFileLoader::GetCachedPathsInUse() {
-	std::lock_guard<std::mutex> guard(cachesMutex_);
-
-	// This is on the file loader so that it can manage the caches_.
-	std::vector<Path> files;
-	files.reserve(caches_.size());
-
-	for (const auto &it : caches_) {
-		files.push_back(it.first);
-	}
-
-	return files;
+bool DiskCachingFileLoader::IsCacheFileInUse(const std::string &cacheFilename) {
+	return IsCacheOpen(CacheNameHash(cacheFilename), -1);
 }
 
 void DiskCachingFileLoader::InitCache() {
-	std::lock_guard<std::mutex> guard(cachesMutex_);
-
 	Path path = ProxiedFileLoader::GetPath();
-	auto &entry = caches_[path];
-	if (!entry) {
-		entry = new DiskCachingFileLoaderCache(path, filesize_);
+	claimSlot_ = ClaimCacheFile(CacheNameHash(DiskCachingFileLoaderCache::MakeCacheFilename(path)));
+	if (claimSlot_ < 0) {
+		// Another loader has this file's cache open; read straight through.
+		WARN_LOG(Log::Loader, "Disk cache for %s already in use, not caching", path.c_str());
+		return;
 	}
-
-	cache_ = entry;
-	cache_->AddRef();
+	cache_ = new DiskCachingFileLoaderCache(path, filesize_);
 }
 
 void DiskCachingFileLoader::ShutdownCache() {
-	std::lock_guard<std::mutex> guard(cachesMutex_);
-
-	if (cache_->Release()) {
-		// If it ran out of counts, delete it.
-		delete cache_;
-		caches_.erase(ProxiedFileLoader::GetPath());
-	}
+	// Flush and close the file before anyone else may open it.
+	delete cache_;
 	cache_ = nullptr;
+	if (claimSlot_ >= 0) {
+		retro_atomic_store_release_int(&g_openCaches[claimSlot_], 0);
+		claimSlot_ = -1;
+	}
 }
 
 DiskCachingFileLoaderCache::DiskCachingFileLoaderCache(const Path &path, u64 filesize)
@@ -220,8 +248,6 @@ void DiskCachingFileLoaderCache::ShutdownCache() {
 }
 
 size_t DiskCachingFileLoaderCache::ReadFromCache(s64 pos, size_t bytes, void *data) {
-	std::lock_guard<std::mutex> guard(lock_);
-
 	if (!f_) {
 		return 0;
 	}
@@ -255,8 +281,6 @@ size_t DiskCachingFileLoaderCache::ReadFromCache(s64 pos, size_t bytes, void *da
 }
 
 size_t DiskCachingFileLoaderCache::SaveIntoCache(FileLoader *backend, s64 pos, size_t bytes, void *data, FileLoader::Flags flags) {
-	std::lock_guard<std::mutex> guard(lock_);
-
 	if (!f_) {
 		// Just to keep things working.
 		return backend->ReadAt(pos, bytes, data, flags);
@@ -802,12 +826,6 @@ u32 DiskCachingFileLoaderCache::CountCachedFiles() {
 
 void DiskCachingFileLoaderCache::GarbageCollectCacheFiles(u64 goalBytes) {
 	// We attempt to free up at least enough files from the cache to get goalBytes more space.
-	const std::vector<Path> usedPaths = DiskCachingFileLoader::GetCachedPathsInUse();
-	std::set<std::string> used;
-	for (const Path &path : usedPaths) {
-		used.insert(MakeCacheFilename(path));
-	}
-
 	Path dir = cacheDir_;
 	if (dir.empty()) {
 		dir = GetSysDirectory(DIRECTORY_CACHE);
@@ -822,7 +840,7 @@ void DiskCachingFileLoaderCache::GarbageCollectCacheFiles(u64 goalBytes) {
 		if (file.isDirectory) {
 			continue;
 		}
-		if (used.find(file.name) != used.end()) {
+		if (DiskCachingFileLoader::IsCacheFileInUse(file.name)) {
 			// In use, must leave alone.
 			continue;
 		}

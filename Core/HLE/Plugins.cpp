@@ -16,7 +16,6 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <set>
-#include <mutex>
 
 #include "Common/Data/Format/IniFile.h"
 #include "Common/File/FileUtil.h"
@@ -34,7 +33,6 @@
 
 namespace HLEPlugins {
 
-std::mutex g_inputMutex;
 float PluginDataAxis[JOYSTICK_AXIS_MAX];
 std::map<int, uint8_t> PluginDataKeys;
 
@@ -214,7 +212,6 @@ bool Load(PSPModule *pluginWaitingModule, SceUID threadID) {
 		INFO_LOG(Log::System, "Loaded plugin: '%s'", plugin.name.c_str());
 	}
 
-	std::lock_guard<std::mutex> guard(g_inputMutex);
 	PluginDataKeys.clear();
 	return started;
 }
@@ -226,7 +223,6 @@ void Unload() {
 void Shutdown() {
 	prxPlugins.clear();
 	anyEnabled = false;
-	std::lock_guard<std::mutex> guard(g_inputMutex);
 	PluginDataKeys.clear();
 }
 
@@ -243,15 +239,7 @@ bool HasEnabled() {
 	return anyEnabled;
 }
 
-void SetKey(int key, uint8_t value) {
-	if (anyEnabled) {
-		std::lock_guard<std::mutex> guard(g_inputMutex);
-		PluginDataKeys[key] = value;
-	}
-}
-
 uint8_t GetKey(int key) {
-	std::lock_guard<std::mutex> guard(g_inputMutex);
 	return PluginDataKeys[key];
 }
 

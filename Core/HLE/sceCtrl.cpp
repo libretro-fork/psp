@@ -17,13 +17,14 @@
 
 #include <algorithm>
 #include <cmath>
-#include <mutex>
+#include <retro_atomic.h>
 #include <vector>
 
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/Math/math_util.h"
 #include "Core/CoreTiming.h"
+#include "Common/Thread/MpscQueue.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/HLE/FunctionWrappers.h"
@@ -89,7 +90,6 @@ static int ctrlIdleBack = -1;
 static int ctrlCycle = 0;
 
 static std::vector<SceUID> waitingThreads;
-static std::mutex ctrlMutex;
 
 static int ctrlTimer = -1;
 
@@ -109,12 +109,54 @@ static u32 emuRapidFireFrames = 0;
 static bool emuRapidFireToggle = true;
 static u32 emuRapidFireInterval = 5;
 
+// The host's input, set from any thread (the frontend, the debugger) and sampled by the emulation
+// thread into ctrlCurrent. Analog is packed: byte (stick * 2 + axis).
+static retro_atomic_int_t inputButtons{ 0 };
+static retro_atomic_int_t inputAnalog{ (int)0x80808080u };
+
+static void UpdateInputButtons(u32 bitsToSet, u32 bitsToClear) {
+	int cur = retro_atomic_load_relaxed_int(&inputButtons);
+	while (!retro_atomic_cas_int(&inputButtons, cur, (int)(((u32)cur & ~bitsToClear) | bitsToSet))) {
+		cur = retro_atomic_load_relaxed_int(&inputButtons);
+	}
+}
+
+static void SetInputAnalog(int stick, int axisMask, u8 x, u8 y) {
+	const int shift = stick * 16;
+	u32 mask = 0;
+	u32 bits = 0;
+	if (axisMask & 1) {
+		mask |= 0xFFu << shift;
+		bits |= (u32)x << shift;
+	}
+	if (axisMask & 2) {
+		mask |= 0xFFu << (shift + 8);
+		bits |= (u32)y << (shift + 8);
+	}
+	int cur = retro_atomic_load_relaxed_int(&inputAnalog);
+	while (!retro_atomic_cas_int(&inputAnalog, cur, (int)(((u32)cur & ~mask) | bits))) {
+		cur = retro_atomic_load_relaxed_int(&inputAnalog);
+	}
+}
+
+static u8 InputAnalogAxis(u32 packed, int stick, int axis) {
+	return (u8)(packed >> (stick * 16 + axis * 8));
+}
+
 // These buttons are not affected by rapid fire (neither is analog.)
 const u32 CTRL_EMU_RAPIDFIRE_MASK = CTRL_UP | CTRL_DOWN | CTRL_LEFT | CTRL_RIGHT;
 
+static void __CtrlTakeTimedPresses();
+
 static void __CtrlUpdateLatch()
 {
-	std::lock_guard<std::mutex> guard(ctrlMutex);
+	__CtrlTakeTimedPresses();
+	ctrlCurrent.buttons = (u32)retro_atomic_load_acquire_int(&inputButtons);
+	const u32 analog = (u32)retro_atomic_load_acquire_int(&inputAnalog);
+	for (int stick = 0; stick < 2; stick++) {
+		ctrlCurrent.analog[stick][CTRL_ANALOG_X] = InputAnalogAxis(analog, stick, CTRL_ANALOG_X);
+		ctrlCurrent.analog[stick][CTRL_ANALOG_Y] = InputAnalogAxis(analog, stick, CTRL_ANALOG_Y);
+	}
 	u64 t = CoreTiming::GetGlobalTimeUs();
 
 	u32 buttons = ctrlCurrent.buttons;
@@ -173,18 +215,12 @@ static int __CtrlResetLatch()
 
 u32 __CtrlPeekButtons()
 {
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-
-	return ctrlCurrent.buttons;
+	return (u32)retro_atomic_load_acquire_int(&inputButtons);
 }
 
 u32 __CtrlPeekButtonsVisual()
 {
-	u32 buttons;
-	{
-		std::lock_guard<std::mutex> guard(ctrlMutex);
-		buttons = ctrlCurrent.buttons;
-	}
+	u32 buttons = __CtrlPeekButtons();
 
 	if (emuRapidFire && emuRapidFireToggle)
 		buttons &= CTRL_EMU_RAPIDFIRE_MASK;
@@ -193,10 +229,9 @@ u32 __CtrlPeekButtonsVisual()
 
 void __CtrlPeekAnalog(int stick, float *x, float *y)
 {
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-
-	*x = (ctrlCurrent.analog[stick][CTRL_ANALOG_X] - 127.5f) / 127.5f;
-	*y = -(ctrlCurrent.analog[stick][CTRL_ANALOG_Y] - 127.5f) / 127.5f;
+	const u32 analog = (u32)retro_atomic_load_acquire_int(&inputAnalog);
+	*x = (InputAnalogAxis(analog, stick, CTRL_ANALOG_X) - 127.5f) / 127.5f;
+	*y = -(InputAnalogAxis(analog, stick, CTRL_ANALOG_Y) - 127.5f) / 127.5f;
 }
 
 
@@ -209,26 +244,33 @@ u32 __CtrlReadLatch()
 
 // Presses held for a number of vblank samples (the debugger's input.buttons.press). Counted down on
 // the emulator thread at each vblank, so how long a press lasts doesn't depend on how fast the
-// emulator runs. Guarded by ctrlMutex; not saved.
+// emulator runs. Requests arrive in an inbox; the list belongs to the emulation thread. Not saved.
 struct TimedPress {
 	int id;
 	u32 buttons;
 	int samplesLeft;
 };
 static std::vector<TimedPress> timedPresses;
-static int nextTimedPressId = 1;
+static MpscQueue<TimedPress> newTimedPresses;
+static retro_atomic_int_t nextTimedPressId{ 1 };
 
 int __CtrlPressFor(u32 buttons, int vblanks) {
-	std::lock_guard<std::mutex> guard(ctrlMutex);
 	buttons &= CTRL_MASK_USER;
-	ctrlCurrent.buttons |= buttons;
-	const int id = nextTimedPressId++;
-	timedPresses.push_back(TimedPress{ id, buttons, std::max(vblanks, 1) });
+	const int id = retro_atomic_fetch_add_int(&nextTimedPressId, 1);
+	newTimedPresses.Push(TimedPress{ id, buttons, std::max(vblanks, 1) });
 	return id;
 }
 
+// Emulation thread. Takes new presses, which hold their buttons from the next sample.
+static void __CtrlTakeTimedPresses() {
+	newTimedPresses.Drain([](TimedPress &&press) {
+		UpdateInputButtons(press.buttons, 0);
+		timedPresses.push_back(press);
+	});
+}
+
 bool __CtrlPressActive(int id) {
-	std::lock_guard<std::mutex> guard(ctrlMutex);
+	__CtrlTakeTimedPresses();
 	for (const TimedPress &press : timedPresses) {
 		if (press.id == id) {
 			return true;
@@ -239,7 +281,6 @@ bool __CtrlPressActive(int id) {
 
 // After the vblank's sample, so a press of N vblanks is seen by N samples.
 static void __CtrlUpdateTimedPresses() {
-	std::lock_guard<std::mutex> guard(ctrlMutex);
 	if (timedPresses.empty()) {
 		return;
 	}
@@ -256,7 +297,7 @@ static void __CtrlUpdateTimedPresses() {
 	for (const TimedPress &press : timedPresses) {
 		released &= ~press.buttons;
 	}
-	ctrlCurrent.buttons &= ~released;
+	UpdateInputButtons(0, released);
 }
 
 void __CtrlUpdateButtons(u32 bitsToSet, u32 bitsToClear)
@@ -264,9 +305,7 @@ void __CtrlUpdateButtons(u32 bitsToSet, u32 bitsToClear)
 	bitsToClear &= CTRL_MASK_USER;
 	bitsToSet &= CTRL_MASK_USER;
 
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-	// There's no atomic operation for this, so mutex it is.
-	ctrlCurrent.buttons = (ctrlCurrent.buttons & ~bitsToClear) | bitsToSet;
+	UpdateInputButtons(bitsToSet, bitsToClear);
 }
 
 void __CtrlSetAnalogXY(int stick, float x, float y)
@@ -275,22 +314,17 @@ void __CtrlSetAnalogXY(int stick, float x, float y)
 	// TODO: We might have too many negations of Y...
 	u8 scaledY = clamp_u8((int)ceilf(-y * 127.5f + 127.5f));
 
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-	ctrlCurrent.analog[stick][CTRL_ANALOG_X] = scaledX;
-	ctrlCurrent.analog[stick][CTRL_ANALOG_Y] = scaledY;
+	SetInputAnalog(stick, 3, scaledX, scaledY);
 }
 
-// not making XY to use these due to mutex guard usage
 void __CtrlSetAnalogX(int stick, float x) {
 	u8 scaledX = clamp_u8((int)ceilf(x * 127.5f + 127.5f));
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-	ctrlCurrent.analog[stick][CTRL_ANALOG_X] = scaledX;
+	SetInputAnalog(stick, 1, scaledX, 0);
 }
 
 void __CtrlSetAnalogY(int stick, float y) {
 	u8 scaledY = clamp_u8((int)ceilf(-y * 127.5f + 127.5f));
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-	ctrlCurrent.analog[stick][CTRL_ANALOG_Y] = scaledY;
+	SetInputAnalog(stick, 2, 0, scaledY);
 }
 
 void __CtrlSetRapidFire(bool state, int interval) {
@@ -417,8 +451,6 @@ void __CtrlInit() {
 	ctrlIdleBack = -1;
 	ctrlCycle = 0;
 
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-
 	ctrlBuf = 1;
 	ctrlBufRead = 0;
 	ctrlOldButtons = 0;
@@ -431,6 +463,8 @@ void __CtrlInit() {
 
 	memset(&ctrlCurrent, 0, sizeof(ctrlCurrent));
 	memset(ctrlCurrent.analog, CTRL_ANALOG_CENTER, sizeof(ctrlCurrent.analog));
+	retro_atomic_store_release_int(&inputButtons, 0);
+	retro_atomic_store_release_int(&inputAnalog, (int)0x80808080u);
 	analogEnabled = false;
 
 	for (u32 i = 0; i < NUM_CTRL_BUFFERS; i++)
@@ -439,8 +473,6 @@ void __CtrlInit() {
 
 void __CtrlDoState(PointerWrap &p)
 {
-	std::lock_guard<std::mutex> guard(ctrlMutex);
-
 	auto s = p.Section("sceCtrl", 1, 3);
 	if (!s)
 		return;
@@ -478,7 +510,7 @@ void __CtrlDoState(PointerWrap &p)
 void __CtrlShutdown()
 {
 	waitingThreads.clear();
-	std::lock_guard<std::mutex> guard(ctrlMutex);
+	newTimedPresses.Drain([](TimedPress &&) {});
 	timedPresses.clear();
 }
 

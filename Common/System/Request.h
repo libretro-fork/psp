@@ -1,8 +1,10 @@
 #pragma once
 
 #include <vector>
-#include <mutex>
-#include <map>
+#include <string>
+
+#include <retro_atomic.h>
+#include <queues/mpsc_stack.h>
 #include <functional>
 #include <string_view>
 
@@ -45,8 +47,7 @@ public:
 	void ProcessRequests();
 
 	RequesterToken GenerateRequesterToken() {
-		int token = tokenGen_++;
-		return token;
+		return retro_atomic_fetch_add_int(&tokenGen_, 1);
 	}
 
 	void ForgetRequestsWithToken(RequesterToken token);
@@ -54,34 +55,39 @@ public:
 	// Unclear if we need this...
 	void Clear();
 
+	RequestManager();
+
 private:
-	struct CallbackPair {
+	// One outstanding request with callbacks. state holds the request id while it waits,
+	// so a response claims its slot with one CAS on the id itself.
+	enum : int { SLOT_FREE = 0, SLOT_FILLING = -1, SLOT_POSTING = -2, SLOT_POSTED = -3 };
+	struct Slot;
+	struct SlotLink {
+		mpsc_stack_node_t node;  // first, so a node pointer is a link pointer
+		Slot *self;
+	};
+	struct Slot {
+		SlotLink link;
+		retro_atomic_int_t state;
+		retro_atomic_int_t forgotten;
 		RequestCallback callback;
 		RequestFailedCallback failedCallback;
 		RequesterToken token;
-	};
-
-	std::map<int, CallbackPair> callbackMap_;
-	std::mutex callbackMutex_;
-
-	struct PendingSuccess {
+		bool success;
 		std::string responseString;
 		int responseValue;
-		RequestCallback callback;
 	};
+	enum { MAX_PENDING = 64 };
 
-	struct PendingFailure {
-		RequestFailedCallback failedCallback;
-		int responseValue;  // can have error codes for example.
-	};
+	void Post(int requestId, bool success, std::string_view responseString, int responseValue);
+	void Release(Slot *slot);
+
+	Slot slots_[MAX_PENDING];
+	mpsc_stack_t responses_;  // posted slots, drained by ProcessRequests()
 
 	// Let's start at 10 to get a recognizably valid ID in logs.
-	int idCounter_ = 10;
-	std::vector<PendingSuccess> pendingSuccesses_;
-	std::vector<PendingFailure> pendingFailures_;
-	std::mutex responseMutex_;
-
-	RequesterToken tokenGen_ = 20000;
+	retro_atomic_int_t idCounter_;
+	retro_atomic_int_t tokenGen_;
 };
 
 const char *RequestTypeAsString(SystemRequestType type);

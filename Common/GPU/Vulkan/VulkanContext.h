@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,6 +19,8 @@
 #include "Common/GPU/Vulkan/VulkanAlloc.h"
 #include "Common/GPU/Vulkan/VulkanProfiler.h"
 #include "Common/GPU/Vulkan/VulkanPresentation.h"
+#include "Common/Thread/MpscQueue.h"
+#include "Common/Thread/ParkingLot.h"
 
 // Enable or disable a simple logging profiler for Vulkan.
 // Mostly useful for profiling texture uploads currently, but could be useful for
@@ -74,18 +75,10 @@ typedef std::function<void(VulkanContext *)> DeleteCallback;
 
 // This is a bit repetitive...
 //
-// Thread safety: The queueing functions are locked, because the global delete list gets written from
-// more than one thread. Most callers are on the main thread, but not all:
-//   * VulkanDescSetPool::Recreate, when a descriptor pool has to grow, runs from FlushDescSets on
-//     the render thread. This one really happens - some games go past the initial 1024 descriptors.
-//   * VulkanQueueRunner::ResizeReadbackBuffer runs from PerformReadback on the render thread. For
-//     blocking readbacks the main thread is parked in FlushSync so it can't collide, and the delayed
-//     ones never actually resize (the readback key contains the dimensions), but it's not worth
-//     relying on that staying true.
-// Meanwhile the main thread moves the global list into the current frame's list in EndFrame().
-//
-// PerformDeletes needs no lock of its own: it drains into a private local list (under Take's lock) and
-// destroys from that, so the destruction never touches a list another thread can reach.
+// Thread safety: the queueing functions can be called from any thread - the render thread queues
+// deletes too (VulkanDescSetPool::Recreate from FlushDescSets, ResizeReadbackBuffer). They push onto
+// a lock-free MPSC queue. Take() and PerformDeletes() belong to one thread, the main thread, which
+// moves the queued items into the per-kind vectors.
 class VulkanDeleteList {
 	struct BufferWithAlloc {
 		VkBuffer buffer;
@@ -96,51 +89,71 @@ class VulkanDeleteList {
 		VmaAllocation alloc;
 	};
 
-	struct Callback {
-		explicit Callback(void(*f)(VulkanContext *vulkan, void *userdata), void *u)
-			: func(f), userdata(u) {
-		}
-
-		void (*func)(VulkanContext *vulkan, void *userdata);
-		void *userdata;
+	enum class Kind : uint8_t {
+		CMD_POOL, DESC_POOL, SHADER_MODULE, BUFFER, BUFFER_VIEW, IMAGE_VIEW, DEVICE_MEMORY, SAMPLER,
+		PIPELINE, PIPELINE_CACHE, RENDER_PASS, FRAMEBUFFER, PIPELINE_LAYOUT, DESC_SET_LAYOUT, QUERY_POOL,
+		BUFFER_ALLOC, IMAGE_ALLOC, CALLBACK_FN,
 	};
+	struct Item {
+		Kind kind;
+		uint64_t handle;
+		VmaAllocation alloc;
+		DeleteCallback callback;
+	};
+
+	// Handles are pointers or 64-bit integers depending on the platform.
+	template <class H>
+	static uint64_t Bits(H h) {
+		uint64_t v = 0;
+		memcpy(&v, &h, sizeof(h));
+		return v;
+	}
+	template <class H>
+	static H FromBits(uint64_t v) {
+		H h;
+		memcpy(&h, &v, sizeof(h));
+		return h;
+	}
+	template <class H>
+	void Push(Kind kind, H &handle) {
+		_dbg_assert_(handle != VK_NULL_HANDLE);
+		pending_.Push(Item{ kind, Bits(handle), VK_NULL_HANDLE, nullptr });
+		handle = VK_NULL_HANDLE;
+	}
 
 public:
 	// NOTE: These all take reference handles so they can zero the input value.
-	void QueueDeleteCommandPool(VkCommandPool &pool) { _dbg_assert_(pool != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); cmdPools_.push_back(pool); pool = VK_NULL_HANDLE; }
-	void QueueDeleteDescriptorPool(VkDescriptorPool &pool) { _dbg_assert_(pool != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); descPools_.push_back(pool); pool = VK_NULL_HANDLE; }
-	void QueueDeleteShaderModule(VkShaderModule &module) { _dbg_assert_(module != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); modules_.push_back(module); module = VK_NULL_HANDLE; }
-	void QueueDeleteBuffer(VkBuffer &buffer) { _dbg_assert_(buffer != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); buffers_.push_back(buffer); buffer = VK_NULL_HANDLE; }
-	void QueueDeleteBufferView(VkBufferView &bufferView) { _dbg_assert_(bufferView != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); bufferViews_.push_back(bufferView); bufferView = VK_NULL_HANDLE; }
-	void QueueDeleteImageView(VkImageView &imageView) { _dbg_assert_(imageView != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); imageViews_.push_back(imageView); imageView = VK_NULL_HANDLE; }
-	void QueueDeleteDeviceMemory(VkDeviceMemory &deviceMemory) { _dbg_assert_(deviceMemory != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); deviceMemory_.push_back(deviceMemory); deviceMemory = VK_NULL_HANDLE; }
-	void QueueDeleteSampler(VkSampler &sampler) { _dbg_assert_(sampler != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); samplers_.push_back(sampler); sampler = VK_NULL_HANDLE; }
-	void QueueDeletePipeline(VkPipeline &pipeline) { _dbg_assert_(pipeline != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); pipelines_.push_back(pipeline); pipeline = VK_NULL_HANDLE; }
-	void QueueDeletePipelineCache(VkPipelineCache &pipelineCache) { _dbg_assert_(pipelineCache != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); pipelineCaches_.push_back(pipelineCache); pipelineCache = VK_NULL_HANDLE; }
-	void QueueDeleteRenderPass(VkRenderPass &renderPass) { _dbg_assert_(renderPass != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); renderPasses_.push_back(renderPass); renderPass = VK_NULL_HANDLE; }
-	void QueueDeleteFramebuffer(VkFramebuffer &framebuffer) { _dbg_assert_(framebuffer != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); framebuffers_.push_back(framebuffer); framebuffer = VK_NULL_HANDLE; }
-	void QueueDeletePipelineLayout(VkPipelineLayout &pipelineLayout) { _dbg_assert_(pipelineLayout != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); pipelineLayouts_.push_back(pipelineLayout); pipelineLayout = VK_NULL_HANDLE; }
-	void QueueDeleteDescriptorSetLayout(VkDescriptorSetLayout &descSetLayout) { _dbg_assert_(descSetLayout != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); descSetLayouts_.push_back(descSetLayout); descSetLayout = VK_NULL_HANDLE; }
-	void QueueDeleteQueryPool(VkQueryPool &queryPool) { _dbg_assert_(queryPool != VK_NULL_HANDLE); std::lock_guard<std::mutex> lock(mutex_); queryPools_.push_back(queryPool); queryPool = VK_NULL_HANDLE; }
-	void QueueCallback(DeleteCallback func) { std::lock_guard<std::mutex> lock(mutex_); callbacks_.push_back(func); }
+	void QueueDeleteCommandPool(VkCommandPool &pool) { Push(Kind::CMD_POOL, pool); }
+	void QueueDeleteDescriptorPool(VkDescriptorPool &pool) { Push(Kind::DESC_POOL, pool); }
+	void QueueDeleteShaderModule(VkShaderModule &module) { Push(Kind::SHADER_MODULE, module); }
+	void QueueDeleteBuffer(VkBuffer &buffer) { Push(Kind::BUFFER, buffer); }
+	void QueueDeleteBufferView(VkBufferView &bufferView) { Push(Kind::BUFFER_VIEW, bufferView); }
+	void QueueDeleteImageView(VkImageView &imageView) { Push(Kind::IMAGE_VIEW, imageView); }
+	void QueueDeleteDeviceMemory(VkDeviceMemory &deviceMemory) { Push(Kind::DEVICE_MEMORY, deviceMemory); }
+	void QueueDeleteSampler(VkSampler &sampler) { Push(Kind::SAMPLER, sampler); }
+	void QueueDeletePipeline(VkPipeline &pipeline) { Push(Kind::PIPELINE, pipeline); }
+	void QueueDeletePipelineCache(VkPipelineCache &pipelineCache) { Push(Kind::PIPELINE_CACHE, pipelineCache); }
+	void QueueDeleteRenderPass(VkRenderPass &renderPass) { Push(Kind::RENDER_PASS, renderPass); }
+	void QueueDeleteFramebuffer(VkFramebuffer &framebuffer) { Push(Kind::FRAMEBUFFER, framebuffer); }
+	void QueueDeletePipelineLayout(VkPipelineLayout &pipelineLayout) { Push(Kind::PIPELINE_LAYOUT, pipelineLayout); }
+	void QueueDeleteDescriptorSetLayout(VkDescriptorSetLayout &descSetLayout) { Push(Kind::DESC_SET_LAYOUT, descSetLayout); }
+	void QueueDeleteQueryPool(VkQueryPool &queryPool) { Push(Kind::QUERY_POOL, queryPool); }
+	void QueueCallback(DeleteCallback func) { pending_.Push(Item{ Kind::CALLBACK_FN, 0, VK_NULL_HANDLE, std::move(func) }); }
 
 	void QueueDeleteBufferAllocation(VkBuffer &buffer, VmaAllocation &alloc) {
 		_dbg_assert_(buffer != VK_NULL_HANDLE);
-		std::lock_guard<std::mutex> lock(mutex_);
-		buffersWithAllocs_.push_back(BufferWithAlloc{ buffer, alloc });
+		pending_.Push(Item{ Kind::BUFFER_ALLOC, Bits(buffer), alloc, nullptr });
 		buffer = VK_NULL_HANDLE;
 		alloc = VK_NULL_HANDLE;
 	}
 	void QueueDeleteImageAllocation(VkImage &image, VmaAllocation &alloc) {
 		_dbg_assert_(image != VK_NULL_HANDLE && alloc != VK_NULL_HANDLE);
-		std::lock_guard<std::mutex> lock(mutex_);
-		imagesWithAllocs_.push_back(ImageWithAlloc{ image, alloc });
+		pending_.Push(Item{ Kind::IMAGE_ALLOC, Bits(image), alloc, nullptr });
 		image = VK_NULL_HANDLE;
 		alloc = VK_NULL_HANDLE;
 	}
 
-	// Moves everything from del into this list. Only the source list is locked - the destination is
-	// either a frame's own list or a stack local, neither of which another thread can reach.
+	// Main thread. Moves everything from del into this list.
 	void Take(VulkanDeleteList &del);
 	void PerformDeletes(VulkanContext *vulkan, VmaAllocator allocator);
 
@@ -151,8 +164,10 @@ public:
 private:
 	// Does the actual destruction, on a list that's been drained out of the shared one. Returns the count.
 	int PerformDeletesInternal(VulkanContext *vulkan, VmaAllocator allocator);
+	// Main thread. Sorts the queued items into the vectors below.
+	void Collect();
 
-	std::mutex mutex_;
+	MpscQueue<Item> pending_;
 	std::vector<VkCommandPool> cmdPools_;
 	std::vector<VkDescriptorPool> descPools_;
 	std::vector<VkShaderModule> modules_;
@@ -616,9 +631,16 @@ enum class GLSLVariant {
 };
 
 // Compiled SPIR-V, keyed on the GLSL source, stage and variant, so that a shader compiled in an earlier
-// run doesn't have to go through glslang again. Thread safe.
+// run doesn't have to go through glslang again.
+//
+// Lookup and Insert are lock-free and can run on any thread. Lookups read a published table; inserts
+// queue up and join the table at the next Write or SaveIfDirty. The other calls are for one thread
+// at a time (the GPU thread that owns the cache).
 class SPIRVCache {
 public:
+	SPIRVCache();
+	~SPIRVCache();
+
 	bool Lookup(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source, std::vector<uint32_t> *spirv);
 	void Insert(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source, const std::vector<uint32_t> &spirv);
 	void Clear();
@@ -628,8 +650,8 @@ public:
 	bool Read(FILE *f);
 	bool Write(FILE *f, bool onlyUsed);
 
-	// For a cache with a file of its own, loaded on the first lookup. If it has grown to maxEntries,
-	// it's flushed on load and starts over.
+	// For a cache with a file of its own, loaded here. If it has grown to maxEntries, it's flushed
+	// and starts over.
 	void SetPath(const Path &path, int maxEntries);
 	void SaveIfDirty();
 
@@ -645,19 +667,30 @@ private:
 		size_t operator()(const Key &key) const { return key.hash; }
 	};
 	struct Entry {
+		Entry() { retro_atomic_int_init(&used, 0); }
 		std::vector<uint32_t> spirv;
-		bool used = false;
+		retro_atomic_int_t used;
 	};
-	static Key MakeKey(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source);
-	bool ReadLocked(FILE *f);
-	void LoadIfNeededLocked();
+	typedef std::unordered_map<Key, Entry *, KeyHash> Table;
+	struct PendingEntry {
+		Key key;
+		Entry *entry;
+	};
 
-	std::mutex mutex_;
-	std::unordered_map<Key, Entry, KeyHash> entries_;
+	static Key MakeKey(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source);
+	static void FreeTable(Table *table);
+	const Table *Current() const;
+	// Publishes table, waits out readers of the old one, then frees the entries in retired.
+	void Publish(Table *table, std::vector<Entry *> &retired);
+	// Moves pending inserts into the table.
+	void Merge();
+	bool ReadTable(FILE *f, Table *table);
+
+	retro_atomic_ptr_t table_;
+	ReaderGate gate_;
+	MpscQueue<PendingEntry> pending_;
+	retro_atomic_int_t dirty_;
 	Path path_;
-	int maxEntries_ = 0;
-	bool loaded_ = false;
-	bool dirty_ = false;
 };
 
 // For thin3d's and other fixed shaders. Game shaders use a cache of their own, stored with the rest of

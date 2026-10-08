@@ -19,7 +19,6 @@
 
 #include <cstdio>
 #include <cstdint>
-#include <mutex>
 
 #include "Common/Thread/Promise.h"
 #include "Common/Data/Collections/Hashmaps.h"

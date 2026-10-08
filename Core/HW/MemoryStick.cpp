@@ -16,8 +16,6 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include <atomic>
-#include <mutex>
 #include <string>
 #include <vector>
 #include <string_view>
@@ -44,12 +42,10 @@ static MemStickFatState memStickFatState;
 static bool memStickNeedsAssign = false;
 static uint64_t memStickInsertedAt = 0;
 static uint64_t memstickInitialFree = 0;
-// The savedata IO thread asks for the free space too, so the cached use is guarded, and a write
-// during the calculation leaves it stale rather than marked current.
-static std::mutex memstickCurrentUseLock;
+// The savedata use is cached until the next write.
 static uint64_t memstickCurrentUse = 0;
 static uint32_t memstickCurrentUseGeneration = 0;
-static std::atomic<uint32_t> memstickWriteGeneration{ 1 };
+static uint32_t memstickWriteGeneration = 1;
 
 enum FreeCalcStatus {
 	NONE,
@@ -132,17 +128,12 @@ u64 MemoryStick_FreeSpace(std::string gameID) {
 	const u64 memStickSize = flags.ReportSmallMemstick ? smallMemstickSize : (u64)g_Config.iMemStickSizeGB * 1024 * 1024 * 1024;
 
 	// Assume the memory stick is only used to store savedata, for the current game only.
-	u64 currentUse;
-	{
-		std::lock_guard<std::mutex> guard(memstickCurrentUseLock);
-		const uint32_t generation = memstickWriteGeneration;
-		if (memstickCurrentUseGeneration != generation) {
-			Path saveFolder = GetSysDirectory(DIRECTORY_SAVEDATA);
-			memstickCurrentUse = ComputeSizeOfSavedataForGame(saveFolder, gameID);
-			memstickCurrentUseGeneration = generation;
-		}
-		currentUse = memstickCurrentUse;
+	if (memstickCurrentUseGeneration != memstickWriteGeneration) {
+		Path saveFolder = GetSysDirectory(DIRECTORY_SAVEDATA);
+		memstickCurrentUse = ComputeSizeOfSavedataForGame(saveFolder, gameID);
+		memstickCurrentUseGeneration = memstickWriteGeneration;
 	}
+	const u64 currentUse = memstickCurrentUse;
 
 	u64 simulatedFreeSpace = 0;
 	if (currentUse < memStickSize) {

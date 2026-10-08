@@ -15,17 +15,18 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <algorithm>
-#include <atomic>
-#include <mutex>
-#include <condition_variable>
 #include <vector>
 
+#include <retro_atomic.h>
+
+#include "Common/Net/Cancel.h"
+#include "Common/Thread/MpscQueue.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/TimeUtil.h"
 #include "Core/Core.h"
 #include "Core/Debugger/WebSocket.h"
 #include "Core/Debugger/WebSocket/WebSocketUtils.h"
+#include "Core/HLE/sceCtrl.h"
 
 // This WebSocket (connected through the same port as disc sharing) allows API/debugger access to PPSSPP.
 // Currently, the only subprotocol "debugger.ppsspp.org" uses a simple JSON based interface.
@@ -93,91 +94,160 @@ static const std::vector<SubscriberInit> subscribers({
 	&WebSocketClientConfigInit,
 });
 
-// To handle webserver restart, keep track of how many running.
-static volatile int debuggersConnected = 0;
-static volatile bool stopRequested = false;
-static std::mutex stopLock;
-static std::condition_variable stopCond;
+// Threads: each connection runs on its own thread (see NewThreadExecutor). Handlers do all
+// emulator-state access inside Core_RunOnCPUThread(); anything the emulator produces on its own
+// reaches the connection through its DebuggerEventSink. See docs/DebuggerThreading.md.
 
-// There is deliberately no lock guarding debugger handlers against the core being started or torn
-// down under them: every handler either does its emulator-state access inside Core_RunOnCPUThread()
-// (so it's serialized with startup/shutdown, which also run on the CPU thread), or only touches
-// state that carries its own lock - the log ring buffer, ctrlMutex, GPUStepping's rendezvous.
-// The lock that used to be here had to be held across a whole handler, including the blocking wait
-// inside Core_RunOnCPUThread(), which deadlocked against the CPU thread taking it on STOPPING.
+// A log-only breakpoint in a hot loop can produce events far faster than a connection sends them.
+// Past this many queued, new ones are dropped; cpu.breakpoint.hit carries a sequence number so a
+// client can tell exactly how many it missed.
+static constexpr int MAX_PENDING_EVENTS = 4096;
 
-static void UpdateConnected(int delta) {
-	std::lock_guard<std::mutex> guard(stopLock);
-	debuggersConnected += delta;
-	stopCond.notify_all();
-}
-
-// Per-connection mailbox for events the CPU thread produces (cpu.stepping, game.start, ...).
-//
-// These used to be polled per connection from the WebSocket thread, which meant every connected
-// debugger was reading pc, the tick count, the UI state and the param SFO out from under the CPU
-// thread on every lap of its loop. Now the CPU thread notices the transition once, formats the
-// event, and drops it in here; the connection's own thread just drains and sends.
-// A log-only breakpoint in a hot loop can produce events far faster than a connection drains them
-// (the drain runs once per lap of ws->Process, so at best a few hundred times a second). Without a
-// cap the queue grows without bound and the connection falls further and further behind. Dropping
-// is the only sane answer; cpu.breakpoint.hit carries a sequence number so a client can tell
-// exactly how many it missed rather than silently believing it saw everything.
-static constexpr size_t MAX_PENDING_EVENTS = 4096;
-
-struct DebuggerEventSink {
-	std::mutex lock;
-	std::vector<std::pair<const char *, std::string>> pending;
-	// A debugger that connects while the CPU is already stopped still wants to hear about it.
-	bool needsSteppingPrime = true;
-
-	void Push(const char *category, std::string json) {
-		std::lock_guard<std::mutex> guard(lock);
-		if (pending.size() >= MAX_PENDING_EVENTS)
+// Per-connection mailbox. Events the CPU thread produces (cpu.stepping, game.start, input, ...) are
+// formatted there and posted here, so a connection's own thread never reads emulator state.
+// Refcounted: the connection and the CPU thread's g_sinks each hold one reference.
+class DebuggerEventSink final : public DebuggerMailbox {
+public:
+	void Post(const char *category, std::string json) override {
+		if (retro_atomic_fetch_add_int(&pendingCount_, 1) >= MAX_PENDING_EVENTS) {
+			retro_atomic_fetch_sub_int(&pendingCount_, 1);
 			return;
-		pending.emplace_back(category, std::move(json));
+		}
+		pending_.Push(PendingEvent{ category, std::move(json) });
+		Wake();
 	}
 
-	void Take(std::vector<std::pair<const char *, std::string>> *out) {
-		std::lock_guard<std::mutex> guard(lock);
-		out->swap(pending);
-		pending.clear();
+	void Wake() override {
+		// Only the first wake since the connection last looked touches the socket.
+		if (retro_atomic_exchange_int(&wakePending_, 1) == 0) {
+			wake_.Wake();
+		}
 	}
+
+	void WatchPress(int pressId, std::string json) override {
+		pressInbox_.Push(PendingPress{ pressId, std::move(json) });
+	}
+
+	// Connection thread: right after waking, before looking at anything that wakes it.
+	void Rearm() {
+		wake_.Drain();
+		retro_atomic_exchange_int(&wakePending_, 0);
+	}
+
+	// Connection thread.
+	template <class F>
+	void TakeEvents(F f) {
+		int n = 0;
+		pending_.Drain([&](PendingEvent &&ev) {
+			n++;
+			f(ev.category, ev.json);
+		});
+		if (n != 0) {
+			retro_atomic_fetch_sub_int(&pendingCount_, n);
+		}
+	}
+
+	intptr_t WakeFd() const { return wake_.Fd(); }
+
+	// CPU thread: posts the timed presses that are over.
+	void CheckPresses() {
+		pressInbox_.Drain([&](PendingPress &&press) {
+			presses_.push_back(std::move(press));
+		});
+		for (size_t i = 0; i < presses_.size(); ) {
+			if (!__CtrlPressActive(presses_[i].id)) {
+				Post(nullptr, std::move(presses_[i].json));
+				presses_.erase(presses_.begin() + i);
+			} else {
+				++i;
+			}
+		}
+	}
+
+	void Release() {
+		if (retro_atomic_fetch_sub_int(&refs_, 1) == 1) {
+			delete this;
+		}
+	}
+
+	// Set by the connection when it leaves.
+	retro_atomic_int_t closed{ 0 };
+
+	// CPU thread only. A debugger that connects while the CPU is already stopped still wants to
+	// hear about it.
+	bool needsSteppingPrime = true;
+	InputBroadcaster input;
+
+private:
+	struct PendingEvent {
+		const char *category;
+		std::string json;
+	};
+	struct PendingPress {
+		int id;
+		std::string json;
+	};
+
+	net::WakeSocket wake_;
+	retro_atomic_int_t wakePending_{ 0 };
+	retro_atomic_int_t refs_{ 2 };
+	MpscQueue<PendingEvent> pending_;
+	retro_atomic_int_t pendingCount_{ 0 };
+	MpscQueue<PendingPress> pressInbox_;
+	// CPU thread only.
+	std::vector<PendingPress> presses_;
 };
 
-static std::mutex g_sinkLock;
+// The CPU thread's list of live connections; new ones arrive through g_newSinks.
 static std::vector<DebuggerEventSink *> g_sinks;
-// Mirrors g_sinks.size() so the breakpoint path can check "is anyone listening" with one relaxed
-// load, instead of taking g_sinkLock on every single breakpoint hit.
-static std::atomic<int> g_sinkCount{ 0 };
+static MpscQueue<DebuggerEventSink *> g_newSinks;
+// Connected debuggers, so the breakpoint path can check "is anyone listening" with one load.
+static retro_atomic_int_t g_sinkCount{ 0 };
 
 static void RegisterSink(DebuggerEventSink *sink) {
-	std::lock_guard<std::mutex> guard(g_sinkLock);
-	g_sinks.push_back(sink);
-	g_sinkCount.store((int)g_sinks.size(), std::memory_order_relaxed);
+	retro_atomic_fetch_add_int(&g_sinkCount, 1);
+	g_newSinks.Push(sink);
 }
 
+// The connection's last use of sink.
 static void UnregisterSink(DebuggerEventSink *sink) {
-	std::lock_guard<std::mutex> guard(g_sinkLock);
-	g_sinks.erase(std::remove(g_sinks.begin(), g_sinks.end(), sink), g_sinks.end());
-	g_sinkCount.store((int)g_sinks.size(), std::memory_order_relaxed);
+	retro_atomic_store_release_int(&sink->closed, 1);
+	retro_atomic_fetch_sub_int(&g_sinkCount, 1);
+	sink->Release();
+	// A CPU thread stopped in the debugger may want to know nobody's left to resume it.
+	Core_WakeCPUThread();
+}
+
+// CPU thread.
+static void UpdateSinks() {
+	g_newSinks.Drain([](DebuggerEventSink *sink) {
+		g_sinks.push_back(sink);
+	});
+	for (size_t i = 0; i < g_sinks.size(); ) {
+		if (retro_atomic_load_acquire_int(&g_sinks[i]->closed)) {
+			g_sinks[i]->Release();
+			g_sinks.erase(g_sinks.begin() + i);
+		} else {
+			++i;
+		}
+	}
 }
 
 bool WebSocketDebuggerHasClients() {
-	return g_sinkCount.load(std::memory_order_relaxed) != 0;
+	return retro_atomic_load_relaxed_int(&g_sinkCount) != 0;
 }
 
 void WebSocketNotifyBreakpointHit(const BreakpointHit &hit) {
 	// Counts hits produced, not hits delivered, so a gap in what a client receives tells it how
-	// many were dropped by the cap in Push().
+	// many were dropped by the cap in Post().
 	static uint64_t g_hitSequence = 0;
 
-	std::lock_guard<std::mutex> guard(g_sinkLock);
+	if (!WebSocketDebuggerHasClients())
+		return;
+	UpdateSinks();
 	if (g_sinks.empty())
 		return;
 
-	// Formatted once here on the CPU thread, then shared - same rule as the other pushed events:
-	// a connection's own thread must never be the one reading emulator state.
 	JsonWriter j;
 	j.begin();
 	j.writeString("event", "cpu.breakpoint.hit");
@@ -187,7 +257,7 @@ void WebSocketNotifyBreakpointHit(const BreakpointHit &hit) {
 	const std::string json = j.str();
 
 	for (DebuggerEventSink *sink : g_sinks)
-		sink->Push("breakpoint", json);
+		sink->Post("breakpoint", json);
 }
 
 void WebSocketDebuggerTick() {
@@ -196,29 +266,37 @@ void WebSocketDebuggerTick() {
 	const std::string gameEvent = GameBroadcaster::PollChange();
 	const std::string steppingEvent = SteppingBroadcaster::PollChange();
 
-	std::lock_guard<std::mutex> guard(g_sinkLock);
+	UpdateSinks();
 	if (g_sinks.empty())
 		return;
 
 	std::string steppingPrime;
+	std::vector<std::string> inputEvents;
 	for (DebuggerEventSink *sink : g_sinks) {
+		sink->CheckPresses();
+
+		inputEvents.clear();
+		sink->input.Poll(&inputEvents);
+		for (std::string &ev : inputEvents)
+			sink->Post("input", std::move(ev));
+
 		if (sink->needsSteppingPrime) {
 			sink->needsSteppingPrime = false;
 			// Only format it if somebody actually needs it.
 			if (steppingPrime.empty())
 				steppingPrime = SteppingBroadcaster::CurrentState();
 			if (!steppingPrime.empty())
-				sink->Push("stepping", steppingPrime);
+				sink->Post("stepping", steppingPrime);
 			continue;
 		}
 		if (!gameEvent.empty())
-			sink->Push("game", gameEvent);
+			sink->Post("game", gameEvent);
 		if (!steppingEvent.empty())
-			sink->Push("stepping", steppingEvent);
+			sink->Post("stepping", steppingEvent);
 	}
 }
 
-void HandleDebuggerRequest(const http::ServerRequest &request) {
+void HandleDebuggerRequest(const http::ServerRequest &request, const net::CancelToken *stop) {
 	SetCurrentThreadName("WebSocketDebugger");
 
 	net::WebSocketServer *ws = net::WebSocketServer::CreateAsUpgrade(request, "debugger.ppsspp.org");
@@ -226,128 +304,111 @@ void HandleDebuggerRequest(const http::ServerRequest &request) {
 		return;
 	}
 
-	UpdateConnected(1);
-
 	WebSocketClientInfo client_info;
 	auto& disallowed_config = client_info.disallowed;
 	// Seed every broadcaster category. broadcast.config.set only accepts keys that already exist
 	// here (so a typo is rejected rather than silently ignored), and these otherwise only appear
 	// as a side effect of operator[] the first time each category actually broadcasts - which
 	// meant "game" and "stepping" were rejected as unsupported until one happened to fire, even
-	// though they're documented and valid. Keep in sync with the Broadcast calls further down.
+	// though they're documented and valid. Keep in sync with the categories posted to the sink.
 	for (const char *category : { "logger", "input", "game", "stepping", "breakpoint" })
 		disallowed_config[category] = false;
 
-	LogBroadcaster logger;
-	InputBroadcaster input;
+	DebuggerEventSink *sink = new DebuggerEventSink();
+	RegisterSink(sink);
 
-	DebuggerEventSink sink;
-	RegisterSink(&sink);
+	{
+		LogBroadcaster logger(sink);
 
-	DebuggerEventHandlerMap eventHandlers;
-	std::vector<DebuggerSubscriber *> subscriberData;
-	for (auto init : subscribers) {
-		subscriberData.push_back(init(eventHandlers));
-	}
-
-	// There's a tradeoff between responsiveness to incoming events, and polling for changes.
-	int highActivity = 0;
-	ws->SetTextHandler([&](const std::string &t) {
-		JsonReader reader(t.c_str(), t.size());
-		if (!reader.ok()) {
-			ws->Send(DebuggerErrorEvent("Bad message: invalid JSON", LogLevel::LERROR));
-			return;
-		}
-
-		const JsonGet root = reader.root();
-		const char *event = root ? root.getStringOr("event", nullptr) : nullptr;
-		if (!event) {
-			ws->Send(DebuggerErrorEvent("Bad message: no event property", LogLevel::LERROR, root));
-			return;
-		}
-
-		DEBUG_LOG(Log::Debugger, "WS: Handling '%s'", event);
-
-		DebuggerRequest req(event, ws, root, &client_info);
-		auto eventFunc = eventHandlers.find(event);
-		if (eventFunc != eventHandlers.end()) {
-			eventFunc->second(req);
-			if (!req.Finish()) {
-				// The handler arranged something that finishes later - a step, a resume, a stats
-				// feed - rather than answering now. A client that asked for it gets told so, so it
-				// can tell "accepted, wait for the event" from "dropped on the floor" without
-				// carrying a hardcoded list of the events that don't answer. Everyone else sees
-				// exactly what they saw before; see client.config.set for why it can't be the
-				// default.
-				if (client_info.acknowledgeDeferred)
-					ws->Send(DebuggerDeferredEvent(event, root));
-				// Poll more frequently for a second in case this triggers something.
-				highActivity = 1000;
+		DebuggerEventHandlerMap eventHandlers;
+		std::vector<DebuggerSubscriber *> subscriberData;
+		for (auto init : subscribers) {
+			DebuggerSubscriber *sub = init(eventHandlers);
+			if (sub) {
+				sub->mailbox = sink;
 			}
-		} else {
-			req.Fail("Bad message: unknown event");
+			subscriberData.push_back(sub);
 		}
-	});
 
-	ws->SetBinaryHandler([&](const std::vector<uint8_t> &d) {
-		ERROR_LOG(Log::Debugger, "Received binary WebSocket frame, not supported");
-		ws->Send(DebuggerErrorEvent("Bad message: binary WebSocket frames are not supported", LogLevel::LERROR));
-	});
+		ws->SetTextHandler([&](const std::string &t) {
+			JsonReader reader(t.c_str(), t.size());
+			if (!reader.ok()) {
+				ws->Send(DebuggerErrorEvent("Bad message: invalid JSON", LogLevel::LERROR));
+				return;
+			}
 
-	// Don't out-line the highActivity check, it needs to recompute on every lap.
-	constexpr float lowActivityPollTimeStep = 1.0f / 60.0f;
-	constexpr float highActivityPollTimeStep = 1.0f / 1000.0f;
-	while (ws->Process(highActivity ? highActivityPollTimeStep : lowActivityPollTimeStep)) {
-		// These send events that aren't just responses to requests
+			const JsonGet root = reader.root();
+			const char *event = root ? root.getStringOr("event", nullptr) : nullptr;
+			if (!event) {
+				ws->Send(DebuggerErrorEvent("Bad message: no event property", LogLevel::LERROR, root));
+				return;
+			}
 
-		// The client can explicitly ask not to be notified about some events
-		// so we check the client settings first
-		if (!disallowed_config["logger"])
-			logger.Broadcast(ws);
-		if (!disallowed_config["input"])
-			input.Broadcast(ws);
+			DEBUG_LOG(Log::Debugger, "WS: Handling '%s'", event);
 
-		// Whatever the CPU thread queued up for us since last lap.
-		std::vector<std::pair<const char *, std::string>> events;
-		sink.Take(&events);
-		for (const auto &ev : events) {
-			if (!disallowed_config[ev.first])
-				ws->Send(ev.second);
+			DebuggerRequest req(event, ws, root, &client_info);
+			auto eventFunc = eventHandlers.find(event);
+			if (eventFunc != eventHandlers.end()) {
+				eventFunc->second(req);
+				if (!req.Finish()) {
+					// The handler arranged something that finishes later - a step, a resume, a stats
+					// feed - rather than answering now. A client that asked for it gets told so, so it
+					// can tell "accepted, wait for the event" from "dropped on the floor" without
+					// carrying a hardcoded list of the events that don't answer. Everyone else sees
+					// exactly what they saw before; see client.config.set for why it can't be the
+					// default.
+					if (client_info.acknowledgeDeferred)
+						ws->Send(DebuggerDeferredEvent(event, root));
+				}
+			} else {
+				req.Fail("Bad message: unknown event");
+			}
+		});
+
+		ws->SetBinaryHandler([&](const std::vector<uint8_t> &d) {
+			ERROR_LOG(Log::Debugger, "Received binary WebSocket frame, not supported");
+			ws->Send(DebuggerErrorEvent("Bad message: binary WebSocket frames are not supported", LogLevel::LERROR));
+		});
+
+		// Blocks until the client sends something, the socket drains, the sink is woken, or the
+		// server stops. Once we've reacted to stop, its fd stays readable, so leave it out.
+		const intptr_t wakeFds[2] = { sink->WakeFd(), stop ? stop->WakeFd() : -1 };
+		bool stopping = false;
+		while (ws->Process(wakeFds, stopping ? 1 : 2)) {
+			sink->Rearm();
+
+			// The client can explicitly ask not to be notified about some events.
+			if (!disallowed_config["logger"]) {
+				logger.Broadcast(ws);
+			} else {
+				logger.Discard();
+			}
+
+			sink->TakeEvents([&](const char *category, const std::string &json) {
+				if (!category || !disallowed_config[category]) {
+					ws->Send(json);
+				}
+			});
+
+			for (size_t i = 0; i < subscribers.size(); ++i) {
+				if (subscriberData[i]) {
+					subscriberData[i]->Broadcast(ws);
+				}
+			}
+
+			if (!stopping && stop && stop->IsCancelled()) {
+				stopping = true;
+				ws->Close(net::WebSocketClose::GOING_AWAY);
+			}
 		}
 
 		for (size_t i = 0; i < subscribers.size(); ++i) {
-			if (subscriberData[i]) {
-				subscriberData[i]->Broadcast(ws);
-			}
-		}
-
-		if (stopRequested) {
-			ws->Close(net::WebSocketClose::GOING_AWAY);
-		}
-
-		if (highActivity > 0) {
-			highActivity--;
+			delete subscriberData[i];
 		}
 	}
 
-	UnregisterSink(&sink);
-
-	for (size_t i = 0; i < subscribers.size(); ++i) {
-		delete subscriberData[i];
-	}
+	UnregisterSink(sink);
 
 	delete ws;
 	request.In()->Discard();
-	UpdateConnected(-1);
-}
-
-void StopAllDebuggers() {
-	std::unique_lock<std::mutex> guard(stopLock);
-	while (debuggersConnected != 0) {
-		stopRequested = true;
-		stopCond.wait(guard);
-	}
-
-	// Reset it back for next time.
-	stopRequested = false;
 }

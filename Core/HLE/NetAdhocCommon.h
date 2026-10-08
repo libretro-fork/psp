@@ -20,8 +20,6 @@
 #include "CommonTypes.h"
 #include "Swap.h"
 
-#include <atomic>
-#include <mutex>
 
 extern u32 dummyThreadHackAddr;
 extern u32_le dummyThreadCode[3];
@@ -43,7 +41,6 @@ constexpr int adhocEventPollDelay = 100000; //100000; // Seems to be the same wi
 //1000000
 constexpr int adhocEventDelay = 2000000; //2000000 on real PSP ?
 
-extern std::recursive_mutex adhocEvtMtx;
 
 // TODO: this one is broken, perhaps delete it entirely?
 extern int IsAdhocctlInCB;
@@ -55,6 +52,6 @@ extern u32_le matchingThreadCode[3];
 extern bool g_adhocServerConnected;
 // Set by the friend finder when its attempt to connect and log in for the latest login request
 // failed, so a caller waiting on that login can stop waiting.
-extern std::atomic<bool> g_adhocServerLoginFailed;
+extern bool g_adhocServerLoginFailed;
 
 constexpr u32 defaultLastRecvDelta = 10000; //10000 usec worked well for games published by Falcom (ie. Ys vs Sora Kiseki, Vantage Master Portable)

@@ -16,11 +16,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include <atomic>
 #include <cstring>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
+
+#include <retro_atomic.h>
 
 #include "Common/Log.h"
 #include "Common/Serialize/Serializer.h"
@@ -35,6 +33,8 @@
 #include "Core/MIPS/MIPS.h"
 #include "Common/StringUtils.h"
 #include "Core/Debugger/SymbolMap.h"
+#include "Core/HW/Display.h"
+#include "Common/Thread/MpscQueue.h"
 
 class MemSlabMap {
 public:
@@ -95,28 +95,15 @@ struct PendingNotifyMem {
 	char tag[127];
 };
 
-// 160 KB.
-static constexpr size_t MAX_PENDING_NOTIFIES = 1024;
-static constexpr size_t MAX_PENDING_NOTIFIES_THREAD = 1000;
+// The slab maps belong to the emulation thread. Notifications come from any thread (the CPU
+// thread, software rasterizer and SAS workers), so they queue up in pendingNotifies, which the
+// emulation thread drains before every lookup, on each flip, and for savestates.
 static MemSlabMap allocMap;
 static MemSlabMap suballocMap;
 static MemSlabMap writeMap;
 static MemSlabMap textureMap;
-static std::vector<PendingNotifyMem> pendingNotifies;
-static std::atomic<uint32_t> pendingNotifyMinAddr1;
-static std::atomic<uint32_t> pendingNotifyMaxAddr1;
-static std::atomic<uint32_t> pendingNotifyMinAddr2;
-static std::atomic<uint32_t> pendingNotifyMaxAddr2;
-// To prevent deadlocks, acquire Read before Write if you're going to acquire both.
-static std::mutex pendingWriteMutex;
-static std::mutex pendingReadMutex;
-static int detailedOverride;
-
-static std::thread flushThread;
-static std::atomic<bool> flushThreadRunning;
-static std::atomic<bool> flushThreadPending;
-static std::mutex flushLock;
-static std::condition_variable flushCond;
+static MpscQueue<PendingNotifyMem> pendingNotifies;
+static retro_atomic_int_t detailedOverride{ 0 };
 
 MemSlabMap::MemSlabMap() {
 	Reset();
@@ -412,28 +399,14 @@ void MemSlabMap::FillHeads(Slab *slab) {
 
 size_t FormatMemWriteTagAtNoFlush(char *buf, size_t sz, const char *prefix, size_t prefixLen, uint32_t start, uint32_t size);
 
+// Emulation thread.
 void FlushPendingMemInfo() {
-	// This lock prevents us from another thread reading while we're busy flushing.
-	std::lock_guard<std::mutex> guard(pendingReadMutex);
-	std::vector<PendingNotifyMem> thisBatch;
-	{
-		std::lock_guard<std::mutex> guard(pendingWriteMutex);
-		thisBatch = std::move(pendingNotifies);
-		pendingNotifies.clear();
-		pendingNotifies.reserve(MAX_PENDING_NOTIFIES);
-
-		pendingNotifyMinAddr1 = 0xFFFFFFFF;
-		pendingNotifyMaxAddr1 = 0;
-		pendingNotifyMinAddr2 = 0xFFFFFFFF;
-		pendingNotifyMaxAddr2 = 0;
-	}
-
-	for (const auto &info : thisBatch) {
+	pendingNotifies.Drain([](PendingNotifyMem &&info) {
 		if (info.copySrc != 0) {
 			char tagData[128];
 			size_t tagSize = FormatMemWriteTagAtNoFlush(tagData, sizeof(tagData), info.tag, info.tagLen, info.copySrc, info.size);
 			writeMap.Mark(info.start, info.size, info.ticks, info.pc, true, tagData, tagSize);
-			continue;
+			return;
 		}
 
 		if (info.flags & MemBlockFlags::ALLOC) {
@@ -455,42 +428,23 @@ void FlushPendingMemInfo() {
 		if (info.flags & MemBlockFlags::WRITE) {
 			writeMap.Mark(info.start, info.size, info.ticks, info.pc, true, info.tag, info.tagLen);
 		}
+	});
+}
+
+static void FlushIfPending() {
+	if (!pendingNotifies.Empty()) {
+		FlushPendingMemInfo();
 	}
+}
+
+static void FlushOnFlip(void *) {
+	FlushPendingMemInfo();
 }
 
 static inline uint32_t NormalizeAddress(uint32_t addr) {
 	if ((addr & 0x3F000000) == 0x04000000)
 		return addr & 0x041FFFFF;
 	return addr & 0x3FFFFFFF;
-}
-
-static inline bool MergeRecentMemInfo(const PendingNotifyMem &info, size_t copyLength) {
-	if (pendingNotifies.size() < 4)
-		return false;
-
-	for (size_t i = 1; i <= 4; ++i) {
-		auto &prev = pendingNotifies[pendingNotifies.size() - i];
-		if (prev.copySrc != 0)
-			return false;
-
-		if (prev.flags != info.flags)
-			continue;
-
-		if (prev.start >= info.start + info.size || prev.start + prev.size <= info.start)
-			continue;
-
-		// This means there's overlap, but not a match, so we can't combine any.
-		if (prev.start != info.start || prev.size > info.size)
-			return false;
-
-		memcpy(prev.tag, info.tag, copyLength + 1);
-		prev.size = info.size;
-		prev.ticks = info.ticks;
-		prev.pc = info.pc;
-		return true;
-	}
-
-	return false;
 }
 
 void NotifyMemInfoPC(MemBlockFlags flags, uint32_t start, uint32_t size, uint32_t pc, const char *tagStr, size_t strLength) {
@@ -500,7 +454,6 @@ void NotifyMemInfoPC(MemBlockFlags flags, uint32_t start, uint32_t size, uint32_
 	// Clear the uncached and kernel bits.
 	start = NormalizeAddress(start);
 
-	bool needFlush = false;
 	// When the setting is off, we skip smaller info to keep things fast.
 	if (MemBlockInfoDetailed(size) && flags != MemBlockFlags::READ) {
 		PendingNotifyMem info{ flags, start, size };
@@ -515,27 +468,7 @@ void NotifyMemInfoPC(MemBlockFlags flags, uint32_t start, uint32_t size, uint32_
 		info.tag[copyLength] = 0;
 		info.tagLen = (uint8_t)copyLength;
 
-		std::lock_guard<std::mutex> guard(pendingWriteMutex);
-		// Sometimes we get duplicates, quickly check.
-		if (!MergeRecentMemInfo(info, copyLength)) {
-			if (start < 0x08000000) {
-				pendingNotifyMinAddr1 = std::min(pendingNotifyMinAddr1.load(), start);
-				pendingNotifyMaxAddr1 = std::max(pendingNotifyMaxAddr1.load(), start + size);
-			} else {
-				pendingNotifyMinAddr2 = std::min(pendingNotifyMinAddr2.load(), start);
-				pendingNotifyMaxAddr2 = std::max(pendingNotifyMaxAddr2.load(), start + size);
-			}
-			pendingNotifies.push_back(info);
-		}
-		needFlush = pendingNotifies.size() > MAX_PENDING_NOTIFIES_THREAD;
-	}
-
-	if (needFlush) {
-		{
-			std::lock_guard<std::mutex> guard(flushLock);
-			flushThreadPending = true;
-		}
-		flushCond.notify_one();
+		pendingNotifies.Push(info);
 	}
 
 	if (!(flags & MemBlockFlags::SKIP_MEMCHECK)) {
@@ -555,7 +488,6 @@ void NotifyMemInfoCopy(uint32_t destPtr, uint32_t srcPtr, uint32_t size, const c
 	if (size == 0)
 		return;
 
-	bool needsFlush = false;
 	if (g_breakpoints.HasMemChecks()) {
 		// This will cause a flush, but it's needed to trigger memchecks with proper data.
 		char tagData[128];
@@ -575,40 +507,14 @@ void NotifyMemInfoCopy(uint32_t destPtr, uint32_t srcPtr, uint32_t size, const c
 		info.tagLen = (uint8_t)std::min(sizeof(info.tag), prefixLen);
 		memcpy(info.tag, prefix, info.tagLen);
 
-		std::lock_guard<std::mutex> guard(pendingWriteMutex);
-		if (destPtr < 0x08000000) {
-			pendingNotifyMinAddr1 = std::min(pendingNotifyMinAddr1.load(), destPtr);
-			pendingNotifyMaxAddr1 = std::max(pendingNotifyMaxAddr1.load(), destPtr + size);
-		} else {
-			pendingNotifyMinAddr2 = std::min(pendingNotifyMinAddr2.load(), destPtr);
-			pendingNotifyMaxAddr2 = std::max(pendingNotifyMaxAddr2.load(), destPtr + size);
-		}
-		pendingNotifies.push_back(info);
-		needsFlush = pendingNotifies.size() > MAX_PENDING_NOTIFIES_THREAD;
-	}
-
-	if (needsFlush) {
-		{
-			std::lock_guard<std::mutex> guard(flushLock);
-			flushThreadPending = true;
-		}
-		flushCond.notify_one();
+		pendingNotifies.Push(info);
 	}
 }
 
 std::vector<MemBlockInfo> FindMemInfo(uint32_t start, uint32_t size) {
 	start = NormalizeAddress(start);
 
-	if (pendingNotifyMinAddr1 < start + size && pendingNotifyMaxAddr1 >= start)
-		FlushPendingMemInfo();
-	if (pendingNotifyMinAddr2 < start + size && pendingNotifyMaxAddr2 >= start)
-		FlushPendingMemInfo();
-
-	// pendingReadMutex doesn't just guard the pending queue - it's also what keeps
-	// the background flush thread's Mark() calls (which mutate the slab maps'
-	// linked lists via Split()/Merge()/delete) from running concurrently with the
-	// traversal below, which used to be completely unsynchronized against it.
-	std::lock_guard<std::mutex> guard(pendingReadMutex);
+	FlushIfPending();
 	std::vector<MemBlockInfo> results;
 	allocMap.Find(MemBlockFlags::ALLOC, start, size, results);
 	suballocMap.Find(MemBlockFlags::SUB_ALLOC, start, size, results);
@@ -620,13 +526,7 @@ std::vector<MemBlockInfo> FindMemInfo(uint32_t start, uint32_t size) {
 std::vector<MemBlockInfo> FindMemInfoByFlag(MemBlockFlags flags, uint32_t start, uint32_t size) {
 	start = NormalizeAddress(start);
 
-	if (pendingNotifyMinAddr1 < start + size && pendingNotifyMaxAddr1 >= start)
-		FlushPendingMemInfo();
-	if (pendingNotifyMinAddr2 < start + size && pendingNotifyMaxAddr2 >= start)
-		FlushPendingMemInfo();
-
-	// See the comment in FindMemInfo() above.
-	std::lock_guard<std::mutex> guard(pendingReadMutex);
+	FlushIfPending();
 	std::vector<MemBlockInfo> results;
 	if (flags & MemBlockFlags::ALLOC)
 		allocMap.Find(MemBlockFlags::ALLOC, start, size, results);
@@ -642,22 +542,10 @@ std::vector<MemBlockInfo> FindMemInfoByFlag(MemBlockFlags flags, uint32_t start,
 static const char *FindWriteTagByFlag(MemBlockFlags flags, uint32_t start, uint32_t size, size_t *tagLen, bool flush = true) {
 	start = NormalizeAddress(start);
 
-	// See the comment in FindMemInfo() above. Note: the returned tag pointer is
-	// only valid until the next Mark() call per FastFindWriteTag()'s own contract,
-	// so callers must treat it as transient exactly as they already do.
-	//
-	// flush=false means we're being called from FormatMemWriteTagAtNoFlush(), which
-	// is only ever called from within FlushPendingMemInfo() - which already holds
-	// pendingReadMutex for its whole body. Locking it again here would deadlock (or
-	// be undefined behavior, since it's a plain non-recursive std::mutex), so only
-	// take the lock ourselves when we might not already be holding it.
-	std::unique_lock<std::mutex> guard(pendingReadMutex, std::defer_lock);
+	// The returned tag pointer is only valid until the next Mark(). flush=false is for
+	// FormatMemWriteTagAtNoFlush(), called from inside FlushPendingMemInfo().
 	if (flush) {
-		if (pendingNotifyMinAddr1 < start + size && pendingNotifyMaxAddr1 >= start)
-			FlushPendingMemInfo();
-		if (pendingNotifyMinAddr2 < start + size && pendingNotifyMaxAddr2 >= start)
-			FlushPendingMemInfo();
-		guard.lock();
+		FlushIfPending();
 	}
 	if (flags & MemBlockFlags::ALLOC) {
 		const char *tag = allocMap.FastFindWriteTag(MemBlockFlags::ALLOC, start, size, tagLen);
@@ -711,52 +599,19 @@ size_t FormatMemWriteTagAtNoFlush(char *buf, size_t sz, const char *prefix, size
 	return snprintf(buf, sz, "%s%08x_size_%08x", prefix, start, size);
 }
 
-static void FlushMemInfoThread() {
-	SetCurrentThreadName("FlushMemInfo");
-
-	while (flushThreadRunning.load()) {
-		flushThreadPending = false;
-		FlushPendingMemInfo();
-
-		std::unique_lock<std::mutex> guard(flushLock);
-		flushCond.wait(guard, [] {
-			return flushThreadPending.load();
-		});
-	}
-}
-
+// Emulation thread, like the rest below.
 void MemBlockInfoInit() {
-	std::lock_guard<std::mutex> guard(pendingReadMutex);
-	std::lock_guard<std::mutex> guardW(pendingWriteMutex);
-	pendingNotifies.reserve(MAX_PENDING_NOTIFIES);
-	pendingNotifyMinAddr1 = 0xFFFFFFFF;
-	pendingNotifyMaxAddr1 = 0;
-	pendingNotifyMinAddr2 = 0xFFFFFFFF;
-	pendingNotifyMaxAddr2 = 0;
-
-	flushThreadRunning = true;
-	flushThreadPending = false;
-	flushThread = std::thread(&FlushMemInfoThread);
+	pendingNotifies.Drain([](PendingNotifyMem &&) {});
+	__DisplayListenFlip(&FlushOnFlip, nullptr);
 }
 
 void MemBlockInfoShutdown() {
-	{
-		std::lock_guard<std::mutex> guard(pendingReadMutex);
-		std::lock_guard<std::mutex> guardW(pendingWriteMutex);
-		allocMap.Reset();
-		suballocMap.Reset();
-		writeMap.Reset();
-		textureMap.Reset();
-		pendingNotifies.clear();
-	}
-
-	if (flushThreadRunning.load()) {
-		std::lock_guard<std::mutex> guard(flushLock);
-		flushThreadRunning = false;
-		flushThreadPending = true;
-	}
-	flushCond.notify_one();
-	flushThread.join();
+	__DisplayForgetFlip(&FlushOnFlip, nullptr);
+	allocMap.Reset();
+	suballocMap.Reset();
+	writeMap.Reset();
+	textureMap.Reset();
+	pendingNotifies.Drain([](PendingNotifyMem &&) {});
 }
 
 void MemBlockInfoDoState(PointerWrap &p) {
@@ -765,8 +620,6 @@ void MemBlockInfoDoState(PointerWrap &p) {
 		return;
 
 	FlushPendingMemInfo();
-	// See the comment in FindMemInfo() above.
-	std::lock_guard<std::mutex> guard(pendingReadMutex);
 	allocMap.DoState(p);
 	suballocMap.DoState(p);
 	writeMap.DoState(p);
@@ -775,15 +628,16 @@ void MemBlockInfoDoState(PointerWrap &p) {
 
 // Used by the debugger.
 void MemBlockOverrideDetailed() {
-	detailedOverride++;
+	retro_atomic_fetch_add_int(&detailedOverride, 1);
 }
 
 void MemBlockReleaseDetailed() {
-	detailedOverride--;
+	retro_atomic_fetch_sub_int(&detailedOverride, 1);
 }
 
+// Any thread.
 bool MemBlockInfoDetailed() {
-	return g_Config.bDebugMemInfoDetailed || detailedOverride != 0;
+	return g_Config.bDebugMemInfoDetailed || retro_atomic_load_relaxed_int(&detailedOverride) != 0;
 }
 
 void DescribeAddress(const MIPSDebugInterface *mips, u32 address, char *buffer, size_t bufferSize) {

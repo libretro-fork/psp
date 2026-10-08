@@ -53,6 +53,17 @@ const char *RequestTypeAsString(SystemRequestType type) {
 	}
 }
 
+RequestManager::RequestManager() {
+	for (Slot &slot : slots_) {
+		slot.link.self = &slot;
+		retro_atomic_int_init(&slot.state, SLOT_FREE);
+		retro_atomic_int_init(&slot.forgotten, 0);
+	}
+	mpsc_stack_init(&responses_);
+	retro_atomic_int_init(&idCounter_, 10);
+	retro_atomic_int_init(&tokenGen_, 20000);
+}
+
 bool RequestManager::MakeSystemRequest(SystemRequestType type, RequesterToken token, RequestCallback callback, RequestFailedCallback failedCallback, std::string_view param1, std::string_view param2, int64_t param3, int64_t param4) {
 	if (token == NO_REQUESTER_TOKEN) {
 		_dbg_assert_(!callback);
@@ -62,97 +73,113 @@ bool RequestManager::MakeSystemRequest(SystemRequestType type, RequesterToken to
 		_dbg_assert_(token != NO_REQUESTER_TOKEN);
 	}
 
-	int requestId = idCounter_++;
+	const int requestId = retro_atomic_fetch_add_int(&idCounter_, 1);
 
 	// NOTE: We need to register immediately, in order to support synchronous implementations.
+	Slot *slot = nullptr;
 	if (callback || failedCallback) {
-		std::lock_guard<std::mutex> guard(callbackMutex_);
-		callbackMap_[requestId] = { callback, failedCallback, token };
+		for (Slot &s : slots_) {
+			if (retro_atomic_cas_int(&s.state, SLOT_FREE, SLOT_FILLING)) {
+				slot = &s;
+				break;
+			}
+		}
+		if (!slot) {
+			ERROR_LOG(Log::System, "Too many outstanding system requests, dropping %s", RequestTypeAsString(type));
+			return false;
+		}
+		slot->callback = std::move(callback);
+		slot->failedCallback = std::move(failedCallback);
+		slot->token = token;
+		retro_atomic_store_relaxed_int(&slot->forgotten, 0);
+		retro_atomic_store_release_int(&slot->state, requestId);
 	}
 
 	VERBOSE_LOG(Log::System, "Making system request %s: id %d", RequestTypeAsString(type), requestId);
+
 	std::string p1(param1);
 	std::string p2(param2);
 	// TODO: Convert to string_view
 	if (!System_MakeRequest(type, requestId, p1, p2, param3, param4)) {
-		if (callback || failedCallback) {
-			std::lock_guard<std::mutex> guard(callbackMutex_);
-			callbackMap_.erase(requestId);
-		}
+		// Not handled. Unless it was answered on the spot, nobody will answer it now.
+		if (slot && retro_atomic_cas_int(&slot->state, requestId, SLOT_FILLING))
+			Release(slot);
 		return false;
 	}
 	return true;
 }
 
+void RequestManager::Release(Slot *slot) {
+	slot->callback = nullptr;
+	slot->failedCallback = nullptr;
+	slot->responseString.clear();
+	retro_atomic_store_release_int(&slot->state, SLOT_FREE);
+}
+
 void RequestManager::ForgetRequestsWithToken(RequesterToken token) {
-	for (auto &iter : callbackMap_) {
-		if (iter.second.token == token) {
+	for (Slot &slot : slots_) {
+		// Only filled slots have a token worth reading.
+		const int state = retro_atomic_load_acquire_int(&slot.state);
+		if ((state > 0 || state == SLOT_POSTED) && slot.token == token) {
 			INFO_LOG(Log::System, "Forgetting about requester with token %d", token);
-			iter.second.callback = nullptr;
-			iter.second.failedCallback = nullptr;
+			retro_atomic_store_release_int(&slot.forgotten, 1);
 		}
 	}
+}
+
+void RequestManager::Post(int requestId, bool success, std::string_view responseString, int responseValue) {
+	for (Slot &slot : slots_) {
+		if (retro_atomic_cas_int(&slot.state, requestId, SLOT_POSTING)) {
+			slot.success = success;
+			slot.responseString = responseString;
+			slot.responseValue = responseValue;
+			retro_atomic_store_release_int(&slot.state, SLOT_POSTED);
+			mpsc_stack_push(&responses_, &slot.link.node);
+			return;
+		}
+	}
+	ERROR_LOG(Log::System, "%s: Unexpected request ID %d", success ? "PostSystemSuccess" : "PostSystemFailure", requestId);
 }
 
 void RequestManager::PostSystemSuccess(int requestId, std::string_view responseString, int responseValue) {
-	std::lock_guard<std::mutex> guard(callbackMutex_);
-	auto iter = callbackMap_.find(requestId);
-	if (iter == callbackMap_.end()) {
-		ERROR_LOG(Log::System, "PostSystemSuccess: Unexpected request ID %d (responseString=%.*s)", requestId, (int)responseString.size(), responseString.data());
-		return;
-	}
-
-	std::lock_guard<std::mutex> responseGuard(responseMutex_);
-	PendingSuccess response;
-	response.callback = iter->second.callback;
-	response.responseString = responseString;
-	response.responseValue = responseValue;
-	pendingSuccesses_.push_back(response);
 	DEBUG_LOG(Log::System, "PostSystemSuccess: Request %d (%.*s, %d)", requestId, (int)responseString.size(), responseString.data(), responseValue);
-	callbackMap_.erase(iter);
+	Post(requestId, true, responseString, responseValue);
 }
 
 void RequestManager::PostSystemFailure(int requestId, int responseValue) {
-	std::lock_guard<std::mutex> guard(callbackMutex_);
-	auto iter = callbackMap_.find(requestId);
-	if (iter == callbackMap_.end()) {
-		ERROR_LOG(Log::System, "PostSystemFailure: Unexpected request ID %d", requestId);
-		return;
-	}
-
 	WARN_LOG(Log::System, "PostSystemFailure: Request %d failed", requestId);
-
-	std::lock_guard<std::mutex> responseGuard(responseMutex_);
-	PendingFailure response;
-	response.failedCallback = iter->second.failedCallback;
-	response.responseValue = responseValue;
-	pendingFailures_.push_back(response);
-	callbackMap_.erase(iter);
+	Post(requestId, false, "", responseValue);
 }
 
 void RequestManager::ProcessRequests() {
-	std::lock_guard<std::mutex> guard(responseMutex_);
-	for (auto &iter : pendingSuccesses_) {
-		if (iter.callback) {
-			iter.callback(iter.responseString.c_str(), iter.responseValue);
+	// Oldest response first.
+	mpsc_stack_node_t *node = mpsc_stack_reverse(mpsc_stack_drain(&responses_));
+	while (node) {
+		mpsc_stack_node_t *next = node->next;
+		Slot *slot = ((SlotLink *)node)->self;
+		if (!retro_atomic_load_acquire_int(&slot->forgotten)) {
+			if (slot->success) {
+				if (slot->callback)
+					slot->callback(slot->responseString.c_str(), slot->responseValue);
+			} else if (slot->failedCallback) {
+				slot->failedCallback(slot->responseValue);
+			}
 		}
+		Release(slot);
+		node = next;
 	}
-	pendingSuccesses_.clear();
-	for (auto &iter : pendingFailures_) {
-		if (iter.failedCallback) {
-			iter.failedCallback(iter.responseValue);
-		}
-	}
-	pendingFailures_.clear();
 }
 
 void RequestManager::Clear() {
-	std::lock_guard<std::mutex> guard(callbackMutex_);
-	std::lock_guard<std::mutex> responseGuard(responseMutex_);
-
-	pendingSuccesses_.clear();
-	pendingFailures_.clear();
-	callbackMap_.clear();
+	mpsc_stack_node_t *node = mpsc_stack_drain(&responses_);
+	while (node) {
+		mpsc_stack_node_t *next = node->next;
+		Release(((SlotLink *)node)->self);
+		node = next;
+	}
+	// Requests still waiting for an answer won't get one delivered.
+	for (Slot &slot : slots_)
+		retro_atomic_store_release_int(&slot.forgotten, 1);
 }
 
 void System_CreateGameShortcut(const Path &path, std::string_view title) {

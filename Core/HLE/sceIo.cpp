@@ -18,10 +18,8 @@
 #include <algorithm> // std::remove
 #include <cstdlib>
 #include <set>
-#include <thread>
 #include <memory>
 
-#include "Common/Thread/ThreadUtil.h"
 #include "Common/Profiler/Profiler.h"
 #include "Common/TimeUtil.h"
 
@@ -138,8 +136,8 @@ static MemStickState lastMemStickState;
 static MemStickFatState lastMemStickFatState;
 
 static AsyncIOManager ioManager;
-static bool ioManagerThreadEnabled = false;
-static std::thread ioManagerThread;
+// Between __IoInit and __IoShutdown, large reads and writes complete through ioManager.
+static bool ioManagerEnabled = false;
 
 // TODO: Is it better to just put all on the thread?
 // Let's try. (was 256)
@@ -584,23 +582,6 @@ static void __IoAsyncEndCallback(SceUID threadID, SceUID prevCallbackId) {
 	}
 }
 
-static void __IoManagerThread() {
-	SetCurrentThreadName("IO");
-	INFO_LOG(Log::sceIo, "Entering __IoManagerThread");
-	while (ioManagerThreadEnabled) {
-		ioManager.RunEventsUntil(CoreTiming::GetTicks(currentMIPS) + msToCycles(1000));
-	}
-	INFO_LOG(Log::sceIo, "Leaving __IoManagerThread");
-}
-
-static void __IoWakeManager(CoreLifecycle stage) {
-	// Ping the thread so that it knows to check coreState.
-	if (stage == CoreLifecycle::STOPPING) {
-		ioManagerThreadEnabled = false;
-		ioManager.FinishEventLoop();
-	}
-}
-
 void __IoVblank() {
 	// We update memstick status here just to avoid possible thread safety issues.
 	// It doesn't actually need to be on a vblank.
@@ -656,10 +637,7 @@ void __IoInit() {
 
 	memset(fds, 0, sizeof(fds));
 
-	ioManagerThreadEnabled = true;
-	ioManager.SetThreadEnabled(true);
-	Core_ListenLifecycle(&__IoWakeManager);
-	ioManagerThread = std::thread(&__IoManagerThread);
+	ioManagerEnabled = true;
 
 	__KernelRegisterWaitTypeFuncs(WAITTYPE_ASYNCIO, __IoAsyncBeginCallback, __IoAsyncEndCallback);
 
@@ -668,18 +646,9 @@ void __IoInit() {
 	lastMemStickFatState = MemoryStick_FatState();
 }
 
-void __IoWaitForAsync() {
-	ioManager.SyncThread();
-}
-
 void __IoShutdown() {
-	ioManagerThreadEnabled = false;
-	ioManager.SyncThread();
-	ioManager.FinishEventLoop();
-	if (ioManagerThread.joinable()) {
-		ioManagerThread.join();
-		ioManager.Shutdown();
-	}
+	ioManagerEnabled = false;
+	ioManager.Shutdown();
 
 	for (int i = 0; i < PSP_COUNT_FDS; ++i) {
 		asyncParams[i].op = IoAsyncOp::NONE;
@@ -1116,13 +1085,10 @@ static bool __IoRead(int &result, int id, u32 data_addr, int size, int &us) {
 				return true;
 			}
 
-			bool useThread = __KernelIsDispatchEnabled() && ioManagerThreadEnabled && size > IO_THREAD_MIN_DATA_SIZE;
+			bool useThread = __KernelIsDispatchEnabled() && ioManagerEnabled && size > IO_THREAD_MIN_DATA_SIZE;
 			if (useThread) {
 				// If there's a pending operation on this file, wait for it to finish and don't overwrite it.
 				useThread = !ioManager.HasOperation(f->handle);
-				if (!useThread) {
-					ioManager.SyncThread();
-				}
 			}
 			if (useThread) {
 				AsyncIOEvent ev = IO_EVENT_READ;
@@ -1275,13 +1241,10 @@ static bool __IoWrite(int &result, int id, u32 data_addr, int size, int &us) {
 			return true;
 		}
 
-		bool useThread = __KernelIsDispatchEnabled() && ioManagerThreadEnabled && size > IO_THREAD_MIN_DATA_SIZE;
+		bool useThread = __KernelIsDispatchEnabled() && ioManagerEnabled && size > IO_THREAD_MIN_DATA_SIZE;
 		if (useThread) {
 			// If there's a pending operation on this file, wait for it to finish and don't overwrite it.
 			useThread = !ioManager.HasOperation(f->handle);
-			if (!useThread) {
-				ioManager.SyncThread();
-			}
 		}
 		if (useThread) {
 			AsyncIOEvent ev = IO_EVENT_WRITE;
@@ -1433,11 +1396,6 @@ static u32 npdrmLseek(FileNode *f, s32 where, FileMove whence)
 static s64 __IoLseekDest(FileNode *f, s64 offset, int whence, FileMove &seek) {
 	PROFILE_THIS_SCOPE("io_rw");
 	seek = FILEMOVE_BEGIN;
-
-	// Let's make sure this isn't incorrect mid-operation.
-	if (ioManager.HasOperation(f->handle)) {
-		ioManager.SyncThread();
-	}
 
 	s64 newPos = 0;
 	switch (whence) {

@@ -36,7 +36,6 @@ void netAdhocValidateLoopMemory() {
 
 int netAdhocEnterGameModeTimeout = 15000000; // 15 sec as default timeout, to wait for all players to join
 
-std::recursive_mutex adhocEvtMtx;
 
 int IsAdhocctlInCB = 0;
 
@@ -45,4 +44,4 @@ u32 matchingThreadHackAddr = 0;
 u32_le matchingThreadCode[3];
 
 bool g_adhocServerConnected = false;
-std::atomic<bool> g_adhocServerLoginFailed(false);
+bool g_adhocServerLoginFailed = false;

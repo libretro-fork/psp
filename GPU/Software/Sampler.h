@@ -20,8 +20,8 @@
 #include "ppsspp_config.h"
 
 #include <unordered_map>
-#include <unordered_set>
-#include "Common/Data/Collections/Hashmaps.h"
+#include <retro_atomic.h>
+#include "Common/Thread/MpscQueue.h"
 #include "GPU/Math3D.h"
 #include "GPU/Software/FuncId.h"
 #include "GPU/Software/RasterizerRegCache.h"
@@ -64,12 +64,13 @@ public:
 	void Clear() override;
 	void Flush();
 	// Changes whenever the code space is cleared, which frees all previously returned functions.
-	static int ClearGeneration() { return clearGen_; }
+	static int ClearGeneration() { return retro_atomic_load_relaxed_int(&clearGen_); }
 
 	std::string DescribeCodePtr(const u8 *ptr) override;
 
 private:
 	void Compile(const SamplerID &id);
+	void CompileQueued();
 	NearestFunc GetByID(const SamplerID &id, size_t key, BinManager *binner);
 	FetchFunc CompileFetch(const SamplerID &id);
 	NearestFunc CompileNearest(const SamplerID &id);
@@ -147,10 +148,13 @@ private:
 		}
 	};
 
-	DenseHashMap<size_t, NearestFunc> cache_;
+	// Compiled and cleared on the GPU thread, looked up by any (see JitFuncTable).
+	Rasterizer::JitFuncTable<NearestFunc, 4096> cache_;
+	// GPU thread only.
 	std::unordered_map<SamplerID, const u8 *> addresses_;
-	std::unordered_set<SamplerID> compileQueue_;
-	static int clearGen_;
+	// Lookups that missed without a binner to flush, compiled on the GPU thread at the next chance.
+	MpscQueue<SamplerID> compileQueue_;
+	static retro_atomic_int_t clearGen_;
 	static thread_local LastCache lastFetch_;
 	static thread_local LastCache lastNearest_;
 	static thread_local LastCache lastLinear_;

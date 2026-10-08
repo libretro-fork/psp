@@ -1809,6 +1809,57 @@ void SaveFixedSPIRVCache() {
 	g_spirvCache.SaveIfDirty();
 }
 
+SPIRVCache::SPIRVCache() {
+	retro_atomic_ptr_init(&table_, (void *)new Table());
+	retro_atomic_int_init(&dirty_, 0);
+}
+
+SPIRVCache::~SPIRVCache() {
+	pending_.Drain([](PendingEntry &&p) {
+		delete p.entry;
+	});
+	FreeTable((Table *)retro_atomic_exchange_ptr(&table_, nullptr));
+}
+
+void SPIRVCache::FreeTable(Table *table) {
+	if (!table) {
+		return;
+	}
+	for (auto &iter : *table) {
+		delete iter.second;
+	}
+	delete table;
+}
+
+const SPIRVCache::Table *SPIRVCache::Current() const {
+	return (const Table *)retro_atomic_load_acquire_ptr(const_cast<retro_atomic_ptr_t *>(&table_));
+}
+
+void SPIRVCache::Publish(Table *table, std::vector<Entry *> &retired) {
+	Table *old = (Table *)retro_atomic_exchange_ptr(&table_, (void *)table);
+	gate_.Drain();
+	for (Entry *entry : retired) {
+		delete entry;
+	}
+	delete old;
+}
+
+void SPIRVCache::Merge() {
+	if (pending_.Empty()) {
+		return;
+	}
+	Table *table = new Table(*Current());
+	std::vector<Entry *> retired;
+	pending_.Drain([&](PendingEntry &&p) {
+		Entry *&slot = (*table)[p.key];
+		if (slot) {
+			retired.push_back(slot);
+		}
+		slot = p.entry;
+	});
+	Publish(table, retired);
+}
+
 SPIRVCache::Key SPIRVCache::MakeKey(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source) {
 	const size_t length = strlen(source);
 	const uint32_t seed = (SPIRV_CACHE_VERSION << 16) | ((uint32_t)stage << 4) | (uint32_t)variant;
@@ -1817,42 +1868,51 @@ SPIRVCache::Key SPIRVCache::MakeKey(VkShaderStageFlagBits stage, GLSLVariant var
 
 bool SPIRVCache::Lookup(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source, std::vector<uint32_t> *spirv) {
 	const Key key = MakeKey(stage, variant, source);
-	std::lock_guard<std::mutex> guard(mutex_);
-	LoadIfNeededLocked();
-	auto iter = entries_.find(key);
-	if (iter == entries_.end()) {
-		return false;
+	bool found = false;
+	gate_.Enter();
+	const Table *table = Current();
+	auto iter = table->find(key);
+	if (iter != table->end()) {
+		retro_atomic_store_relaxed_int(&iter->second->used, 1);
+		*spirv = iter->second->spirv;
+		found = true;
 	}
-	iter->second.used = true;
-	*spirv = iter->second.spirv;
-	return true;
+	gate_.Exit();
+	return found;
 }
 
 void SPIRVCache::Insert(VkShaderStageFlagBits stage, GLSLVariant variant, const char *source, const std::vector<uint32_t> &spirv) {
-	const Key key = MakeKey(stage, variant, source);
-	std::lock_guard<std::mutex> guard(mutex_);
-	Entry &entry = entries_[key];
-	entry.spirv = spirv;
-	entry.used = true;
-	dirty_ = true;
+	Entry *entry = new Entry();
+	entry->spirv = spirv;
+	retro_atomic_store_relaxed_int(&entry->used, 1);
+	pending_.Push(PendingEntry{ MakeKey(stage, variant, source), entry });
+	retro_atomic_store_release_int(&dirty_, 1);
 }
 
 void SPIRVCache::Clear() {
-	std::lock_guard<std::mutex> guard(mutex_);
-	entries_.clear();
-	dirty_ = false;
+	pending_.Drain([](PendingEntry &&p) {
+		delete p.entry;
+	});
+	std::vector<Entry *> retired;
+	for (auto &iter : *Current()) {
+		retired.push_back(iter.second);
+	}
+	Publish(new Table(), retired);
+	retro_atomic_store_release_int(&dirty_, 0);
 }
 
 bool SPIRVCache::Read(FILE *f) {
-	std::lock_guard<std::mutex> guard(mutex_);
-	return ReadLocked(f);
+	Clear();
+	Table *table = new Table();
+	const bool ok = ReadTable(f, table);
+	std::vector<Entry *> retired;
+	Publish(table, retired);
+	return ok;
 }
 
 // A bad entry is dropped rather than failing the whole read: it's only a cache, and the shader
 // gets compiled again. A truncated file keeps what came before the damage.
-bool SPIRVCache::ReadLocked(FILE *f) {
-	entries_.clear();
-	dirty_ = false;
+bool SPIRVCache::ReadTable(FILE *f, Table *table) {
 	SPIRVCacheHeader header{};
 	if (fread(&header, sizeof(header), 1, f) != 1 || header.magic != SPIRV_CACHE_MAGIC) {
 		return false;
@@ -1876,78 +1936,79 @@ bool SPIRVCache::ReadLocked(FILE *f) {
 			WARN_LOG(Log::G3D, "Bad entry in SPIR-V cache, skipping");
 			continue;
 		}
-		entries_[Key{ entryHeader.keyHash, entryHeader.keyLength }].spirv = std::move(spirv);
+		Entry *&slot = (*table)[Key{ entryHeader.keyHash, entryHeader.keyLength }];
+		if (!slot) {
+			slot = new Entry();
+		}
+		slot->spirv = std::move(spirv);
 	}
 	return true;
 }
 
 bool SPIRVCache::Write(FILE *f, bool onlyUsed) {
-	std::lock_guard<std::mutex> guard(mutex_);
+	Merge();
+	const Table *table = Current();
 	SPIRVCacheHeader header{ SPIRV_CACHE_MAGIC, SPIRV_CACHE_VERSION, 0 };
-	for (const auto &[key, entry] : entries_) {
-		if (entry.used || !onlyUsed) {
+	for (const auto &[key, entry] : *table) {
+		if (retro_atomic_load_relaxed_int(&entry->used) || !onlyUsed) {
 			header.count++;
 		}
 	}
 	bool ok = fwrite(&header, sizeof(header), 1, f) == 1;
-	for (const auto &[key, entry] : entries_) {
-		if (!ok) {
+	uint32_t written = 0;
+	for (const auto &[key, entry] : *table) {
+		if (!ok || written == header.count) {
 			break;
 		}
-		if (!entry.used && onlyUsed) {
+		if (!retro_atomic_load_relaxed_int(&entry->used) && onlyUsed) {
 			continue;
 		}
 		SPIRVCacheEntryHeader entryHeader{};
 		entryHeader.keyHash = key.hash;
 		entryHeader.keyLength = key.length;
-		entryHeader.numWords = (uint32_t)entry.spirv.size();
-		entryHeader.checksum = (uint32_t)XXH3_64bits(entry.spirv.data(), entry.spirv.size() * sizeof(uint32_t));
+		entryHeader.numWords = (uint32_t)entry->spirv.size();
+		entryHeader.checksum = (uint32_t)XXH3_64bits(entry->spirv.data(), entry->spirv.size() * sizeof(uint32_t));
 		ok = fwrite(&entryHeader, sizeof(entryHeader), 1, f) == 1 &&
-			fwrite(entry.spirv.data(), sizeof(uint32_t), entry.spirv.size(), f) == entry.spirv.size();
+			fwrite(entry->spirv.data(), sizeof(uint32_t), entry->spirv.size(), f) == entry->spirv.size();
+		written++;
 	}
 	if (ok) {
-		dirty_ = false;
+		retro_atomic_store_release_int(&dirty_, 0);
 	}
 	return ok;
 }
 
 void SPIRVCache::SetPath(const Path &path, int maxEntries) {
-	std::lock_guard<std::mutex> guard(mutex_);
 	path_ = path;
-	maxEntries_ = maxEntries;
-	loaded_ = false;
-}
-
-void SPIRVCache::LoadIfNeededLocked() {
-	if (loaded_ || path_.empty()) {
+	Clear();
+	if (path_.empty()) {
 		return;
 	}
-	loaded_ = true;
 	FILE *f = File::OpenCFile(path_, "rb");
-	if (f) {
-		ReadLocked(f);
-		fclose(f);
-		INFO_LOG(Log::G3D, "Loaded %d shaders from the SPIR-V cache", (int)entries_.size());
+	if (!f) {
+		return;
 	}
+	Table *table = new Table();
+	ReadTable(f, table);
+	fclose(f);
+	INFO_LOG(Log::G3D, "Loaded %d shaders from the SPIR-V cache", (int)table->size());
 	// Entries for shaders that have since changed pile up, so start over once there are a lot of
 	// them. A few shaders compiling once more doesn't matter.
-	if (maxEntries_ > 0 && (int)entries_.size() >= maxEntries_) {
-		INFO_LOG(Log::G3D, "SPIR-V cache has %d entries, flushing it", (int)entries_.size());
-		entries_.clear();
-		dirty_ = true;
+	if (maxEntries > 0 && (int)table->size() >= maxEntries) {
+		INFO_LOG(Log::G3D, "SPIR-V cache has %d entries, flushing it", (int)table->size());
+		FreeTable(table);
+		table = new Table();
+		retro_atomic_store_release_int(&dirty_, 1);
 	}
+	std::vector<Entry *> retired;
+	Publish(table, retired);
 }
 
 void SPIRVCache::SaveIfDirty() {
-	Path path;
-	{
-		std::lock_guard<std::mutex> guard(mutex_);
-		if (!dirty_ || path_.empty()) {
-			return;
-		}
-		path = path_;
+	if (!retro_atomic_load_acquire_int(&dirty_) || path_.empty()) {
+		return;
 	}
-	FILE *f = File::OpenCFile(path, "wb");
+	FILE *f = File::OpenCFile(path_, "wb");
 	if (!f) {
 		return;
 	}
@@ -2048,9 +2109,33 @@ void finalize_glslang() {
 // NOTE: Every vector in the class has to be listed both here and in PerformDeletes. If one is missing
 // from Take, the objects in it linger on the global list until device teardown instead of being deleted
 // a few frames later; if one is missing from PerformDeletes, they leak outright. Both are bugs.
+void VulkanDeleteList::Collect() {
+	pending_.Drain([this](Item &&item) {
+		switch (item.kind) {
+		case Kind::CMD_POOL: cmdPools_.push_back(FromBits<VkCommandPool>(item.handle)); break;
+		case Kind::DESC_POOL: descPools_.push_back(FromBits<VkDescriptorPool>(item.handle)); break;
+		case Kind::SHADER_MODULE: modules_.push_back(FromBits<VkShaderModule>(item.handle)); break;
+		case Kind::BUFFER: buffers_.push_back(FromBits<VkBuffer>(item.handle)); break;
+		case Kind::BUFFER_VIEW: bufferViews_.push_back(FromBits<VkBufferView>(item.handle)); break;
+		case Kind::IMAGE_VIEW: imageViews_.push_back(FromBits<VkImageView>(item.handle)); break;
+		case Kind::DEVICE_MEMORY: deviceMemory_.push_back(FromBits<VkDeviceMemory>(item.handle)); break;
+		case Kind::SAMPLER: samplers_.push_back(FromBits<VkSampler>(item.handle)); break;
+		case Kind::PIPELINE: pipelines_.push_back(FromBits<VkPipeline>(item.handle)); break;
+		case Kind::PIPELINE_CACHE: pipelineCaches_.push_back(FromBits<VkPipelineCache>(item.handle)); break;
+		case Kind::RENDER_PASS: renderPasses_.push_back(FromBits<VkRenderPass>(item.handle)); break;
+		case Kind::FRAMEBUFFER: framebuffers_.push_back(FromBits<VkFramebuffer>(item.handle)); break;
+		case Kind::PIPELINE_LAYOUT: pipelineLayouts_.push_back(FromBits<VkPipelineLayout>(item.handle)); break;
+		case Kind::DESC_SET_LAYOUT: descSetLayouts_.push_back(FromBits<VkDescriptorSetLayout>(item.handle)); break;
+		case Kind::QUERY_POOL: queryPools_.push_back(FromBits<VkQueryPool>(item.handle)); break;
+		case Kind::BUFFER_ALLOC: buffersWithAllocs_.push_back(BufferWithAlloc{ FromBits<VkBuffer>(item.handle), item.alloc }); break;
+		case Kind::IMAGE_ALLOC: imagesWithAllocs_.push_back(ImageWithAlloc{ FromBits<VkImage>(item.handle), item.alloc }); break;
+		case Kind::CALLBACK_FN: callbacks_.push_back(std::move(item.callback)); break;
+		}
+	});
+}
+
 void VulkanDeleteList::Take(VulkanDeleteList &del) {
-	// The render thread can be queueing deletes into del (the global list) while we do this.
-	std::lock_guard<std::mutex> lock(del.mutex_);
+	del.Collect();
 	_dbg_assert_(cmdPools_.empty());
 	_dbg_assert_(descPools_.empty());
 	_dbg_assert_(modules_.empty());

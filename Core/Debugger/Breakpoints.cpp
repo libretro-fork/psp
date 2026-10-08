@@ -15,8 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <atomic>
-
 #include "Common/System/System.h"
 #include "Common/Log.h"
 #include "Core/Core.h"
@@ -104,7 +102,7 @@ size_t BreakpointManager::FindBreakpoint(u32 addr) {
 }
 
 void BreakpointManager::UpdateAnyBreakPoints() {
-	anyBreakPoints_ = !breakPoints_.empty() || tempBreakPoint_.valid;
+	retro_atomic_store_relaxed_int(&anyBreakPoints_, (!breakPoints_.empty() || tempBreakPoint_.valid) ? 1 : 0);
 }
 
 size_t BreakpointManager::FindMemCheck(u32 start, u32 end) {
@@ -126,7 +124,7 @@ size_t BreakpointManager::FindRegBreakpoint(int reg) {
 }
 
 bool BreakpointManager::IsAddressBreakPoint(u32 addr) {
-	if (!anyBreakPoints_)
+	if (!HasBreakPoints())
 		return false;
 	size_t bp = FindBreakpoint(addr);
 	if (bp == INVALID_BREAKPOINT) {
@@ -136,7 +134,7 @@ bool BreakpointManager::IsAddressBreakPoint(u32 addr) {
 }
 
 bool BreakpointManager::IsAddressBreakPoint(u32 addr, bool* enabled) {
-	if (!anyBreakPoints_)
+	if (!HasBreakPoints())
 		return false;
 	size_t bp = FindBreakpoint(addr);
 	if (bp == INVALID_BREAKPOINT) {
@@ -149,7 +147,7 @@ bool BreakpointManager::IsAddressBreakPoint(u32 addr, bool* enabled) {
 }
 
 bool BreakpointManager::NeedsBreakCheckAt(u32 addr) {
-	if (!anyBreakPoints_)
+	if (!HasBreakPoints())
 		return false;
 	if (tempBreakPoint_.valid && tempBreakPoint_.addr == addr)
 		return true;
@@ -159,7 +157,7 @@ bool BreakpointManager::NeedsBreakCheckAt(u32 addr) {
 
 bool BreakpointManager::RangeContainsBreakPoint(u32 addr, u32 size)
 {
-	if (!anyBreakPoints_)
+	if (!HasBreakPoints())
 		return false;
 	const u32 end = addr + size;
 	if (tempBreakPoint_.valid && tempBreakPoint_.addr >= addr && tempBreakPoint_.addr < end)
@@ -300,7 +298,7 @@ bool BreakpointManager::ChangeBreakPointAddress(u32 oldAddr, u32 newAddr) {
 
 // This is not actually called, currently.
 void BreakpointManager::ClearAllBreakPoints() {
-	if (!anyBreakPoints_)
+	if (!HasBreakPoints())
 		return;
 	if (!breakPoints_.empty()) {
 		for (const auto &bp : breakPoints_) {
@@ -353,7 +351,7 @@ void BreakpointManager::ChangeBreakPointLogFormat(u32 addr, const std::string &f
 // and must still let the step complete. Whichever of them pauses, Core_Break() drops the temporary
 // breakpoint, so a step that gets interrupted by something else doesn't leave one armed behind it.
 BreakAction BreakpointManager::ExecBreakPoint(u32 addr) {
-	if (!anyBreakPoints_)
+	if (!HasBreakPoints())
 		return BREAK_ACTION_NONE;
 
 	BreakAction result = BREAK_ACTION_NONE;
@@ -434,7 +432,7 @@ int BreakpointManager::AddMemCheck(u32 start, u32 end, MemCheckCondition cond, B
 		check.action = action;
 
 		memChecks_.push_back(check);
-		bool hadAny = anyMemChecks_.exchange(true);
+		bool hadAny = retro_atomic_exchange_int(&anyMemChecks_, 1) != 0;
 		if (!hadAny) {
 			MemBlockOverrideDetailed();
 		}
@@ -446,7 +444,7 @@ int BreakpointManager::AddMemCheck(u32 start, u32 end, MemCheckCondition cond, B
 		// Update with additional cond and action bits. Not sure if we should OR or override?
 		memChecks_[mc].cond = (MemCheckCondition)(memChecks_[mc].cond | cond);
 		memChecks_[mc].action = memChecks_[mc].action | action;
-		bool hadAny = anyMemChecks_.exchange(true);
+		bool hadAny = retro_atomic_exchange_int(&anyMemChecks_, 1) != 0;
 		if (!hadAny) {
 			MemBlockOverrideDetailed();
 		}
@@ -463,7 +461,7 @@ void BreakpointManager::RemoveMemCheck(u32 start, u32 end)
 	if (mc != INVALID_MEMCHECK)
 	{
 		memChecks_.erase(memChecks_.begin() + mc);
-		bool hadAny = anyMemChecks_.exchange(!memChecks_.empty());
+		bool hadAny = retro_atomic_exchange_int(&anyMemChecks_, memChecks_.empty() ? 0 : 1) != 0;
 		if (hadAny)
 			MemBlockReleaseDetailed();
 		updateMemChecks_ = true;
@@ -490,7 +488,7 @@ void BreakpointManager::ClearAllMemChecks()
 	if (!memChecks_.empty())
 	{
 		memChecks_.clear();
-		bool hadAny = anyMemChecks_.exchange(false);
+		bool hadAny = retro_atomic_exchange_int(&anyMemChecks_, 0) != 0;
 		if (hadAny)
 			MemBlockReleaseDetailed();
 		updateMemChecks_ = true;
@@ -577,7 +575,7 @@ MemCheck *BreakpointManager::FindMemCheckInRange(u32 address, int size) {
 
 BreakAction BreakpointManager::ExecMemCheck(u32 address, bool write, int size, u32 pc, const char *reason)
 {
-	if (!anyMemChecks_)
+	if (!HasMemChecks())
 		return BREAK_ACTION_NONE;
 	MemCheck *check = FindMemCheckInRange(address, size);
 	if (check) {
@@ -631,7 +629,7 @@ void BreakpointManager::RecomputeRegBreakpointMask() {
 		if (bp.result != BREAK_ACTION_NONE)
 			mask |= 1u << bp.reg;
 	}
-	regBreakpointMask_ = mask;
+	retro_atomic_store_relaxed_int(&regBreakpointMask_, (int)mask);
 }
 
 int BreakpointManager::AddRegBreakpoint(int reg) {
@@ -684,7 +682,7 @@ void BreakpointManager::ChangeRegBreakpoint(int reg, BreakAction result) {
 void BreakpointManager::ClearAllRegBreakpoints() {
 	if (!regBreakpoints_.empty()) {
 		regBreakpoints_.clear();
-		regBreakpointMask_ = 0;
+		retro_atomic_store_relaxed_int(&regBreakpointMask_, 0);
 	}
 }
 
@@ -718,7 +716,7 @@ void BreakpointManager::ChangeRegBreakpointLogFormat(int reg, const std::string 
 }
 
 bool BreakpointManager::IsRegBreakpoint(int reg) {
-	return (regBreakpointMask_ & (1u << reg)) != 0;
+	return (GetRegBreakpointMask() & (1u << reg)) != 0;
 }
 
 bool BreakpointManager::GetRegBreakpoint(int reg, RegBreakpoint *check) {
@@ -739,7 +737,7 @@ BreakAction BreakpointManager::ExecRegBreakpoint(int reg, u32 pc) {
 	// the whole point of exposing it - a single shift+and in the hot interpreter loop, skipping
 	// a function call entirely in the overwhelmingly common no-breakpoint case), but check again
 	// here too since this is also reachable directly.
-	if ((regBreakpointMask_ & (1u << reg)) == 0)
+	if ((GetRegBreakpointMask() & (1u << reg)) == 0)
 		return BREAK_ACTION_NONE;
 	size_t bp = FindRegBreakpoint(reg);
 	if (bp == INVALID_REG_BREAKPOINT)
@@ -878,7 +876,7 @@ std::vector<BreakPoint> BreakpointManager::GetBreakpoints() {
 }
 
 void BreakpointManager::Frame() {
-	if (anyMemChecks_ && updateMemChecks_) {
+	if (HasMemChecks() && updateMemChecks_) {
 		UpdateCachedMemCheckRanges();
 		updateMemChecks_ = false;
 	}

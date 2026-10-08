@@ -17,21 +17,21 @@
 
 #include "ppsspp_config.h"
 
-#include <atomic>
 #include <cstdint>
 #include <deque>
-#include <mutex>
-#include <memory>
 #include <set>
-#include <thread>
 #include <vector>
-#include <condition_variable>
+
+#include <retro_atomic.h>
 
 #include "Common/System/System.h"
 #include "Common/Profiler/Profiler.h"
 
 #include "Common/GPU/GraphicsContext.h"
 #include "Common/Log.h"
+#include "Common/Thread/MpscQueue.h"
+#include "Common/Thread/ParkingLot.h"
+#include "Common/Thread/Thread.h"
 #include "Common/StringUtils.h"
 #include "Core/Core.h"
 #include "Core/Config.h"
@@ -53,8 +53,7 @@
 #include "GPU/GPU.h"
 #include "GPU/GPUCommon.h"
 
-// Step command to execute next
-static std::mutex g_stepMutex;
+// The stepping state below belongs to the CPU thread; other threads go through Core_RunOnCPUThread().
 
 struct CPUStepCommand {
 	CPUStepType type;
@@ -96,79 +95,75 @@ static constexpr size_t MAX_PENDING_STEPS = 8;
 // Task queue for Core_RunOnCPUThread(), see Core.h for the rationale. Drained from Core_RunLoopUntil()
 // below, so at least once per call to it (i.e. about once per host frame) even while the CPU is fully
 // running, and continuously (in a tight spin) while it's stepping/paused.
+// Lives on the caller's stack: the caller waits until the CPU thread is done with it.
 struct CPUThreadTask {
-	std::function<void()> func;
-	bool done = false;
+	std::function<void()> *func;
+	retro_atomic_int_t done;
 };
-static std::mutex g_cpuQueueMutex;
-static std::condition_variable g_cpuQueueCond;
-static std::vector<std::shared_ptr<CPUThreadTask>> g_cpuQueue;
-static std::once_flag g_cpuThreadIdOnce;
-static std::thread::id g_cpuThreadId;
-// Published via release/acquire around g_cpuThreadIdOnce, so it's safe to check from other threads
-// without taking g_cpuQueueMutex - g_cpuThreadId itself never changes once this becomes true.
-static std::atomic<bool> g_cpuThreadIdValid{ false };
+static MpscQueue<CPUThreadTask *> g_cpuQueue;
+// Bumped after each push to g_cpuQueue, and by Core_WakeCPUThread().
+static EventCounter g_cpuWork;
+// Whichever thread last drained the queue. 0 until the CPU loop has run.
+static retro_atomic_size_t g_cpuThreadId;
 
 void Core_RunOnCPUThread(std::function<void()> func) {
-	if (g_cpuThreadIdValid.load(std::memory_order_acquire) && std::this_thread::get_id() == g_cpuThreadId) {
-		// Already on the CPU thread (or called before it's ever run) - just do it now, avoids deadlock.
+	const size_t cpuThread = retro_atomic_load_acquire_size(&g_cpuThreadId);
+	if (cpuThread != 0 && cpuThread == (size_t)CurrentThreadId()) {
+		// Already on the CPU thread - just do it now, avoids deadlock.
 		func();
 		return;
 	}
 
-	auto task = std::make_shared<CPUThreadTask>();
-	task->func = std::move(func);
+	CPUThreadTask task;
+	task.func = &func;
+	retro_atomic_int_init(&task.done, 0);
+	g_cpuQueue.Push(&task);
+	g_cpuWork.Notify();
+	ParkingLotWait(&task, [&] { return retro_atomic_load_acquire_int(&task.done) != 0; });
+}
 
-	std::unique_lock<std::mutex> guard(g_cpuQueueMutex);
-	g_cpuQueue.push_back(task);
-	g_cpuQueueCond.wait(guard, [&] { return task->done; });
+int Core_CPUWorkSeen() {
+	return g_cpuWork.Seen();
+}
+
+void Core_WaitForCPUWork(int seen) {
+	g_cpuWork.Wait(seen);
+}
+
+void Core_WakeCPUThread() {
+	g_cpuWork.Notify();
 }
 
 // Called from the CPU thread only.
 void Core_ProcessCPUQueue() {
-	std::call_once(g_cpuThreadIdOnce, [] {
-		g_cpuThreadId = std::this_thread::get_id();
-		g_cpuThreadIdValid.store(true, std::memory_order_release);
-	});
+	retro_atomic_store_release_size(&g_cpuThreadId, (size_t)CurrentThreadId());
 
 	// Piggybacking on the one function that's reliably called on the CPU thread both in game
 	// (Core_RunLoopUntil) and at the menu (NativeFrame) - see WebSocketDebuggerTick().
 	WebSocketDebuggerTick();
 
-	std::vector<std::shared_ptr<CPUThreadTask>> tasks;
-	{
-		std::lock_guard<std::mutex> guard(g_cpuQueueMutex);
-		if (g_cpuQueue.empty())
-			return;
-		tasks = std::move(g_cpuQueue);
-		g_cpuQueue.clear();
-	}
-
-	for (auto &task : tasks)
-		task->func();
-
-	{
-		std::lock_guard<std::mutex> guard(g_cpuQueueMutex);
-		for (auto &task : tasks)
-			task->done = true;
-	}
-	g_cpuQueueCond.notify_all();
+	g_cpuQueue.Drain([](CPUThreadTask *task) {
+		(*task->func)();
+		// The waiter may return and free the task as soon as it sees this.
+		retro_atomic_store_release_int(&task->done, 1);
+		ParkingLotNotify(task);
+	});
 }
 
 static int steppingCounter = 0;
 static std::set<CoreLifecycleFunc> lifecycleFuncs;
 
-// This can be read and written from ANYWHERE.
-volatile CoreState coreState = CORE_POWERDOWN;
+// Written on the CPU thread; see SharedCoreState.
+SharedCoreState coreState{ { (int)CORE_POWERDOWN } };
 CoreState preGeCoreState = CORE_POWERDOWN;
 // If true, core state has been changed, but JIT has probably not noticed yet.
-volatile bool coreStatePending = false;
+retro_atomic_int_t coreStatePending{ 0 };
 
 static bool powerSaving = false;
 static bool g_breakAfterFrame = false;
 static BreakReason g_breakReason = BreakReason::None;
-// Detail about the breakpoint that caused the current break, if it was one. Guarded by g_stepMutex
-// alongside g_cpuStepCommand, which is what it belongs to.
+// Detail about the breakpoint that caused the current break, if it was one. Belongs with
+// g_cpuStepCommand.
 static BreakpointHit g_breakHit;
 
 static MIPSExceptionInfo g_exceptionInfo;
@@ -268,7 +263,7 @@ void Core_NotifyLifecycle(CoreLifecycle stage) {
 	if (stage == CoreLifecycle::STARTING) {
 		Core_ResetException();
 		// A step queued against the game that just went away must not run against the new one.
-		std::lock_guard<std::mutex> guard(g_stepMutex);
+		// Boot runs while the CPU loop doesn't, so this doesn't race it.
 		g_cpuStepQueue.clear();
 		g_cpuStepCommand.clear();
 	}
@@ -286,7 +281,7 @@ void Core_Stop() {
 void Core_UpdateState(CoreState newState) {
 	const CoreState state = coreState;
 	if ((state == CORE_RUNNING_CPU || state == CORE_NEXTFRAME) && newState != CORE_RUNNING_CPU)
-		coreStatePending = true;
+		retro_atomic_store_release_int(&coreStatePending, 1);
 	coreState = newState;
 }
 
@@ -297,16 +292,16 @@ bool Core_IsStepping() {
 
 bool Core_IsActive() {
 	const CoreState state = coreState;
-	return state == CORE_RUNNING_CPU || state == CORE_NEXTFRAME || coreStatePending;
+	return state == CORE_RUNNING_CPU || state == CORE_NEXTFRAME || retro_atomic_load_acquire_int(&coreStatePending);
 }
 
 bool Core_IsInactive() {
 	const CoreState state = coreState;
-	return state != CORE_RUNNING_CPU && state != CORE_NEXTFRAME && !coreStatePending;
+	return state != CORE_RUNNING_CPU && state != CORE_NEXTFRAME && !retro_atomic_load_acquire_int(&coreStatePending);
 }
 
 void Core_StateProcessed() {
-	coreStatePending = false;
+	retro_atomic_store_release_int(&coreStatePending, 0);
 }
 
 void Core_SetPowerSaving(bool mode) {
@@ -399,7 +394,6 @@ void Core_SwitchToGe() {
 }
 
 bool Core_RequestCPUStep(CPUStepType type) {
-	std::lock_guard<std::mutex> guard(g_stepMutex);
 	if (g_cpuStepQueue.size() >= MAX_PENDING_STEPS) {
 		ERROR_LOG(Log::CPU, "Too many steps queued (%d), dropping this one", (int)g_cpuStepQueue.size());
 		return false;
@@ -533,9 +527,6 @@ static bool Core_ProcessStepping(MIPSDebugInterface *cpu) {
 		lastSteppingCounter = steppingCounter;
 	}
 
-	// Need to check inside the lock to avoid races.
-	std::lock_guard<std::mutex> guard(g_stepMutex);
-
 	if (coreState != CORE_STEPPING_CPU) {
 		return true;
 	}
@@ -566,7 +557,7 @@ static bool Core_ProcessStepping(MIPSDebugInterface *cpu) {
 	return true;
 }
 
-// Free-threaded (hm, possibly except tracing).
+// CPU thread only.
 void Core_Break(BreakReason reason, u32 relatedAddress, const BreakpointHit *hit) {
 	const CoreState state = coreState;
 	if (state != CORE_RUNNING_CPU) {
@@ -580,7 +571,6 @@ void Core_Break(BreakReason reason, u32 relatedAddress, const BreakpointHit *hit
 	}
 
 	{
-		std::lock_guard<std::mutex> lock(g_stepMutex);
 		if (!g_cpuStepCommand.empty() && Core_IsStepping()) {
 			// If we're in a failed step that uses a temp breakpoint, we need to be able to override it here.
 			switch (g_cpuStepCommand.type) {
@@ -624,7 +614,7 @@ void Core_Break(BreakReason reason, u32 relatedAddress, const BreakpointHit *hit
 	System_Notify(SystemNotification::DEBUG_MODE_CHANGE);
 }
 
-// Free-threaded (or at least should be)
+// CPU thread only.
 void Core_Resume() {
 	// If the current PC is on a breakpoint, the user doesn't want to do nothing.
 	if (currentMIPS) {
@@ -674,7 +664,6 @@ int Core_GetSteppingCounter() {
 
 SteppingReason Core_GetSteppingReason() {
 	SteppingReason r{};
-	std::lock_guard<std::mutex> lock(g_stepMutex);
 	// Deliberately not gated on g_cpuStepCommand.empty(): that's true whenever there's no
 	// pending step *type* to execute, which is also the normal state right after Core_Break()
 	// records a reason (it sets type = CPUStepType::None on purpose - there's no step operation

@@ -18,7 +18,6 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <cstdint>
@@ -399,6 +398,5 @@ private:
 	bool ignoreTextures_ = false;
 
 	// Cleared before returning to PSP, no need to save state.
-	std::mutex cacheLock_;
 	std::unordered_map<std::string, std::shared_ptr<ParamSFOData>> sfoCache_;
 };

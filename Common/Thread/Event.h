@@ -1,37 +1,25 @@
 #pragma once
 
-#include "Common/Thread/ThreadManager.h"
+#include <retro_atomic.h>
 
-#include <condition_variable>
-#include <mutex>
+#include "Common/Thread/ParkingLot.h"
+#include "Common/Thread/ThreadManager.h"
 
 struct Event : public Waitable {
 public:
 	Event() {
-		triggered_ = false;
-	}
-
-	~Event() {
-		// Make sure no one is still waiting, and any notify lock is released.
-		Notify();
+		retro_atomic_int_init(&triggered_, 0);
 	}
 
 	void Wait() override {
-		if (triggered_) {
-			return;
-		}
-		std::unique_lock<std::mutex> lock(mutex_);
-		cond_.wait(lock, [&] { return triggered_.load(); });
+		ParkingLotWait(this, [this] { return retro_atomic_load_acquire_int(&triggered_) != 0; });
 	}
 
 	void Notify() {
-		std::unique_lock<std::mutex> lock(mutex_);
-		triggered_ = true;
-		cond_.notify_one();
+		retro_atomic_store_release_int(&triggered_, 1);
+		ParkingLotNotify(this);
 	}
 
 private:
-	std::condition_variable cond_;
-	std::mutex mutex_;
-	std::atomic<bool> triggered_;
+	retro_atomic_int_t triggered_;
 };

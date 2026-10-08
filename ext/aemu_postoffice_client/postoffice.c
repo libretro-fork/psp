@@ -6,7 +6,6 @@
 
 #include "log_impl.h"
 #include "sock_impl.h"
-#include "mutex_impl.h"
 #include "postoffice_mem.h"
 
 #include "aemu_postoffice_packets.h"
@@ -94,7 +93,6 @@ int aemu_post_office_init(){
 			retro_atomic_int_init(&ptp_sessions[i].claimed, 0);
 		}
 
-		init_drain_mutex();
 		retro_eventcount_init(&close_ec);
 	}else{
 		// re-run, close all opened sessions
@@ -371,13 +369,12 @@ static int pdp_drain_blocks_to_ring_buf(struct pdp_session *session){
 	}
 }
 
-static int pdp_drain_blocks_to_ring_buf_locked(struct pdp_session *session){
+/* A pdp session is used by one thread at a time (the emulator's), so draining needs no lock. */
+static int pdp_drain_blocks_to_ring_buf_guarded(struct pdp_session *session){
 	if (!op_begin(&session->inflight, &session->abort)){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}
-	lock_drain_mutex();
 	int result = pdp_drain_blocks_to_ring_buf(session);
-	unlock_drain_mutex();
 	op_end(&session->inflight, &session->abort);
 	return result;
 }
@@ -395,7 +392,7 @@ int pdp_recv(void *pdp_handle, char *pdp_mac, int *pdp_port, char *buf, int *len
 		if (ABORTING(session)){
 			return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 		}
-		int drain_result = pdp_drain_blocks_to_ring_buf_locked(session);
+		int drain_result = pdp_drain_blocks_to_ring_buf_guarded(session);
 		if (drain_result == AEMU_POSTOFFICE_CLIENT_SESSION_DEAD){
 			return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 		}
@@ -469,7 +466,7 @@ int pdp_peek_next_size(void *pdp_handle){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}
 
-	int drain_result = pdp_drain_blocks_to_ring_buf_locked(session);
+	int drain_result = pdp_drain_blocks_to_ring_buf_guarded(session);
 	if (drain_result == AEMU_POSTOFFICE_CLIENT_SESSION_DEAD){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}
@@ -493,7 +490,7 @@ int pdp_buffered_data_size(void *pdp_handle){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}
 
-	int drain_result = pdp_drain_blocks_to_ring_buf_locked(session);
+	int drain_result = pdp_drain_blocks_to_ring_buf_guarded(session);
 	if (drain_result == AEMU_POSTOFFICE_CLIENT_SESSION_DEAD){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}
@@ -914,13 +911,12 @@ static int ptp_drain_blocks_to_ring_buf(struct ptp_session *session){
 	}
 }
 
-static int ptp_drain_blocks_to_ring_buf_locked(struct ptp_session *session){
+/* Like pdp sessions, a ptp session is used by one thread at a time once it's connected. */
+static int ptp_drain_blocks_to_ring_buf_guarded(struct ptp_session *session){
 	if (!op_begin(&session->inflight, &session->abort)){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}
-	lock_drain_mutex();
 	int result = ptp_drain_blocks_to_ring_buf(session);
-	unlock_drain_mutex();
 	op_end(&session->inflight, &session->abort);
 	return result;
 }
@@ -939,7 +935,7 @@ int ptp_recv(void *ptp_handle, char *buf, int *len, bool non_block){
 		if (ABORTING(session)){
 			return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 		}
-		int drain_result = ptp_drain_blocks_to_ring_buf_locked(session);
+		int drain_result = ptp_drain_blocks_to_ring_buf_guarded(session);
 		if (drain_result == AEMU_POSTOFFICE_CLIENT_SESSION_DEAD){
 			return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 		}
@@ -1021,7 +1017,7 @@ int ptp_peek_next_size(void *ptp_handle){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}
 
-	int drain_result = ptp_drain_blocks_to_ring_buf_locked(session);
+	int drain_result = ptp_drain_blocks_to_ring_buf_guarded(session);
 	if (drain_result == AEMU_POSTOFFICE_CLIENT_SESSION_DEAD){
 		return AEMU_POSTOFFICE_CLIENT_SESSION_DEAD;
 	}

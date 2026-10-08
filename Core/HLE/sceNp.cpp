@@ -18,7 +18,6 @@
 // This is pretty much a stub implementation. Doesn't actually do anything, just tries to return values
 // to keep games happy anyway.
 
-#include <mutex>
 #include <deque>
 
 #include "Common/System/OSD.h"
@@ -52,7 +51,6 @@ std::string npAvatarUrl = "http://DummyAvatarUrl"; // SceNpAvatarUrl struct?
 // Game-specific ID, I guess we can use this to auto-choose DNS?
 SceNpCommunicationId npTitleId;
 
-std::recursive_mutex npAuthEvtMtx;
 std::deque<NpAuthArgs> npAuthEvents;
 std::map<int, NpAuthHandler> npAuthHandlers;
 
@@ -116,7 +114,6 @@ static int writeTicketU64Param(u8* buffer, const u16_be type, const u64_be data)
 }
 
 static void notifyNpAuthHandlers(u32 id, u32 result, u32 argAddr) {
-	std::lock_guard<std::recursive_mutex> npAuthGuard(npAuthEvtMtx);
 	npAuthEvents.push_back({ { id, result, argAddr } });
 }
 
@@ -483,7 +480,6 @@ int sceNpAuthGetEntitlementById(u32 ticketBufferAddr, u32 ticketLength, u32 enti
 int sceNpAuthAbortRequest(int requestId)
 {
 	// TODO: Disconnect HTTPS connection & cancel the callback event
-	std::lock_guard<std::recursive_mutex> npAuthGuard(npAuthEvtMtx);
 	for (auto it = npAuthEvents.begin(); it != npAuthEvents.end(); ) {
 		(it->data[0] == requestId) ? it = npAuthEvents.erase(it) : ++it;
 	}

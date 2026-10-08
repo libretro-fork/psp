@@ -37,7 +37,7 @@
 #include <typeinfo>
 
 #include <algorithm>
-#include <atomic>
+#include <retro_atomic.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -2044,13 +2044,13 @@ bool TestParseLBN() {
 // The read counter lives outside, since CachingFileLoader deletes its backend.
 class PatternFileLoader : public FileLoader {
 public:
-	PatternFileLoader(s64 size, std::atomic<int> *reads) : size_(size), reads_(reads) {}
+	PatternFileLoader(s64 size, retro_atomic_int_t *reads) : size_(size), reads_(reads) {}
 	bool Exists() override { return true; }
 	bool IsDirectory() override { return false; }
 	s64 FileSize() override { return size_; }
 	Path GetPath() const override { return Path(); }
 	size_t ReadAt(s64 pos, size_t bytes, size_t count, void *data, Flags flags) override {
-		(*reads_)++;
+		retro_atomic_fetch_add_int(reads_, 1);
 		s64 end = std::min(pos + (s64)(bytes * count), size_);
 		for (s64 i = pos; i < end; i++) {
 			((u8 *)data)[i - pos] = (u8)(i * 31 + 7);
@@ -2060,7 +2060,7 @@ public:
 
 private:
 	s64 size_;
-	std::atomic<int> *reads_;
+	retro_atomic_int_t *reads_;
 };
 
 static bool MatchesPattern(const u8 *data, s64 pos, size_t bytes) {
@@ -2075,7 +2075,7 @@ static bool MatchesPattern(const u8 *data, s64 pos, size_t bytes) {
 static bool TestCachingFileLoader() {
 	// The last 64 KB block of the file is short.
 	const s64 size = 3 * 65536 + 1234;
-	std::atomic<int> reads{};
+	retro_atomic_int_t reads{ 0 };
 	std::unique_ptr<CachingFileLoader> loader(new CachingFileLoader(new PatternFileLoader(size, &reads)));
 	std::vector<u8> buf(65536 * 2);
 
@@ -2088,14 +2088,14 @@ static bool TestCachingFileLoader() {
 
 	// Both reads ended in the last block, so everything they touched is cached and there's
 	// nothing left to read ahead. Nothing further should reach the backend, even past EOF.
-	int readsBefore = reads;
+	int readsBefore = retro_atomic_load_acquire_int(&reads);
 	pos = 3 * 65536 + 100;
 	for (int i = 0; i < 100; i++) {
 		EXPECT_EQ_INT(loader->ReadAt(pos, 100, buf.data()), 100);
 	}
 	// Waits for any read-ahead.
 	loader.reset();
-	EXPECT_EQ_INT(reads, readsBefore);
+	EXPECT_EQ_INT(retro_atomic_load_acquire_int(&reads), readsBefore);
 	return true;
 }
 

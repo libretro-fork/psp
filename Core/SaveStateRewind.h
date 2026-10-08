@@ -1,10 +1,9 @@
 #pragma once
 
-#include <mutex>
-#include <thread>
 #include "Common/Serialize/Serializer.h"
 #include "Common/CommonTypes.h"
 #include "Common/TimeUtil.h"
+#include "Common/Thread/Thread.h"
 
 namespace SaveState {
 
@@ -12,7 +11,7 @@ namespace SaveState {
 // Save states are compressed against one of two reference saves (bases_), and the reference
 // is switched to a fresh save every N saves, where N is BASE_USAGE_INTERVAL.
 // The compression is a simple block based scheme where 0 means to copy a block from the base,
-// and 1 means that the following bytes are the next block. See Compress/LockedDecompress.
+// and 1 means that the following bytes are the next block. See Compress/Decompress.
 class StateRingbuffer {
 public:
 	StateRingbuffer() {
@@ -31,7 +30,7 @@ public:
 	CChunkFileReader::Error Restore(std::string *errorString, std::string *metadata);
 	void ScheduleCompress(std::vector<u8> *result, const std::vector<u8> *state, const std::vector<u8> *base);
 	void Compress(std::vector<u8> &result, const std::vector<u8> &state, const std::vector<u8> &base);
-	void LockedDecompress(std::vector<u8> &result, const std::vector<u8> &compressed, const std::vector<u8> &base);
+	void Decompress(std::vector<u8> &result, const std::vector<u8> &compressed, const std::vector<u8> &base);
 	void Clear();
 
 	bool Empty() const {
@@ -70,8 +69,9 @@ private:
 	int baseGeneration_[2] = {-1, -1};
 	int nextBaseGeneration_ = 0;
 	std::vector<int> baseMapping_;
-	std::mutex lock_;
-	std::thread compressThread_;
+	// Emulation thread only. The compress thread only touches the buffers handed to it, and
+	// everything that reads or replaces those joins it first.
+	Thread compressThread_;
 	std::vector<u8> buffer_;
 
 	int base_ = -1;

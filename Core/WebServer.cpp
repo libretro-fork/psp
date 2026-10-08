@@ -15,21 +15,23 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <atomic>
-#include <condition_variable>
 #include <cstring>
-#include <mutex>
 #include <string_view>
-#include <thread>
 
+#include <retro_atomic.h>
+
+#include "Common/Net/Cancel.h"
 #include "Common/Net/HTTPServer.h"
 #include "Common/Net/Sinks.h"
+#include "Common/Thread/ParkingLot.h"
+#include "Common/Thread/Thread.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/Log.h"
 #include "Common/File/Path.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/StringUtils.h"
 #include "Core/Config.h"
+#include "Core/Core.h"
 #include "Core/WebServer.h"
 #include "Core/Debugger/WebSocket.h"
 
@@ -41,25 +43,24 @@ enum class ServerStatus {
 	FINISHED,
 };
 
-static std::thread serverThread;
-static ServerStatus serverStatus;
-static std::mutex serverStatusLock;
-static std::condition_variable serverStatusCond;
-// See WebServerSetRequireExactPort(). Atomic because it's set from whichever thread parsed the
-// command line, and read from the server thread.
-static std::atomic<bool> serverRequireExactPort;
+// serverThread and serverStop belong to the thread calling Start/ShutdownWebServer.
+static Thread serverThread;
+// Set by ShutdownWebServer(); wakes the accept loop and every connection. One per server run,
+// deleted only after the server thread (and with it every connection thread) is joined.
+static net::CancelToken *serverStop;
+static retro_atomic_int_t serverStatus{ (int)ServerStatus::STOPPED };
+// See WebServerSetRequireExactPort().
+static retro_atomic_int_t serverRequireExactPort{ 0 };
 
 static void UpdateStatus(ServerStatus s) {
-	{
-		std::lock_guard<std::mutex> guard(serverStatusLock);
-		serverStatus = s;
-	}
-	serverStatusCond.notify_all();
+	retro_atomic_store_release_int(&serverStatus, (int)s);
+	ParkingLotNotify(&serverStatus);
+	// ShutdownWebServer() may be waiting on the CPU thread's queue for this.
+	Core_WakeCPUThread();
 }
 
 static ServerStatus RetrieveStatus() {
-	std::lock_guard<std::mutex> guard(serverStatusLock);
-	return serverStatus;
+	return (ServerStatus)retro_atomic_load_acquire_int(&serverStatus);
 }
 
 static bool ServeAssetFile(const http::ServerRequest &request) {
@@ -143,7 +144,7 @@ static void ForwardDebuggerRequest(const http::ServerRequest &request) {
 
 	// Yes - proceed with the socket.
 	if (strcasecmp(upgrade.c_str(), "websocket") == 0) {
-		HandleDebuggerRequest(request);
+		HandleDebuggerRequest(request, serverStop);
 	} else {
 		RedirectToDebugger(request);
 	}
@@ -157,7 +158,7 @@ static void WebServerThread() {
 	http->RegisterHandler("/debugger", &ForwardDebuggerRequest);
 
 	if (!http->Listen(g_Config.iRemoteISOPort, "debugger-webserver")) {
-		if (serverRequireExactPort) {
+		if (retro_atomic_load_acquire_int(&serverRequireExactPort)) {
 			// Someone asked for this specific port (--debugger=PORT) - see
 			// WebServerSetRequireExactPort(). Coming up on a different one would just look like
 			// success while nothing can connect, so give up loudly instead.
@@ -182,14 +183,13 @@ static void WebServerThread() {
 	// line is the only way a client can find out which one it got.
 	NOTICE_LOG(Log::HTTP, "Entering web server loop. Listening on port %d", g_Config.iRemoteISOPort);
 
-	while (RetrieveStatus() == ServerStatus::RUNNING) {
-		constexpr double webServerSliceSeconds = 0.2f;
-		http->RunSlice(webServerSliceSeconds);
+	while (!serverStop->IsCancelled()) {
+		http->RunSlice(serverStop);
 	}
 	INFO_LOG(Log::HTTP, "Leaving web server loop.");
 
 	http->Stop();
-	StopAllDebuggers();
+	// Joins the connection threads, which see serverStop too.
 	delete http;
 
 	UpdateStatus(ServerStatus::FINISHED);
@@ -197,15 +197,17 @@ static void WebServerThread() {
 }
 
 bool StartWebServer() {
-	std::lock_guard<std::mutex> guard(serverStatusLock);
-	switch (serverStatus) {
+	switch (RetrieveStatus()) {
 	case ServerStatus::FINISHED:
 		serverThread.join();
+		delete serverStop;
+		serverStop = nullptr;
 		[[fallthrough]];
 
 	case ServerStatus::STOPPED:
-		serverStatus = ServerStatus::STARTING;
-		serverThread = std::thread(&WebServerThread);
+		serverStop = new net::CancelToken();
+		UpdateStatus(ServerStatus::STARTING);
+		serverThread = Thread(&WebServerThread);
 		return true;
 
 	default:
@@ -214,14 +216,28 @@ bool StartWebServer() {
 }
 
 void ShutdownWebServer() {
-	{
-		std::lock_guard<std::mutex> guard(serverStatusLock);
-		if (serverStatus == ServerStatus::RUNNING)
-			serverStatus = ServerStatus::STOPPING;
+	if (retro_atomic_cas_int(&serverStatus, (int)ServerStatus::RUNNING, (int)ServerStatus::STOPPING)) {
+		ParkingLotNotify(&serverStatus);
 	}
-	if (serverThread.joinable())
+	if (serverStop) {
+		serverStop->Cancel();
+	}
+	if (serverThread.joinable()) {
+		// Connections finishing up may still need the CPU thread (Core_RunOnCPUThread), and this
+		// is it, so keep serving them until the server thread is done.
+		for (;;) {
+			const int seen = Core_CPUWorkSeen();
+			Core_ProcessCPUQueue();
+			if (RetrieveStatus() == ServerStatus::FINISHED || RetrieveStatus() == ServerStatus::STOPPED) {
+				break;
+			}
+			Core_WaitForCPUWork(seen);
+		}
 		serverThread.join();
-	serverStatus = ServerStatus::STOPPED;
+	}
+	delete serverStop;
+	serverStop = nullptr;
+	UpdateStatus(ServerStatus::STOPPED);
 }
 
 bool WebServerRunning() {
@@ -233,11 +249,10 @@ int WebServerPort() {
 }
 
 void WebServerSetRequireExactPort(bool require) {
-	serverRequireExactPort = require;
+	retro_atomic_store_release_int(&serverRequireExactPort, require ? 1 : 0);
 }
 
 bool WebServerWaitForStartup() {
-	std::unique_lock<std::mutex> guard(serverStatusLock);
-	serverStatusCond.wait(guard, [] { return serverStatus != ServerStatus::STARTING; });
-	return serverStatus == ServerStatus::RUNNING;
+	ParkingLotWait(&serverStatus, [] { return RetrieveStatus() != ServerStatus::STARTING; });
+	return RetrieveStatus() == ServerStatus::RUNNING;
 }

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <functional>
-#include <mutex>
 
 #include "Common/Log.h"
 #include "Common/Thread/Channel.h"
@@ -43,10 +42,12 @@ public:
 	}
 
 	void Run() override {
+		if (tx_->Cancelled()) {
+			INFO_LOG(Log::System, "PromiseTask skipped after cancellation");
+			return;
+		}
 		T value = fun_();
-		if (!cancelled_) {
-			tx_->Send(value);
-		} else {
+		if (!tx_->Send(value)) {
 			INFO_LOG(Log::System, "PromiseTask ended after cancellation");
 		}
 	}
@@ -57,63 +58,54 @@ public:
 
 	void Cancel() override {
 		INFO_LOG(Log::System, "PromiseTask cancelled");
-		cancelled_ = true;
+		tx_->CancelAndRelease();
 	}
 
 	std::function<T ()> fun_;
 	Mailbox<T> *tx_;
 	const TaskType type_;
 	const TaskPriority priority_;
-
-	std::atomic<bool> cancelled_{};
 };
 
 // Represents pending or actual data.
 // Has ownership over the data. Single use.
-// TODO: Split Mailbox (rx_ and tx_) up into separate proxy objects.
-// NOTE: Poll/BlockUntilReady should only be used from one thread.
+// Poll/BlockUntilReady may be called from any number of threads at once; the value is
+// immutable once delivered. Cancel and destruction belong to the owner.
 // TODO: Make movable?
 template<class T>
 class Promise {
 public:
 	// Never fails.
 	static Promise<T> *Spawn(ThreadManager *threadman, std::function<T()> fun, TaskType taskType, TaskPriority taskPriority = TaskPriority::NORMAL) {
-		Mailbox<T> *mailbox = new Mailbox<T>();
-
 		Promise<T> *promise = new Promise<T>();
-		promise->rx_ = mailbox;
-
-		PromiseTask<T> *task = new PromiseTask<T>(fun, mailbox, taskType, taskPriority);
-		threadman->EnqueueTask(task);
-		promise->task_ = task;
+		promise->rx_ = new Mailbox<T>();
+		threadman->EnqueueTask(new PromiseTask<T>(fun, promise->rx_, taskType, taskPriority));
 		return promise;
 	}
 
 	static Promise<T> *AlreadyDone(T data) {
 		Promise<T> *promise = new Promise<T>();
 		promise->data_ = data;
-		promise->ready_ = true;
 		return promise;
 	}
 
 	static Promise<T> *CreateEmpty() {
-		Mailbox<T> *mailbox = new Mailbox<T>();
 		Promise<T> *promise = new Promise<T>();
-		promise->rx_ = mailbox;
+		promise->rx_ = new Mailbox<T>();
 		return promise;
 	}
 
 	// Allow an empty promise to spawn, too, in case we want to delay it.
 	void SpawnEmpty(ThreadManager *threadman, std::function<T()> fun, TaskType taskType, TaskPriority taskPriority = TaskPriority::NORMAL) {
-		task_ = new PromiseTask<T>(fun, rx_, taskType, taskPriority);
-		threadman->EnqueueTask(task_);
+		threadman->EnqueueTask(new PromiseTask<T>(fun, rx_, taskType, taskPriority));
 	}
 
 	~Promise() {
-		std::lock_guard<std::mutex> guard(readyMutex_);
-		// A promise should have been fulfilled before it's destroyed.
-		_assert_(ready_);
-		_assert_(!rx_);
+		// A promise should have been fulfilled (or cancelled) before it's destroyed.
+		T unused;
+		_assert_(!rx_ || rx_->Poll(&unused));
+		if (rx_)
+			rx_->Release();
 		sentinel_ = 0xeeeeeeee;
 	}
 
@@ -122,38 +114,20 @@ public:
 	T Poll() {
 		uint32_t sentinel = sentinel_;
 		_assert_msg_(sentinel == 0xffc0ffee, "%08x", sentinel);
-		std::lock_guard<std::mutex> guard(readyMutex_);
-		if (ready_) {
+		if (!rx_)
 			return data_;
-		} else {
-			_dbg_assert_(rx_);
-			if (rx_->Poll(&data_)) {
-				rx_->Release();
-				rx_ = nullptr;
-				ready_ = true;
-				task_ = nullptr;
-				return data_;
-			} else {
-				return nullptr;
-			}
-		}
+		T data;
+		if (rx_->Poll(&data))
+			return data;
+		return nullptr;
 	}
 
 	T BlockUntilReady() {
 		uint32_t sentinel = sentinel_;
 		_assert_msg_(sentinel == 0xffc0ffee, "%08x", sentinel);
-		std::lock_guard<std::mutex> guard(readyMutex_);
-		if (ready_) {
+		if (!rx_)
 			return data_;
-		} else {
-			_dbg_assert_(rx_);
-			data_ = rx_->Wait();
-			rx_->Release();
-			rx_ = nullptr;
-			ready_ = true;
-			task_ = nullptr;
-			return data_;
-		}
+		return rx_->Wait();
 	}
 
 	// For outside injection of data, when not using Spawn.
@@ -162,26 +136,15 @@ public:
 	}
 
 	void Cancel() {
-		std::lock_guard<std::mutex> guard(readyMutex_);
-		if (!ready_) {
-			ready_ = true;
-			_dbg_assert_(task_);
-			if (task_) {
-				task_->Cancel();
-			}
-			rx_->Release();
-			rx_ = nullptr;
-		}
+		if (rx_)
+			rx_->CancelAndRelease();
 	}
 
 private:
 	Promise() {}
 
 	// Promise can only be constructed in Spawn (or AlreadyDone).
-	T data_{};
-	bool ready_ = false;
-	std::mutex readyMutex_;
-	Mailbox<T> *rx_ = nullptr;
+	T data_{};               // only for AlreadyDone
+	Mailbox<T> *rx_ = nullptr;  // shared with the task; outlives every waiter
 	uint32_t sentinel_ = 0xffc0ffee;
-	PromiseTask<T> *task_ = nullptr;
 };

@@ -18,10 +18,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>
-#include <mutex>
 #include <set>
 #include <sstream>
-#include <thread>
 
 #include "ppsspp_config.h"
 

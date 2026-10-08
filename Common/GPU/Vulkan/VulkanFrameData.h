@@ -2,8 +2,7 @@
 
 #include <cstdint>
 
-#include <mutex>
-#include <condition_variable>
+#include <retro_atomic.h>
 
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/Data/Collections/Hashmaps.h"
@@ -90,9 +89,9 @@ enum class FrameSubmitType {
 struct FrameData {
 	bool skipSwap = false;
 
-	std::mutex fenceMutex;
-	std::condition_variable fenceCondVar;
-	bool readyForFence = true;
+	// With the render thread: set once it has submitted this frame (its fence is then in flight),
+	// cleared by BeginFrame before it waits on the fence.
+	retro_atomic_int_t readyForFence{ 1 };
 
 	VkFence fence = VK_NULL_HANDLE;
 	VkSemaphore acquireSemaphore = VK_NULL_HANDLE;
@@ -112,7 +111,8 @@ struct FrameData {
 	bool hasFencePending = false;
 	bool hasAcquired = false;
 
-	bool syncDone = false;
+	// Set by the render thread once a sync submit has finished, cleared by FlushSync.
+	retro_atomic_int_t syncDone{ 0 };
 
 	// Swapchain.
 	uint32_t curSwapchainImage = -1;

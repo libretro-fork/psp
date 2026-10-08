@@ -43,8 +43,10 @@ public:
 	void Pong(const std::vector<uint8_t> &payload = {});
 	void Close(WebSocketClose reason = WebSocketClose::GOING_AWAY);
 
-	// Note: may interrupt early.  Call in a loop.
-	bool Process(float timeout = -1.0f);
+	// Blocks until the socket makes progress or one of wakeFds (any may be -1) becomes readable,
+	// then returns whether the connection is still open. Call in a loop; the caller drains its
+	// own wake fds.
+	bool Process(const intptr_t *wakeFds = nullptr, int wakeCount = 0);
 
 	void SetTextHandler(std::function<void(const std::string &)> func) {
 		text_ = func;

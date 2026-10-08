@@ -18,26 +18,12 @@
 #include <cstring>
 #include <cstdint>
 
+#include <retro_atomic.h>
+#include <rthreads/rthreads.h>
+
 #include "Common/Log.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/Data/Encoding/Utf8.h"
-
-#if (PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(LINUX)) && !defined(_GNU_SOURCE)
-#define _GNU_SOURCE
-#endif
-
-#if !PPSSPP_PLATFORM(WINDOWS)
-#include <pthread.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <sys/syscall.h>
-#endif
-
-#if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-#include <pthread_np.h>
-#elif defined(__NetBSD__)
-#include <lwp.h>
-#endif
 
 #ifdef TLS_SUPPORTED
 static thread_local const char *curThreadName;
@@ -64,25 +50,22 @@ static EXCEPTION_DISPOSITION NTAPI ignore_handler(EXCEPTION_RECORD *rec,
 #if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
 typedef HRESULT (WINAPI *TSetThreadDescription)(HANDLE, PCWSTR);
 
-static TSetThreadDescription g_pSetThreadDescription = nullptr;
-static bool g_failedToFindSetThreadDescription = false;
+// Resolved once by whichever thread gets there first; any number may race to do it.
+// Holds the function, or the address of g_noSetThreadDescription when it doesn't exist.
+static retro_atomic_ptr_t g_setThreadDescription;
+static char g_noSetThreadDescription;
 
-static void InitializeSetThreadDescription() {
-	if (g_pSetThreadDescription != nullptr || g_failedToFindSetThreadDescription) {
-		return;
+static TSetThreadDescription GetSetThreadDescription() {
+	void *fn = retro_atomic_load_acquire_ptr(&g_setThreadDescription);
+	if (!fn) {
+		HMODULE hKernel32 = GetModuleHandle(L"kernelbase.dll");
+		// Missing on Windows versions that are too old.
+		fn = hKernel32 ? (void *)GetProcAddress(hKernel32, "SetThreadDescription") : nullptr;
+		if (!fn)
+			fn = &g_noSetThreadDescription;
+		retro_atomic_store_release_ptr(&g_setThreadDescription, fn);
 	}
-
-	HMODULE hKernel32 = GetModuleHandle(L"kernelbase.dll");
-	if (hKernel32 == nullptr) {
-		// Failed to find the function. Windows version too old, most likely.
-		g_failedToFindSetThreadDescription = true;
-		return;
-	}
-	g_pSetThreadDescription = reinterpret_cast<TSetThreadDescription>(GetProcAddress(hKernel32, "SetThreadDescription"));
-	if (g_pSetThreadDescription == nullptr) {
-		g_failedToFindSetThreadDescription = true;
-		return;
-	}
+	return fn == &g_noSetThreadDescription ? nullptr : (TSetThreadDescription)fn;
 }
 
 void SetCurrentThreadNameThroughException(const char *threadName);
@@ -98,12 +81,12 @@ const char *GetCurrentThreadName() {
 
 void SetCurrentThreadName(const char *threadName) {
 #if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)
-	InitializeSetThreadDescription();
-	if (g_pSetThreadDescription) {
+	TSetThreadDescription setThreadDescription = GetSetThreadDescription();
+	if (setThreadDescription) {
 		// Use the modern API
 		wchar_t buffer[256];
 		ConvertUTF8ToWString(buffer, ARRAY_SIZE(buffer), threadName);
-		g_pSetThreadDescription(GetCurrentThread(), buffer);
+		setThreadDescription(GetCurrentThread(), buffer);
 	} else {
 		// Use the old exception hack.
 		SetCurrentThreadNameThroughException(threadName);
@@ -112,14 +95,8 @@ void SetCurrentThreadName(const char *threadName) {
 	wchar_t buffer[256];
 	ConvertUTF8ToWString(buffer, ARRAY_SIZE(buffer), threadName);
 	SetThreadDescription(GetCurrentThread(), buffer);
-#elif PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(LINUX)
-	pthread_setname_np(pthread_self(), threadName);
-#elif defined(__APPLE__)
-	pthread_setname_np(threadName);
-#elif defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
-	pthread_set_name_np(pthread_self(), threadName);
-#elif defined(__NetBSD__)
-	pthread_setname_np(pthread_self(), "%s", (void*)threadName);
+#else
+	sthread_setname(threadName);
 #endif
 
 	// Set the locally known threadname using a thread local variable.
@@ -190,27 +167,5 @@ void AssertCurrentThreadName(const char *threadName) {
 }
 
 int GetCurrentThreadIdForDebug() {
-#if __LIBRETRO__
-	// Not sure why gettid() would not be available, but it isn't.
-	// The return value of this function is only used in unit tests anyway...
-	return 1;
-#elif PPSSPP_PLATFORM(WINDOWS)
-	return (int)GetCurrentThreadId();
-#elif PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
-	uint64_t tid = 0;
-	pthread_threadid_np(NULL, &tid);
-	return (int)tid;
-#elif PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(LINUX)
-	// See issue 14545
-	return (int)syscall(__NR_gettid);
-	// return (int)gettid();
-#elif defined(__DragonFly__) || defined(__FreeBSD__)
-	return pthread_getthreadid_np();
-#elif defined(__NetBSD__)
-	return _lwp_self();
-#elif defined(__OpenBSD__)
-	return getthrid();
-#else
-	return 1;
-#endif
+	return (int)sthread_get_current_thread_id();
 }

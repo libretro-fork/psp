@@ -17,7 +17,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <mutex>
 #include "Common/Data/Encoding/Base64.h"
 #include "Common/Data/Encoding/Utf8.h"
 #include "Common/StringUtils.h"

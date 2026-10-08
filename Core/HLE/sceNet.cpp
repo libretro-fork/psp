@@ -15,7 +15,6 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
-#include <mutex>
 #include <string>
 #include <algorithm>
 
@@ -87,7 +86,6 @@ static u32_le apctlThreadCode[3];
 static SceUID apctlThreadID = 0;
 static int apctlStateEvent = -1;
 static int actionAfterApctlMipsCall;
-static std::recursive_mutex apctlEvtMtx;
 static std::deque<ApctlArgs> apctlEvents;
 
 // Currently loaded auto-config
@@ -694,7 +692,6 @@ void __NetShutdown() {
 }
 
 static void __UpdateApctlHandlers(u32 oldState, u32 newState, u32 flag, u32 error) {
-	std::lock_guard<std::recursive_mutex> apctlGuard(apctlEvtMtx);
 	apctlEvents.push_back({ oldState, newState, flag, error });
 }
 
@@ -768,12 +765,10 @@ void __NetDoState(PointerWrap &p) {
 	if (s >= 7) {
 		// The state only moves on when an event is processed, and each queues the next, so a
 		// connect in progress would never finish without them.
-		std::lock_guard<std::recursive_mutex> apctlGuard(apctlEvtMtx);
 		Do(p, apctlEvents);
 		// Allocated from user memory, which the load just replaced.
 		Do(p, apctlProdCodeAddr);
 	} else if (p.mode == p.MODE_READ) {
-		std::lock_guard<std::recursive_mutex> apctlGuard(apctlEvtMtx);
 		apctlEvents.clear();
 		apctlProdCodeAddr = 0;
 	}
@@ -793,9 +788,6 @@ void __NetDoState(PointerWrap &p) {
 
 void __NetApctlCallbacks()
 {
-	std::lock_guard<std::recursive_mutex> apctlGuard(apctlEvtMtx);
-	std::lock_guard<std::recursive_mutex> npAuthGuard(npAuthEvtMtx);
-	std::lock_guard<std::recursive_mutex> npMatching2Guard(npMatching2EvtMtx);
 	hleSkipDeadbeef();
 	int delayus = 10000;
 

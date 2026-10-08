@@ -19,9 +19,10 @@
 
 #include <cstdint>
 #include <functional>
-#include <mutex>
 #include <string>
 #include <string_view>
+
+#include <retro_atomic.h>
 
 #include "Common/CommonTypes.h"
 #include "Core/ConfigValues.h"
@@ -113,7 +114,7 @@ struct BreakpointHit {
 	std::string source;
 };
 
-// Async, called from gui
+// The stepping functions below are CPU thread only; other threads use Core_RunOnCPUThread().
 // hit is optional detail for the breakpoint kinds, forwarded to the debugger. Only stored when
 // the break actually takes effect, so a rejected Core_Break() can't leave a stale one behind.
 void Core_Break(BreakReason reason, u32 relatedAddress = 0, const BreakpointHit *hit = nullptr);
@@ -123,8 +124,7 @@ void Core_Resume();
 
 BreakReason Core_BreakReason();
 
-// This should be called externally.
-// Can fail if another step type was requested this frame.
+// Can fail if too many steps are queued already.
 // stepSize is always in instructions (4 bytes each), never bytes - see Core_PerformCPUStep in Core.cpp.
 bool Core_RequestCPUStep(CPUStepType stepType);
 
@@ -203,18 +203,42 @@ void Core_ReenterDispatcher();  // If you've done things that mess with caches, 
 // Blocks the calling thread until func has actually run, so don't call this from the CPU thread with
 // something that would itself try to wait on the CPU thread - that'll deadlock.
 //
-// Drained at the top of every Core_RunLoopUntil() iteration, so it's reached continuously (in a tight
-// spin) while the CPU is stepping/paused, and at least once per call (i.e. about once per host frame)
-// even while it's fully running.
+// Drained at the top of every Core_RunLoopUntil() iteration, so at least once per call (about once
+// per host frame), and by Core_WaitForCPUWork() while the CPU thread has nothing else to do.
 void Core_RunOnCPUThread(std::function<void()> func);
 
 // Drains the queue Core_RunOnCPUThread() feeds. Called from the top of every Core_RunLoopUntil()
 // iteration, on the CPU thread only.
 void Core_ProcessCPUQueue();
 
+// For a CPU thread with nothing to do (stopped in the debugger, or waiting for another thread to
+// finish): read the counter, check your condition, then wait. Returns once something was queued
+// for the CPU thread or Core_WakeCPUThread() was called since. The caller then drains the queue.
+int Core_CPUWorkSeen();
+void Core_WaitForCPUWork(int seen);
+// Any thread. Wakes a Core_WaitForCPUWork() so it rechecks its condition.
+void Core_WakeCPUThread();
 
-extern volatile CoreState coreState;
-extern volatile bool coreStatePending;
+
+// Written on the CPU thread, read anywhere. The jit reads it in place, so the value has to be the
+// first (and only) member.
+struct SharedCoreState {
+	retro_atomic_int_t value;
+
+	operator CoreState() const {
+		return (CoreState)retro_atomic_load_acquire_int(const_cast<retro_atomic_int_t *>(&value));
+	}
+	SharedCoreState &operator=(CoreState state) {
+		retro_atomic_store_release_int(&value, (int)state);
+		return *this;
+	}
+};
+
+static_assert(sizeof(SharedCoreState) == 4, "The jit accesses coreState as a 32-bit int");
+
+extern SharedCoreState coreState;
+// Set by Core_UpdateState until the CPU loop picks the change up.
+extern retro_atomic_int_t coreStatePending;
 
 void Core_UpdateState(CoreState newState);
 

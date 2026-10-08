@@ -11,7 +11,7 @@ for it:
 |---|---|
 | [docs/building.md](docs/building.md) | Build commands for the libretro core and the headless tools, unit tests, pspautotests |
 | [docs/debugging.md](docs/debugging.md) | Driving the WebSocket debugger and PPSSPPHeadless from a script, measuring a commercial game with headless, comparing binaries' speed (`Tools/headless_bench.py`), breakpoint reliability per CPU backend, debugging a game that works on hardware |
-| [docs/DebuggerThreading.md](docs/DebuggerThreading.md) | `Core_RunOnCPUThread` / `g_frameMutex` / shutdown-lock rules - required reading before touching debugger code |
+| [docs/DebuggerThreading.md](docs/DebuggerThreading.md) | Debugger thread ownership: `Core_RunOnCPUThread`, per-connection mailboxes, no locks - required reading before touching debugger code |
 | [docs/HLEModules.md](docs/HLEModules.md) | Adding an HLE module or function, and the seven build files a new source file goes in |
 | [docs/translations.md](docs/translations.md) | Translating UI strings with Tools/langtool |
 | [docs/pspautotests.md](docs/pspautotests.md) | Workflow for improving PPSSPP using pspautotests |
@@ -96,6 +96,13 @@ for it:
    differently by dialog type, mode or size, cover each of those. A dialog fix once claimed
    hardware behaviour that the test recorded an hour later contradicted, and the test ran a message
    dialog, which took a different branch from the savedata dialog that then hung Freak Out.
+6. **No locks, no sleeps.** Code built into the core and the headless tools uses no mutexes,
+   condition variables, spinlocks, semaphores, `std::atomic`, `std::thread` or `volatile` for
+   synchronization, and never sleeps or polls on a timer. Use `retro_atomic.h`, and in
+   `Common/Thread/`: `Thread`, `MpscQueue` (any thread pushes, one drains), `ParkingLotWait` /
+   `ParkingLotNotify` and `EventCounter` for blocking waits, `ReaderGate` for read-mostly data
+   (copy, swap, drain, free). Prefer giving state a single owning thread and sending it messages.
+   The PSP filesystem, sceIo and the utility dialogs belong to the emulation thread.
 
 ## Build and validation
 
@@ -240,9 +247,9 @@ it when you add a command.
 
 - Breakpoints are most reliable on the interpreter (`-i`): under the JITs, memory breakpoints only work
   for constant addresses and register breakpoints never trip at all.
-- **Debugger code that runs off the CPU thread has a lock order that has deadlocked for real** -
-  `Core_RunOnCPUThread()` for mutations, `g_frameMutex` for hot reads. Read
-  [docs/DebuggerThreading.md](docs/DebuggerThreading.md) before touching it.
+- **Debugger code off the CPU thread touches emulator state only inside `Core_RunOnCPUThread()`**;
+  events the emulator produces are pushed to per-connection mailboxes, never polled, and there are
+  no locks. Read [docs/DebuggerThreading.md](docs/DebuggerThreading.md) before touching it.
 
 ## Commit message style
 

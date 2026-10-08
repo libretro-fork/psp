@@ -4,7 +4,6 @@
 #include <string>
 #include <vector>
 #include <string_view>
-#include <mutex>
 
 class VFSInterface;
 
@@ -42,8 +41,6 @@ private:
 	std::vector<Line> lines_;
 	std::vector<std::string_view> columns_;
 	bool loaded_ = false;
-
-	std::mutex loadMutex_;
 };
 
 extern GameDB g_gameDB;

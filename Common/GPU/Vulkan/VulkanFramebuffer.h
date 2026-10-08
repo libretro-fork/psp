@@ -1,6 +1,5 @@
 #pragma once
 
-#include <mutex>
 
 #include "Common/Common.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
@@ -141,35 +140,35 @@ struct RPKey {
 	VKRRenderPassStoreAction colorStoreAction;
 	VKRRenderPassStoreAction depthStoreAction;
 	VKRRenderPassStoreAction stencilStoreAction;
+
+	// Dense index over every possible key, for the render pass table.
+	enum { INDEX_COUNT = 3 * 3 * 3 * 2 * 2 * 2 };
+	int Index() const {
+		return ((((int)colorLoadAction * 3 + (int)depthLoadAction) * 3 + (int)stencilLoadAction) * 8) +
+			(int)colorStoreAction * 4 + (int)depthStoreAction * 2 + (int)stencilStoreAction;
+	}
 };
 
 class VKRRenderPass {
 public:
 	explicit VKRRenderPass(const RPKey &key) : key_(key) {}
 
+	// Any thread: the main thread (EndCurRenderStep) and the render thread (PerformRenderPass) both
+	// create passes lazily.
 	VkRenderPass Get(VulkanContext *vulkan, RenderPassType rpType, VkSampleCountFlagBits sampleCount);
 
-	// Only called from VulkanQueueRunner::DestroyDeviceObjects, with the threads stopped - no lock needed.
-	void Destroy(VulkanContext *vulkan) {
-		for (size_t i = 0; i < (size_t)RenderPassType::TYPE_COUNT; i++) {
-			if (pass[i]) {
-				vulkan->Delete().QueueDeleteRenderPass(pass[i]);
-			}
-		}
-	}
+	// Only called from VulkanQueueRunner::DestroyDeviceObjects, with the threads stopped.
+	void Destroy(VulkanContext *vulkan);
+
+	const RPKey &Key() const { return key_; }
 
 private:
-	// Get() creates the passes lazily, and runs on both the main thread (EndCurRenderStep) and the
-	// render thread (PerformRenderPass), so the arrays below need guarding. Without it, two threads
-	// reaching the same empty slot each create a pass and one gets overwritten and leaked - and the
-	// sample count branch can queue a pass for deletion that the other thread is about to use.
-	// Lock ordering: taken while VKRGraphicsPipeline::mutex_ is held (VulkanQueueRunner), never the
-	// other way around.
-	std::mutex mutex_;
-
-	// TODO: Might be better off with a hashmap once the render pass type count grows really large..
-	VkRenderPass pass[(size_t)RenderPassType::TYPE_COUNT]{};
-	VkSampleCountFlagBits sampleCounts[(size_t)RenderPassType::TYPE_COUNT]{};
+	// Immutable once published. A replaced one is freed from the delete list, after any reader.
+	struct Created {
+		VkRenderPass pass;
+		VkSampleCountFlagBits sampleCount;
+	};
+	retro_atomic_ptr_t pass_[(size_t)RenderPassType::TYPE_COUNT]{};
 	RPKey key_;
 };
 

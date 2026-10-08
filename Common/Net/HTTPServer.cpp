@@ -32,8 +32,8 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <thread>
 
+#include "Common/Net/Cancel.h"
 #include "Common/Net/HTTPServer.h"
 #include "Common/Net/NetBuffer.h"
 #include "Common/Net/Sinks.h"
@@ -45,24 +45,23 @@
 
 void NewThreadExecutor::Run(std::function<void()> func) {
 	// Every connection gets a thread, and we only ever joined them at shutdown - so a server that
-	// had served N connections was still holding N joinable std::threads. Reap the finished ones.
+	// had served N connections was still holding N joinable threads. Reap the finished ones.
 	Prune();
 
-	auto done = std::make_shared<std::atomic<bool>>(false);
-	Worker worker;
-	worker.done = done;
-	worker.thread = std::thread([func, done]() {
+	std::unique_ptr<Worker> worker(new Worker());
+	Worker *w = worker.get();
+	w->thread = Thread([func, w]() {
 		func();
-		done->store(true, std::memory_order_release);
+		retro_atomic_store_release_int(&w->done, 1);
 	});
 	workers_.push_back(std::move(worker));
 }
 
 void NewThreadExecutor::Prune() {
 	for (size_t i = 0; i < workers_.size(); ) {
-		if (workers_[i].done->load(std::memory_order_acquire)) {
+		if (retro_atomic_load_acquire_int(&workers_[i]->done)) {
 			// Set right at the end of the thread body, so this join returns essentially at once.
-			workers_[i].thread.join();
+			workers_[i]->thread.join();
 			workers_.erase(workers_.begin() + i);
 		} else {
 			++i;
@@ -72,8 +71,9 @@ void NewThreadExecutor::Prune() {
 
 NewThreadExecutor::~NewThreadExecutor() {
 	// If Run was ever called...
-	for (auto &worker : workers_)
-		worker.thread.join();
+	for (auto &worker : workers_) {
+		worker->thread.join();
+	}
 	workers_.clear();
 }
 
@@ -306,15 +306,12 @@ bool Server::Listen6(int port, bool ipv6_only, const char *reason) {
 #endif
 }
 
-bool Server::RunSlice(double timeout) {
+bool Server::RunSlice(const net::CancelToken *cancel) {
 	if (listenerSock_ < 0 || port_ == 0) {
 		return false;
 	}
 
-	if (timeout <= 0.0) {
-		timeout = 86400.0;
-	}
-	if (!fd_util::WaitUntilReady(listenerSock_, timeout, false)) {
+	if (net::WaitSocket((uintptr_t)listenerSock_, false, -1.0, cancel) != net::WaitResult::READY) {
 		return false;
 	}
 
@@ -343,7 +340,7 @@ bool Server::Run(int port) {
 	}
 
 	while (true) {
-		RunSlice(0.0);
+		RunSlice(nullptr);
 	}
 
 	// We'll never get here. Ever.

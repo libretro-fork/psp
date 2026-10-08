@@ -18,7 +18,6 @@
 #include "ppsspp_config.h"
 
 #include <cstdlib>
-#include <mutex>
 
 #include "ext/disarm.h"
 #include "ext/riscv-disas.h"

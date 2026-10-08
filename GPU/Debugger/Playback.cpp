@@ -19,17 +19,16 @@
 #include <climits>
 #include <cstring>
 #include <functional>
-#include <mutex>
 #include <map>
-#include <condition_variable>
 #include <vector>
-#include <thread>
 #include <snappy-c.h>
 #include <encodings/rzstd.h>
+#include <retro_atomic.h>
 
 #include "Common/Profiler/Profiler.h"
 #include "Common/CommonTypes.h"
 #include "Common/Log.h"
+#include "Common/Thread/ParkingLot.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/System/Request.h"
 #include "Core/Config.h"
@@ -54,6 +53,7 @@
 #include "GPU/Debugger/Playback.h"
 #include "GPU/Debugger/Record.h"
 #include "GPU/Debugger/RecordFormat.h"
+#include "Common/Thread/Thread.h"
 
 namespace GPURecord {
 
@@ -92,18 +92,23 @@ static std::vector<u8> lastExecPushbuf;
 
 // This thread is restarted every frame (dump execution) for simplicity. TODO: Make persistent?
 // Alternatively, get rid of it, but the code is written in a way that makes it difficult (you'll see if you try).
-static std::thread replayThread;
+static Thread replayThread;
 
-static std::mutex opStartLock;
-static std::condition_variable g_condOpStartWait;
-
-static std::mutex opFinishLock;
-static std::condition_variable opFinishWait;
-
+// The replay thread posts an operation (g_opToExec, g_opPosted) and waits for g_opDone, which the emu
+// thread sets once it has run it, on its next call. g_opToExec and g_retVal pass between them through these.
 static Operation g_opToExec;
 static u32 g_retVal;
-static bool g_opDone = true;
-static bool g_cancelled = false;
+static retro_atomic_int_t g_opPosted{ 0 };
+static retro_atomic_int_t g_opDone{ 1 };
+static retro_atomic_int_t g_cancelled{ 0 };
+
+// Emu thread: hands the current operation back to the replay thread.
+static void FinishOp() {
+	g_opToExec = Operation{ OpType::None };
+	retro_atomic_store_relaxed_int(&g_opPosted, 0);
+	retro_atomic_store_release_int(&g_opDone, 1);
+	ParkingLotNotify(&g_opDone);
+}
 static int g_drawLimit = 0;
 
 void SetReplayDrawLimit(int lastPrim) {
@@ -112,20 +117,17 @@ void SetReplayDrawLimit(int lastPrim) {
 
 // Runs on operation thread
 u32 ExecuteOnMain(Operation opToExec) {
-	{
-		std::unique_lock<std::mutex> startLock(opStartLock);
-		g_opToExec = opToExec;
-		g_retVal = 0;
-		g_opDone = false;
-		g_condOpStartWait.notify_one();
-	}
+	g_opToExec = opToExec;
+	g_retVal = 0;
+	retro_atomic_store_relaxed_int(&g_opDone, 0);
+	retro_atomic_store_release_int(&g_opPosted, 1);
+	ParkingLotNotify(&g_opPosted);
 
 	// now wait for completion. At that point, noone cares about g_opToExec anymore, and we can safely
 	// overwrite it next time.
-	{
-		std::unique_lock<std::mutex> lock(opFinishLock);
-		opFinishWait.wait(lock, []() { return g_opDone || g_cancelled; });
-	}
+	ParkingLotWait(&g_opDone, [] {
+		return retro_atomic_load_acquire_int(&g_opDone) || retro_atomic_load_acquire_int(&g_cancelled);
+	});
 	return g_retVal;
 }
 
@@ -582,7 +584,7 @@ void DumpExecute::Registers(u32 ptr, u32 sz) {
 }
 
 void DumpExecute::SubmitListEnd() {
-	if (execListPos == 0 || g_cancelled) {
+	if (execListPos == 0 || retro_atomic_load_acquire_int(&g_cancelled)) {
 		return;
 	}
 
@@ -981,7 +983,7 @@ ReplayResult DumpExecute::Run() {
 
 	int start = resumeIndex_ >= 0 ? resumeIndex_ : 0;
 	for (size_t i = start; i < commands_.size(); i++) {
-		if (g_cancelled) {
+		if (retro_atomic_load_acquire_int(&g_cancelled)) {
 			break;
 		}
 
@@ -1094,7 +1096,7 @@ static u32 LoadReplay(const std::string &filename) {
 
 	NOTICE_LOG(Log::GeDebugger, "LoadReplay %s", filename.c_str());
 
-	g_cancelled = false;
+	retro_atomic_store_release_int(&g_cancelled, 0);
 
 	u32 fp = pspFileSystem.OpenFile(filename, FILEACCESS_READ);
 	Header header;
@@ -1155,13 +1157,9 @@ static u32 LoadReplay(const std::string &filename) {
 void Replay_Unload() {
 	// We might be paused inside a replay - in this case, the thread is still running and we need to tell it to stop.
 	if (replayThread.joinable()) {
-		{
-			// We just finish processing the commands until done.
-			g_cancelled = true;
-
-			std::unique_lock<std::mutex> lock(opFinishLock);
-			opFinishWait.notify_one();
-		}
+		// We just finish processing the commands until done.
+		retro_atomic_store_release_int(&g_cancelled, 1);
+		ParkingLotNotify(&g_opDone);
 		replayThread.join();
 	}
 
@@ -1172,7 +1170,9 @@ void Replay_Unload() {
 	lastExecCommands.clear();
 	lastExecPushbuf.clear();
 
-	g_opDone = true;
+	g_opToExec = Operation{ OpType::None };
+	retro_atomic_store_relaxed_int(&g_opPosted, 0);
+	retro_atomic_store_relaxed_int(&g_opDone, 1);
 	g_retVal = 0;
 }
 
@@ -1225,16 +1225,13 @@ ReplayResult RunMountedReplay(const std::string &filename) {
 	}
 
 	if (g_opToExec.type != OpType::None) {
-		std::unique_lock<std::mutex> waitLock(opFinishLock);
-		g_opDone = true;
-		g_opToExec = Operation{ OpType::None };
-		opFinishWait.notify_one();
+		FinishOp();
 	}
 
 	if (!replayThread.joinable()) {
 		_dbg_assert_(g_opToExec.type == OpType::None);
 		g_opToExec = Operation{ OpType::None };
-		replayThread = std::thread([version]() {
+		replayThread = Thread([version]() {
 			SetCurrentThreadName("Replay");
 			DumpExecute executor(lastExecPushbuf, lastExecCommands, version);
 			GPURecord::ReplayResult retval = executor.Run();
@@ -1244,10 +1241,7 @@ ReplayResult RunMountedReplay(const std::string &filename) {
 	}
 
 	// OK, now wait for and perform the desired action.
-	{
-		std::unique_lock<std::mutex> lock(opStartLock);
-		g_condOpStartWait.wait(lock, []() { return g_opToExec.type != OpType::None; });
-	}
+	ParkingLotWait(&g_opPosted, [] { return retro_atomic_load_acquire_int(&g_opPosted) != 0; });
 
 	switch (g_opToExec.type) {
 	case OpType::UpdateStallAddr:
@@ -1295,13 +1289,8 @@ ReplayResult RunMountedReplay(const std::string &filename) {
 	case OpType::Done:
 	{
 		_dbg_assert_(replayThread.joinable());
-		{
-			std::unique_lock<std::mutex> lock(opFinishLock);
-			g_opDone = true;
-			opFinishWait.notify_one();
-		}
+		FinishOp();
 		replayThread.join();
-		g_opToExec = { OpType::None };
 		break;
 	}
 	case OpType::None:

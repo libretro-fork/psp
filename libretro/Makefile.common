@@ -272,6 +272,7 @@ SOURCES_CXX += \
 	$(COMMONDIR)/File/DiskFree.cpp \
 	$(COMMONDIR)/File/Path.cpp \
 	$(COMMONDIR)/File/FileUtil.cpp \
+	$(COMMONDIR)/File/PositionalFile.cpp \
 	$(COMMONDIR)/File/FileDescriptor.cpp \
 	$(COMMONDIR)/File/DirListing.cpp \
 	$(COMMONDIR)/GPU/thin3d.cpp \
@@ -326,6 +327,7 @@ SOURCES_CXX += \
 	$(COMMONDIR)/Thread/ThreadUtil.cpp \
 	$(COMMONDIR)/Thread/ParallelLoop.cpp \
 	$(COMMONDIR)/Thread/ParkingLot.cpp \
+	$(COMMONDIR)/Thread/Thread.cpp \
 	$(COMMONDIR)/Thread/ThreadManager.cpp \
 	$(COMMONDIR)/System/Display.cpp \
 	$(COMMONDIR)/System/Request.cpp \
@@ -494,7 +496,6 @@ SOURCES_C += \
 	       $(EXTDIR)/aemu_postoffice_client/postoffice_mem_stdc.c
 
 SOURCES_CXX += \
-	       $(EXTDIR)/aemu_postoffice_client/mutex_impl_cpp.cpp \
 	       $(EXTDIR)/aemu_postoffice_client/log_impl_ppsspp.cpp
 
 ifeq ($(PLATFORM_EXT), win32)
@@ -876,7 +877,6 @@ SOURCES_C += $(LIBRETROCOMMONDIR)/compat/compat_posix_string.c \
              $(LIBRETROCOMMONDIR)/streams/file_stream.c \
              $(LIBRETROCOMMONDIR)/streams/file_stream_transforms.c \
              $(LIBRETROCOMMONDIR)/string/rstrtod.c \
-             $(LIBRETROCOMMONDIR)/time/rtime.c \
              $(LIBRETROCOMMONDIR)/vfs/vfs_implementation.c
 
 # Codecs: zlib-format deflate, zstd, CHD, zip and PNG.
@@ -904,7 +904,8 @@ SOURCES_C += $(LIBRETROCOMMONDIR)/features/features_cpu.c \
              $(LIBRETROCOMMONDIR)/rthreads/retro_eventcount.c \
              $(LIBRETROCOMMONDIR)/rthreads/retro_procbarrier.c \
              $(LIBRETROCOMMONDIR)/rthreads/rthreads.c \
-             $(LIBRETROCOMMONDIR)/rthreads/tpool.c
+             $(LIBRETROCOMMONDIR)/rthreads/tpool.c \
+             $(LIBRETROCOMMONDIR)/time/rtime.c
 
 INCFLAGS += -I$(LIBRETROCOMMONDIR)/include
 

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <mutex>
 #include <set>
 #include <string>
 #include <string_view>
@@ -16,6 +15,7 @@
 #include "Common/File/FileUtil.h"
 #include "Common/File/Path.h"
 
+// Not thread safe: extraction shares one stream and block cache, so use it from one thread at a time.
 class SevenZipFileReader : public VFSBackend {
 public:
 	static SevenZipFileReader *Create(const Path &archivePath, std::string_view inArchivePath, bool logErrors = true);
@@ -68,7 +68,6 @@ private:
 	Path archivePath_;
 	std::string inArchivePath_;
 
-	mutable std::mutex lock_;
 	CFileInStream archiveStream_;
 	CLookToRead2 lookStream_;
 	ISzAlloc allocImp_;

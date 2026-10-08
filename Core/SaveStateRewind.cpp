@@ -5,6 +5,7 @@
 #include "Core/SaveStateRewind.h"
 #include "Core/Core.h"
 #include "Core/Config.h"
+#include "Common/Thread/Thread.h"
 
 namespace SaveState {
 
@@ -15,8 +16,6 @@ CChunkFileReader::Error StateRingbuffer::Save() {
 	// crash due to contention over buffer_.
 	if (compressThread_.joinable())
 		compressThread_.join();
-
-	std::lock_guard<std::mutex> guard(lock_);
 
 	int n = next_++ % size_;
 	if ((next_ % size_) == first_)
@@ -48,7 +47,9 @@ CChunkFileReader::Error StateRingbuffer::Save() {
 }
 
 CChunkFileReader::Error StateRingbuffer::Restore(std::string *errorString, std::string *metadata) {
-	std::lock_guard<std::mutex> guard(lock_);
+	// The state being compressed may be the one restored.
+	if (compressThread_.joinable())
+		compressThread_.join();
 
 	// No valid states left.
 	if (Empty())
@@ -70,7 +71,7 @@ CChunkFileReader::Error StateRingbuffer::Restore(std::string *errorString, std::
 	}
 
 	static std::vector<u8> buffer;
-	LockedDecompress(buffer, states_[n].stateBuffer, bases_[baseSlot]);
+	Decompress(buffer, states_[n].stateBuffer, bases_[baseSlot]);
 	CChunkFileReader::Error error = LoadFromRam(buffer, errorString);
 	*metadata = pa->T("Rewind");
 
@@ -88,7 +89,7 @@ CChunkFileReader::Error StateRingbuffer::Restore(std::string *errorString, std::
 void StateRingbuffer::ScheduleCompress(std::vector<u8> *result, const std::vector<u8> *state, const std::vector<u8> *base) {
 	if (compressThread_.joinable())
 		compressThread_.join();
-	compressThread_ = std::thread([=] {
+	compressThread_ = Thread([=] {
 		SetCurrentThreadName("SaveStateCompress");
 
 		// Should do no I/O, so no JNI thread context needed.
@@ -97,11 +98,6 @@ void StateRingbuffer::ScheduleCompress(std::vector<u8> *result, const std::vecto
 }
 
 void StateRingbuffer::Compress(std::vector<u8> &result, const std::vector<u8> &state, const std::vector<u8> &base) {
-	std::lock_guard<std::mutex> guard(lock_);
-	// Bail if we were cleared before locking.
-	if (first_ == 0 && next_ == 0)
-		return;
-
 	double start_time = time_now_d();
 	result.clear();
 	result.reserve(512 * 1024);
@@ -120,7 +116,7 @@ void StateRingbuffer::Compress(std::vector<u8> &result, const std::vector<u8> &s
 	DEBUG_LOG(Log::SaveState, "Rewind: Compressed save from %d bytes to %d in %0.2f ms.", (int)state.size(), (int)result.size(), taken_s * 1000.0);
 }
 
-void StateRingbuffer::LockedDecompress(std::vector<u8> &result, const std::vector<u8> &compressed, const std::vector<u8> &base) {
+void StateRingbuffer::Decompress(std::vector<u8> &result, const std::vector<u8> &compressed, const std::vector<u8> &base) {
 	result.clear();
 	result.reserve(base.size());
 	auto basePos = base.begin();
@@ -153,8 +149,6 @@ void StateRingbuffer::Clear() {
 	if (compressThread_.joinable())
 		compressThread_.join();
 
-	// This lock is mainly for shutdown.
-	std::lock_guard<std::mutex> guard(lock_);
 	first_ = 0;
 	next_ = 0;
 	for (auto &b : bases_) {

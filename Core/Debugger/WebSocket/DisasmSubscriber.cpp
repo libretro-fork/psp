@@ -34,10 +34,6 @@
 
 class WebSocketDisasmState : public DebuggerSubscriber {
 public:
-	WebSocketDisasmState() {
-		g_disassemblyManager.setCpu(currentDebugMIPS);
-	}
-
 	void Base(DebuggerRequest &req);
 	void Disasm(DebuggerRequest &req);
 	void SearchDisasm(DebuggerRequest &req);
@@ -347,6 +343,7 @@ void WebSocketDisasmState::Disasm(DebuggerRequest &req) {
 	// Route the disassembly manager/symbol reads to the CPU thread instead of poking at them directly
 	// from this WebSocket handler thread - see Core_RunOnCPUThread() in Core.h.
 	Core_RunOnCPUThread([&] {
+		g_disassemblyManager.setCpu(currentDebugMIPS);
 		DebugInterface *cpuDebug = CPUFromRequest(req);
 		if (!cpuDebug)
 			return;
@@ -492,6 +489,7 @@ void WebSocketDisasmState::SearchDisasm(DebuggerRequest &req) {
 	// Note: for a very large [start, end) range, this scan itself can take a while - unlike memory.search
 	// there's no size cap here, so a huge range will block the CPU thread's own frame pump for its duration.
 	Core_RunOnCPUThread([&] {
+		g_disassemblyManager.setCpu(currentDebugMIPS);
 		DebugInterface *cpuDebug = CPUFromRequest(req);
 		if (!cpuDebug)
 			return;

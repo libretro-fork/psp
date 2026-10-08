@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <list>
 #include <map>
-#include <mutex>
 #include <set>
 
 #include "Common/CommonTypes.h"
@@ -531,8 +530,6 @@ static std::vector<SceUID> pendingDeleteThreads;
 
 // Lists all thread ids that aren't deleted/etc.
 static std::vector<SceUID> threadqueue;
-// Only for debugger, so not needed to read, just write.
-static std::mutex threadqueueLock;
 
 // Lists only ready thread ids.
 static ThreadQueueList threadReadyQueue;
@@ -1098,8 +1095,6 @@ void __KernelIdle()
 }
 
 void __KernelThreadingShutdown() {
-	std::lock_guard<std::mutex> guard(threadqueueLock);
-
 	kernelMemory.Free(threadReturnHackAddr);
 	threadqueue.clear();
 	threadReadyQueue.clear();
@@ -1608,8 +1603,6 @@ void __KernelCancelThreadEndTimeout(SceUID threadID)
 }
 
 static void __KernelRemoveFromThreadQueue(SceUID threadID) {
-	std::lock_guard<std::mutex> guard(threadqueueLock);
-
 	int prio = __KernelGetThreadPrio(threadID);
 	if (prio != 0)
 		threadReadyQueue.remove(prio, threadID);
@@ -1993,8 +1986,6 @@ void __KernelResetThread(PSPThread *t, int lowestPriority) {
 }
 
 PSPThread *__KernelCreateThreadObject(SceUID &id, SceUID moduleId, const char *name, u32 entryPoint, u32 priority, int stacksize, u32 attr, BlockAllocator *stackAllocator) {
-	std::lock_guard<std::mutex> guard(threadqueueLock);
-
 	PSPThread *t = new PSPThread();
 	id = kernelObjects.Create(t);
 
@@ -3886,7 +3877,6 @@ void __KernelRegisterWaitTypeFuncs(WaitType type, WaitBeginCallbackFunc beginFun
 }
 
 std::vector<DebugThreadInfo> GetThreadsInfo() {
-	std::lock_guard<std::mutex> guard(threadqueueLock);
 	std::vector<DebugThreadInfo> threadList;
 
 	u32 error;

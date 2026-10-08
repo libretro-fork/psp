@@ -18,7 +18,7 @@
 #pragma once
 
 #include <vector>
-#include <atomic>
+#include <retro_atomic.h>
 
 #include "Core/MIPS/MIPSDebugInterface.h"
 #include "Common/Math/expression_parser.h"
@@ -268,15 +268,15 @@ public:
 	// NOTE: If you edit this array directly, you need to call NotifyChangedMemchecks().
 	std::vector<MemCheck> &GetMemCheckRefs() { return memChecks_; }
 
-	bool HasBreakPoints() const { return anyBreakPoints_; }
-	bool HasMemChecks() const { return anyMemChecks_; }
+	bool HasBreakPoints() const { return retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&anyBreakPoints_)) != 0; }
+	bool HasMemChecks() const { return retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&anyMemChecks_)) != 0; }
 
 	void NotifyChangedMemchecks() { updateMemChecks_ = true; }
 
 	// Bit i set means register i has an active (non-ignored) register breakpoint - a cheap way
 	// for the interpreter's hot per-instruction loop to test "would this write trip anything".
-	u32 GetRegBreakpointMask() const { return regBreakpointMask_; }
-	bool HasRegBreakpoints() const { return regBreakpointMask_ != 0; }
+	u32 GetRegBreakpointMask() const { return (u32)retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&regBreakpointMask_)); }
+	bool HasRegBreakpoints() const { return GetRegBreakpointMask() != 0; }
 
 	void Frame();
 
@@ -297,9 +297,11 @@ private:
 	size_t FindRegBreakpoint(int reg);
 	void RecomputeRegBreakpointMask();
 
-	std::atomic<bool> anyBreakPoints_;
-	std::atomic<bool> anyMemChecks_;
-	std::atomic<u32> regBreakpointMask_;
+	// Everything else is the CPU thread's; these flags are also read from other threads
+	// (memory tagging on GPU and audio worker threads) as a fast "anything set?" check.
+	retro_atomic_int_t anyBreakPoints_{ 0 };
+	retro_atomic_int_t anyMemChecks_{ 0 };
+	retro_atomic_int_t regBreakpointMask_{ 0 };
 
 	std::vector<BreakPoint> breakPoints_;
 	TempBreakPoint tempBreakPoint_;

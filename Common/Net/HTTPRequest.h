@@ -62,9 +62,6 @@ public:
 
 	virtual bool HasRunCallback() { return Done() && hasRunCallback_; }
 
-	// Returns 1.0 when done. That one value can be compared exactly - or just use Done().
-	float Progress() const { return progress_.progress; }
-	float SpeedKBps() const { return progress_.kBps; }
 	std::string url() const { return url_; }
 
 	const Path &OutFile() const { return outfile_; }

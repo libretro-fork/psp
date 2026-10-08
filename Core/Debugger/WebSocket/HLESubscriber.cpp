@@ -835,6 +835,7 @@ void WebSocketHLEBacktrace(DebuggerRequest &req) {
 	// Route the actual CPU/symbol/disassembly reads to the CPU thread instead of poking at them directly
 	// from this WebSocket handler thread - see Core_RunOnCPUThread() in Core.h.
 	Core_RunOnCPUThread([&] {
+		g_disassemblyManager.setCpu(currentDebugMIPS);
 		uint32_t threadID = -1;
 		DebugInterface *cpuDebug = currentDebugMIPS;
 		if (req.HasParam("thread")) {
