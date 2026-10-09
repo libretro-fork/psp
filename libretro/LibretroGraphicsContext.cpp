@@ -157,14 +157,15 @@ LibretroGraphicsContext *LibretroGraphicsContext::CreateGraphicsContext() {
 	return ctx;
 }
 
-std::vector<u32> ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32 stride, u32 h) {
+bool ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32 stride, u32 h, std::vector<u32> &data) {
 	// If the output was small, act like everything outside was 0.
 	// This can happen depending on viewport parameters.
 	u32 safeW = std::min(stride, buffer->GetStride());
 	u32 safeH = std::min(h, buffer->GetHeight());
 
-	std::vector<u32> data;
-	data.resize(stride * h, 0);
+	if (stride == 0 || h == 0)
+		return false;
+	data.resize((size_t)stride * h);
 
 	const u32 *pixels32 = (const u32 *)buffer->GetData();
 	const u16 *pixels16 = (const u16 *)buffer->GetData();
@@ -181,10 +182,15 @@ std::vector<u32> ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32
 	// Skip the bottom of the image in the buffer was smaller.  Remember, we're flipped.
 	u32 *dst = &data[0];
 	if (safeH < h) {
+		std::fill(dst, dst + (size_t)(h - safeH) * stride, 0);
 		dst += (h - safeH) * stride;
 	}
 
 	for (u32 y = 0; y < safeH; ++y) {
+		// Every active pixel is overwritten below. Clear only borders left
+		// over from the previous frame, not the complete output image.
+		if (safeW < stride)
+			std::fill(dst + (size_t)y * stride + safeW, dst + (size_t)(y + 1) * stride, 0);
 		switch (buffer->GetFormat()) {
 		case GPU_DBG_FORMAT_8888:
 			ConvertBGRA8888ToRGBA8888(&dst[y * stride], pixels32, safeW);
@@ -204,13 +210,12 @@ std::vector<u32> ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32
 			break;
 
 		default:
-			data.resize(0);
-			return data;
+			return false;
 		}
 
 		pixels32 += outStride;
 		pixels16 += outStride;
 	}
 
-	return data;
+	return true;
 }

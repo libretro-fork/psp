@@ -71,7 +71,7 @@ protected:
 	retro_hw_render_callback hw_render_ = {};
 };
 
-std::vector<u32> ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32 stride, u32 h);
+bool ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32 stride, u32 h, std::vector<u32> &data);
 
 class LibretroSoftwareContext : public LibretroGraphicsContext {
 public:
@@ -86,14 +86,14 @@ public:
 		}
 		GPUDebugBuffer buf;
 		gpu->GetOutputFramebuffer(buf);
-		// video_cb is synchronous, so the converted vector can be handed over directly.
-		const std::vector<u32> pixels = ConvertFramebufferForLibretro(&buf, w, h);
-		if (pixels.size() < (size_t)w * h) {
+		// video_cb is synchronous; keep backing storage across calls and hand
+		// the converted pixels over without another frame-sized allocation.
+		if (!ConvertFramebufferForLibretro(&buf, w, h, pixels_)) {
 			// Unsupported debug buffer format, conversion returned nothing.
 			video_cb(NULL, w, h, w * sizeof(u32));
 			return;
 		}
-		const u32 *data = pixels.data();
+		const u32 *data = pixels_.data();
 		if (g_Config.bDisplayCropTo16x9) {
 			// 480x272 -> 480x270: skip the first row, drop the last.
 			data += w;
@@ -103,6 +103,8 @@ public:
 	}
 	GPUCore GetGPUCore() override { return GPUCORE_SOFTWARE; }
 	const char *Ident() override { return "Software"; }
+private:
+	std::vector<u32> pixels_;
 };
 
 namespace Libretro {
