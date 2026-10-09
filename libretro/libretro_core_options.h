@@ -407,16 +407,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled"
    },
    {
-      "ppsspp_detect_vsync_swap_interval",
-      "Detect Frame Rate Changes",
-      NULL,
-      "Notify frontend.",
-      NULL,
-      "video",
-      BOOL_OPTIONS,
-      "disabled"
-   },
-   {
       "ppsspp_inflight_frames",
       "Buffer Graphics Commands",
       NULL,

@@ -90,24 +90,9 @@ static MpscQueue<CheatChange> pendingCheats;
 static void ApplyCheatReset();
 static void ApplyCheatSet(unsigned index, bool enabled, const char *code);
 
-// Calculated swap interval is 'stable' if the same
-// value is recorded for a number of retro_run()
-// calls equal to VSYNC_SWAP_INTERVAL_FRAMES
-#define VSYNC_SWAP_INTERVAL_FRAMES 6
-// Calculated swap interval is 'valid' if it is
-// within VSYNC_SWAP_INTERVAL_THRESHOLD of an integer
-// value
-#define VSYNC_SWAP_INTERVAL_THRESHOLD 0.05f
-// Swap interval detection is only enabled if the
-// core is running at 'normal' speed - i.e. if
-// run speed is within VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD
-// percent of 100
-#define VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD 5.0f
-
 static bool libretro_supports_bitmasks = false;
 static bool show_ip_address_options = true;
 static bool show_upnp_port_option = true;
-static bool show_detect_frame_rate_option = true;
 static std::string changeProAdhocServer;
 
 void* unserialize_data = NULL;
@@ -126,18 +111,8 @@ namespace Libretro
    bool g_pendingBoot = false;
    std::string g_bootErrorString;
 
-   static bool detectVsyncSwapInterval = false;
-   static bool detectVsyncSwapIntervalOptShown = true;
    static bool softwareRenderInitHack = false;
 
-   static s64 expectedTimeUsPerRun = 0;
-   static uint32_t vsyncSwapInterval = 1;
-   static uint32_t vsyncSwapIntervalLast = 1;
-   static uint32_t vsyncSwapIntervalCounter = 0;
-   static int numVBlanksLast = 0;
-   static double fpsTimeLast = 0.0;
-   static float runSpeed = 0.0f;
-   static s64 runTicksLast = 0;
 
    // With neither side running.
    static void init_output_audio_buffer()
@@ -206,123 +181,6 @@ namespace Libretro
       return f;
    }
 
-   static void VsyncSwapIntervalReset()
-   {
-      expectedTimeUsPerRun = (s64)(1000000.0f / (60.0f / 1.001f));
-      vsyncSwapInterval = 1;
-      vsyncSwapIntervalLast = 1;
-      vsyncSwapIntervalCounter = 0;
-
-      numVBlanksLast = 0;
-      fpsTimeLast = 0.0;
-      runSpeed = 0.0f;
-      runTicksLast = 0;
-
-      detectVsyncSwapIntervalOptShown = true;
-   }
-
-   static void VsyncSwapIntervalDetect()
-   {
-      if (!detectVsyncSwapInterval)
-         return;
-
-      // All bets are off if core is running at
-      // the 'wrong' speed (i.e. cycle count for
-      // this run will be meaningless if internal
-      // frame rate is dropping below expected
-      // value, or fast forward is enabled)
-      double fpsTime = time_now_d();
-      int numVBlanks = __DisplayGetNumVblanks();
-      int frames = numVBlanks - numVBlanksLast;
-
-      if (frames >= VSYNC_SWAP_INTERVAL_FRAMES << 1)
-      {
-         double fps = (double)frames / (fpsTime - fpsTimeLast);
-         runSpeed = fps / ((60.0f / 1.001f) / 100.0f);
-
-         fpsTimeLast = fpsTime;
-         numVBlanksLast = numVBlanks;
-      }
-
-      float speedDelta = 100.0f - runSpeed;
-      speedDelta = (speedDelta < 0.0f) ? -speedDelta : speedDelta;
-
-      // Speed is measured relative to a 60 Hz refresh
-      // rate. If we are transitioning from a low internal
-      // frame rate to a higher internal frame rate, then
-      // 'full speed' may actually equate to
-      // (100 / current_swap_interval)...
-      if ((vsyncSwapInterval > 1) &&
-          (speedDelta >= VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD))
-      {
-         speedDelta = 100.0f - (runSpeed * (float)vsyncSwapInterval);
-         speedDelta = (speedDelta < 0.0f) ? -speedDelta : speedDelta;
-      }
-
-      if (speedDelta >= VSYNC_SWAP_INTERVAL_RUN_SPEED_THRESHOLD)
-      {
-         // Swap interval detection is invalid - bail out
-         vsyncSwapIntervalCounter = 0;
-         return;
-      }
-
-      // Get elapsed time (us) for this run
-      s64 runTicks = CoreTiming::GetTicks(currentMIPS);
-      s64 runTimeUs = cyclesToUs(runTicks - runTicksLast);
-
-      // Check if current internal frame rate is a
-      // factor of the default ~60 Hz
-      float swapRatio = (float)runTimeUs / (float)expectedTimeUsPerRun;
-      uint32_t swapInteger;
-      float swapRemainder;
-
-      // If internal frame rate is equal to (within threshold)
-      // or higher than the default ~60 Hz, fall back to a
-      // swap interval of 1
-      if (swapRatio < (1.0f + VSYNC_SWAP_INTERVAL_THRESHOLD))
-      {
-         swapInteger = 1;
-         swapRemainder = 0.0f;
-      }
-      else
-      {
-         swapInteger = (uint32_t)(swapRatio + 0.5f);
-         swapRemainder = swapRatio - (float)swapInteger;
-         swapRemainder = (swapRemainder < 0.0f) ?
-               -swapRemainder : swapRemainder;
-      }
-
-      // > Swap interval is considered 'valid' if it is
-      //   within VSYNC_SWAP_INTERVAL_THRESHOLD of an integer
-      //   value
-      // > If valid, check if new swap interval differs from
-      //   previously logged value
-      if ((swapRemainder <= VSYNC_SWAP_INTERVAL_THRESHOLD) &&
-          (swapInteger != vsyncSwapInterval))
-      {
-         vsyncSwapIntervalCounter =
-               (swapInteger == vsyncSwapIntervalLast) ?
-                     (vsyncSwapIntervalCounter + 1) : 0;
-
-         // Check whether swap interval is 'stable'
-         if (vsyncSwapIntervalCounter >= VSYNC_SWAP_INTERVAL_FRAMES)
-         {
-            vsyncSwapInterval = swapInteger;
-            vsyncSwapIntervalCounter = 0;
-
-            // Notify frontend
-            retro_system_av_info avInfo;
-            retro_get_system_av_info(&avInfo);
-            environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avInfo);
-         }
-
-         vsyncSwapIntervalLast = swapInteger;
-      }
-      else
-         vsyncSwapIntervalCounter = 0;
-
-      runTicksLast = runTicks;
-   }
 } // namespace Libretro
 
 using namespace Libretro;
@@ -388,32 +246,6 @@ static bool set_variable_visibility(void)
    {
       option_display.visible = show_upnp_port_option;
       option_display.key = "ppsspp_upnp_use_original_port";
-      environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
-      updated = true;
-   }
-
-   // Show/hide 'Detect Frame Rate Changes' option
-   bool show_detect_frame_rate_option_prev = show_detect_frame_rate_option;
-   int frameskip = 0;
-   bool auto_frameskip = false;
-   bool dupe_frames = false;
-   show_detect_frame_rate_option = true;
-
-   var.key = "ppsspp_frameskip";
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "disabled"))
-      frameskip = atoi(var.value);
-   var.key = "ppsspp_auto_frameskip";
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "enabled"))
-      auto_frameskip = true;
-   var.key = "ppsspp_frame_duplication";
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "enabled"))
-      dupe_frames = true;
-
-   show_detect_frame_rate_option = (frameskip == 0) && !auto_frameskip && !dupe_frames;
-   if (show_detect_frame_rate_option != show_detect_frame_rate_option_prev)
-   {
-      option_display.visible = show_detect_frame_rate_option;
-      option_display.key = "ppsspp_detect_vsync_swap_interval";
       environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_DISPLAY, &option_display);
       updated = true;
    }
@@ -762,15 +594,6 @@ static void check_variables(CoreParameter &coreParam)
          g_Config.bRenderDuplicateFrames = true;
    }
 
-   var.key = "ppsspp_detect_vsync_swap_interval";
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      if (!strcmp(var.value, "disabled"))
-         detectVsyncSwapInterval = false;
-      else
-         detectVsyncSwapInterval = true;
-   }
-
    var.key = "ppsspp_inflight_frames";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -1069,23 +892,8 @@ static void check_variables(CoreParameter &coreParam)
    g_Config.sLanguageIni = map_psp_language_to_i18n_locale(g_Config.iLanguage);
    g_i18nrepo.LoadIni(g_Config.sLanguageIni);
 
-   // Cannot detect refresh rate changes if:
-   // > Frame skipping is enabled
-   // > Frame duplication is enabled
-   detectVsyncSwapInterval &=
-         !g_Config.bAutoFrameSkip &&
-         (g_Config.iFrameSkip == 0) &&
-         !g_Config.bRenderDuplicateFrames;
-
-   bool updateAvInfo = false;
    bool updateGeometry = false;
    bool resetHWContext = false;
-
-   if (!detectVsyncSwapInterval && (vsyncSwapInterval != 1))
-   {
-      vsyncSwapInterval = 1;
-      updateAvInfo = true;
-   }
 
    if (g_Config.iInternalResolution != iInternalResolution_prev && backend != RETRO_HW_CONTEXT_NONE)
    {
@@ -1097,7 +905,6 @@ static void check_variables(CoreParameter &coreParam)
          retro_system_av_info avInfo;
          retro_get_system_av_info(&avInfo);
          environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avInfo);
-         updateAvInfo = false;
          gpu->NotifyDisplayResized();
          if (ctx && ctx->GetGPUCore() != GPUCORE_VULKAN)
             resetHWContext = true;
@@ -1122,13 +929,7 @@ static void check_variables(CoreParameter &coreParam)
       }
    }
 
-   if (updateAvInfo)
-   {
-      retro_system_av_info avInfo;
-      retro_get_system_av_info(&avInfo);
-      environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &avInfo);
-   }
-   else if (updateGeometry)
+   if (updateGeometry)
    {
       retro_system_av_info avInfo;
       retro_get_system_av_info(&avInfo);
@@ -1180,7 +981,6 @@ void retro_init(void)
       g_logManager.AddExternalLogCallback(&RetroLogCallback, (void *)log_cb);
    }
 
-   VsyncSwapIntervalReset();
 
    struct retro_input_descriptor desc[] = {
       { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_LEFT, "D-Pad Left" },
@@ -1287,7 +1087,6 @@ void retro_deinit(void)
 
    libretro_supports_bitmasks = false;
 
-   VsyncSwapIntervalReset();
 
    free_output_audio_buffer();
 }
@@ -1310,7 +1109,7 @@ void retro_get_system_info(struct retro_system_info *info)
 void retro_get_system_av_info(struct retro_system_av_info *info)
 {
    *info = {};
-   info->timing.fps            = (60.0 / 1.001) / (double)vsyncSwapInterval;
+   info->timing.fps            = 60.0 / 1.001;
    info->timing.sample_rate    = SAMPLERATE;
 
    _dbg_assert_(g_Config.iInternalResolution != 0);
@@ -1779,14 +1578,12 @@ void retro_run(void) {
 
       if (!ctx->ThreadFrame()) {
          // We're done processing the last frame from the emu thread.
-         VsyncSwapIntervalDetect();
          return;
       }
    }
    else
       EmuFrame();
 
-   VsyncSwapIntervalDetect();
    ctx->SwapBuffers();
    upload_output_audio_buffer();
 }
