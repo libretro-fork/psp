@@ -20,10 +20,9 @@ This runs all tests in `availableTests` in unittest/UnitTest.cpp. You can run on
 specific tests by passing their names instead of `all` (space-separated, e.g. `PPSSPPUnitTest
 CmdLine Path Utf8`); no arguments lists the available tests.
 
-After a header change, or a `git stash`/`git stash pop` that touches a header, build the libretro core
-clean: its Makefile doesn't track header dependencies, so adding or removing a class member produces a
-binary where translation units disagree on the object layout. That shows up as crashes that look like
-a catastrophic code bug and are not one.
+The libretro Makefile tracks C/C++ header dependencies. Build clean when changing toolchains or
+compiler flags, or when migrating objects produced before dependency sidecars were enabled. Mixing
+stale objects with changed class layouts can produce crashes from disagreeing translation units.
 
 More generally, **when you are bisecting a behavioural change, confirm the binary actually changed
 before you believe the result** - check the executable's mtime, or have the code you just added log

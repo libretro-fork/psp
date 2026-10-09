@@ -110,9 +110,9 @@ for it:
   `./b.sh --libretro`.
 - The headless tools: `./b.sh --headless --unittest PPSSPPHeadless PPSSPPUnitTest`; after that,
   `cd build ; make -j32; cd ..`.
-- **A stale binary lies consistently.** The libretro Makefile doesn't track header dependencies, so
-  after a header change (or a `git stash` cycle that touched one) build it clean; when bisecting a
-  behavioural change, confirm the binary actually changed before you believe the result.
+- **A stale binary lies consistently.** The libretro Makefile tracks C/C++ header dependencies.
+  Build clean when changing toolchains/flags, or when migrating old objects without dependency
+  sidecars; when bisecting a behavioural change, confirm the binary actually changed.
 - **If a savestate fails to load, first suspect the branch, not the loader.** Either your branch is
   behind the build that made the state (rebase it on `origin/master` and rebuild), or the state was
   made on a branch that hasn't been merged yet. Only once you've ruled out both is it a savestate

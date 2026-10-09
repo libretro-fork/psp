@@ -529,6 +529,15 @@ endif
 
 all: $(TARGET)
 
+# Keep translation units consistent after shared header/layout changes.
+ifneq (,$(findstring msvc,$(platform)))
+DEPFLAGS = -sourceDependencies $@.deps.json
+DEPPOST = python3 msvc_deps.py "$@.deps.json" "$@" "$@.d"
+else
+DEPFLAGS = -MMD -MP -MF $@.d -MT $@
+DEPPOST =
+endif
+
 ifeq ($(FFMPEG_MINGW), 1)
 $(FFMPEG_MINGW_STAMP):
 	rm -rf $(FFMPEG_MINGW_DIR)
@@ -545,10 +554,12 @@ endif
 	$(AS) $(CFLAGS) -c $(OBJOUT)$@ $<
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $(OBJOUT)$@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $(OBJOUT)$@ $<
+	$(DEPPOST)
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $(OBJOUT)$@ $<
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c $(OBJOUT)$@ $<
+	$(DEPPOST)
 
 $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING), 1)
@@ -575,12 +586,14 @@ test/lrgltest: test/lrgltest.c
 test-tools: $(TARGET) test/codectest test/blocktest test/lrtest test/lrgltest
 
 clean:
-	rm -f $(OBJECTS) $(TARGET) test/*.o test/codectest test/blocktest test/lrtest test/lrgltest
+	rm -f $(OBJECTS) $(addsuffix .d,$(OBJECTS)) $(addsuffix .deps.json,$(OBJECTS)) $(TARGET) test/*.o test/*.o.d test/*.o.deps.json test/codectest test/blocktest test/lrtest test/lrgltest
 ifeq ($(FFMPEG_MINGW), 1)
 	rm -rf $(FFMPEG_MINGW_DIR)
 endif
 
 .PHONY: clean test-tools
+
+-include $(addsuffix .d,$(OBJECTS)) $(wildcard test/*.o.d)
 
 print-%:
 	@echo '$*=$($*)'

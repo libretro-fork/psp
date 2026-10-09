@@ -125,6 +125,9 @@ debian/ppsspp/
 
 # Libretro build
 *.o
+*.o.d
+*.o.deps.json
+*.o.d.tmp
 *.tmp
 *.a
 
