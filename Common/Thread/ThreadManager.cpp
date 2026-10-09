@@ -140,8 +140,13 @@ struct GlobalThreadContext {
 	TaskPool pools[2];  // CPU_COMPUTE, IO_BLOCKING
 	std::vector<TaskThreadContext *> threads_;
 
-	retro_atomic_int_t dedicatedLive;
-	retro_eventcount_t dedicatedDone;
+	mpsc_stack_t dedicatedThreads;
+};
+
+struct DedicatedStart {
+	mpsc_stack_node_t node;
+	Task *task;
+	sthread_t *thread;
 };
 
 struct LocalFifo {
@@ -193,8 +198,7 @@ static TaskPool &PoolFor(GlobalThreadContext *global, TaskType type) {
 }
 
 ThreadManager::ThreadManager() : global_(new GlobalThreadContext()) {
-	retro_atomic_int_init(&global_->dedicatedLive, 0);
-	retro_eventcount_init(&global_->dedicatedDone);
+	mpsc_stack_init(&global_->dedicatedThreads);
 }
 
 ThreadManager::~ThreadManager() {
@@ -202,10 +206,7 @@ ThreadManager::~ThreadManager() {
 	// otherwise, if Teardown() was never called (e.g. an early return between Init()
 	// and the caller's normal shutdown path), the still-running threads would go on
 	// touching global_'s queues after they're freed here.
-	if (IsInitialized()) {
-		Teardown();
-	}
-	retro_eventcount_free(&global_->dedicatedDone);
+	Teardown();
 	delete global_;
 }
 
@@ -300,6 +301,24 @@ static void WakeOneIdle(TaskPool &pool) {
 }
 
 void ThreadManager::Teardown() {
+	// Dedicated tasks can enqueue or wait for pooled work. Drain them while
+	// the pools are still running, before cancellation removes their workers.
+	auto joinDedicated = [this] {
+		for (;;) {
+			mpsc_stack_node_t *node = mpsc_stack_drain(&global_->dedicatedThreads);
+			if (!node)
+				break;
+			while (node) {
+				mpsc_stack_node_t *next = node->next;
+				DedicatedStart *start = (DedicatedStart *)node;
+				sthread_join(start->thread);
+				delete start;
+				node = next;
+			}
+		}
+	};
+	joinDedicated();
+
 	for (TaskThreadContext *threadCtx : global_->threads_) {
 		retro_atomic_store_release_int(&threadCtx->cancelled, 1);
 		retro_eventcount_notify(&threadCtx->wake);
@@ -309,6 +328,9 @@ void ThreadManager::Teardown() {
 		sthread_join(threadCtx->thread);
 		threadCtx->thread = nullptr;
 	}
+	// A pooled task finishing during cancellation may have launched another
+	// dedicated task. Keep the pool storage alive until those producers exit.
+	joinDedicated();
 
 	// No worker picks up anything once cancelled, so whatever is still queued will never
 	// run. Cancel and release it so it doesn't leak (and waiters on it are released).
@@ -343,18 +365,6 @@ void ThreadManager::Teardown() {
 	}
 	global_->threads_.clear();
 
-	// Dedicated threads are detached; wait until they're all done with their tasks so
-	// none of them outlives the core.
-	for (;;) {
-		if (retro_atomic_load_acquire_int(&global_->dedicatedLive) == 0)
-			break;
-		const int key = retro_eventcount_prepare_wait(&global_->dedicatedDone);
-		if (retro_atomic_load_acquire_int(&global_->dedicatedLive) == 0) {
-			retro_eventcount_cancel_wait(&global_->dedicatedDone);
-			break;
-		}
-		retro_eventcount_commit_wait(&global_->dedicatedDone, key);
-	}
 }
 
 void ThreadManager::TeardownTask(Task *task) {
@@ -410,35 +420,26 @@ void ThreadManager::Init(int numRealCores, int numLogicalCoresPerCpu) {
 	}
 }
 
-struct DedicatedStart {
-	GlobalThreadContext *global;
-	Task *task;
-};
-
 static void DedicatedThreadFunc(void *arg) {
 	DedicatedStart *start = (DedicatedStart *)arg;
-	GlobalThreadContext *global = start->global;
 	Task *task = start->task;
-	delete start;
 
 	SetCurrentThreadName("DedicatedThreadTask");
 	task->Run();
 	task->Release();
-
-	if (retro_atomic_fetch_sub_int(&global->dedicatedLive, 1) == 1)
-		retro_eventcount_notify(&global->dedicatedDone);
 }
 
 void ThreadManager::EnqueueTask(Task *task) {
 	if (task->Type() == TaskType::DEDICATED_THREAD) {
-		DedicatedStart *start = new DedicatedStart{ global_, task };
-		retro_atomic_fetch_add_int(&global_->dedicatedLive, 1);
+		DedicatedStart *start = new DedicatedStart{ {}, task, nullptr };
 		sthread_t *th = sthread_create(&DedicatedThreadFunc, start);
 		if (th) {
-			sthread_detach(th);
+			start->thread = th;
+			mpsc_stack_push(&global_->dedicatedThreads, &start->node);
 		} else {
 			// Couldn't start a thread; run it here rather than lose it.
 			DedicatedThreadFunc(start);
+			delete start;
 		}
 		return;
 	}
