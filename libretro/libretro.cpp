@@ -77,6 +77,8 @@
 static retro_spsc_t output_audio_ring;
 static bool output_audio_ring_ok = false;
 static const size_t OUTPUT_AUDIO_RING_FRAMES = 32768;
+static retro_atomic_size_t output_audio_discard_until{ 0 };
+static retro_atomic_int_t output_audio_clear_requested{ 0 };
 
 struct CheatChange {
    bool reset;
@@ -141,6 +143,8 @@ namespace Libretro
    static void init_output_audio_buffer()
    {
       output_audio_ring_ok = retro_spsc_init(&output_audio_ring, OUTPUT_AUDIO_RING_FRAMES * 4);
+      retro_atomic_store_relaxed_size(&output_audio_discard_until, 0);
+      retro_atomic_store_relaxed_int(&output_audio_clear_requested, 0);
       if (!output_audio_ring_ok && log_cb)
          log_cb(RETRO_LOG_ERROR, "Failed to allocate the output audio buffer\n");
    }
@@ -156,13 +160,29 @@ namespace Libretro
    {
       if (!output_audio_ring_ok)
          return;
+      // The producer publishes a discard boundary; only the consumer advances
+      // tail. Do not reset live SPSC cursors from the emulation thread.
+      if (retro_atomic_exchange_int(&output_audio_clear_requested, 0)) {
+         const size_t target = retro_atomic_load_acquire_size(&output_audio_discard_until);
+         const size_t tail = retro_atomic_load_relaxed_size(&output_audio_ring.tail);
+         const size_t discard = target - tail;
+         if (discard <= retro_spsc_read_avail(&output_audio_ring))
+            retro_spsc_skip(&output_audio_ring, discard);
+      }
+      // Deliver the current batch, not samples produced indefinitely while a
+      // slow frontend callback is running.
+      size_t remaining = retro_spsc_read_avail(&output_audio_ring) & ~(size_t)3;
       const void *ptr;
       size_t bytes;
-      while ((bytes = retro_spsc_read_begin(&output_audio_ring, &ptr)) >= 4)
+      while (remaining && (bytes = retro_spsc_read_begin(&output_audio_ring, &ptr)) >= 4)
       {
-         bytes &= ~(size_t)3;
-         audio_batch_cb((const int16_t *)ptr, bytes / 4);
-         retro_spsc_read_end(&output_audio_ring, bytes);
+         bytes = std::min(bytes & ~(size_t)3, remaining);
+         const size_t frames = bytes / 4;
+         const size_t consumed = std::min(audio_batch_cb((const int16_t *)ptr, frames), frames);
+         retro_spsc_read_end(&output_audio_ring, consumed * 4);
+         remaining -= consumed * 4;
+         if (consumed < frames)
+            break;
       }
    }
 
@@ -1551,6 +1571,7 @@ void retro_unload_game(void) {
    }
 
 	PSP_Shutdown(true);
+	System_AudioClear();
 	pendingCheats.Drain([](CheatChange &&) {});
 	g_pendingBoot = false;
 	g_bootErrorString.clear();
@@ -1571,6 +1592,7 @@ void retro_reset(void) {
       Libretro::EmuThreadStop();
 
    PSP_Shutdown(true);
+   System_AudioClear();
    g_pendingBoot = false;
    free(unserialize_data);
    unserialize_data = nullptr;
@@ -2059,7 +2081,13 @@ void System_AudioPushSamples(const int32_t *audio, int numSamples, float volume)
 }
 
 void System_AudioGetDebugStats(char *buf, size_t bufSize) { if (buf) buf[0] = '\0'; }
-void System_AudioClear() {}
+void System_AudioClear() {
+   if (!output_audio_ring_ok)
+      return;
+   retro_atomic_store_release_size(&output_audio_discard_until,
+      retro_atomic_load_acquire_size(&output_audio_ring.head));
+   retro_atomic_store_release_int(&output_audio_clear_requested, 1);
+}
 #if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(IOS)
 bool System_AudioRecordingIsAvailable() { return false; }
 bool System_AudioRecordingState() { return false; }
