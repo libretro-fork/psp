@@ -55,6 +55,8 @@ struct CachedReadback {
 	VmaAllocation allocation;
 	VkDeviceSize bufferSize;
 	bool isCoherent;
+	// frameId of the frame that created it; holds no data until that frame comes round again.
+	uint64_t createdFrame;
 
 	void Destroy(VulkanContext *vulkan);
 };

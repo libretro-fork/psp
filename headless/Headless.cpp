@@ -977,16 +977,22 @@ int main(int argc, const char* argv[]) {
 		// We don't bother with a window.
 		graphicsContext = new NullGraphicsContext();
 	} else {
-#if PPSSPP_PLATFORM(ANDROID) || defined(HEADLESS_NO_SDL)
+#if PPSSPP_PLATFORM(ANDROID)
 		fprintf(stderr, "Headless graphics context creation is not supported on this platform.\n");
 		return 1;
 #else
 		if (gpuCore == GPUCORE_VULKAN) {
-			// Vulkan renders into images of its own, with no window or swapchain.
+			// Vulkan renders into images of its own, with no window or swapchain, so it needs no SDL.
 			VulkanGraphicsContext *vulkanContext = new VulkanGraphicsContext();
 			vulkanContext->SetOffscreen(480, 272);
 			graphicsContext = vulkanContext;
 			deviceSetting = &g_Config.sVulkanDevice;
+#if defined(HEADLESS_NO_SDL)
+		} else {
+			fprintf(stderr, "Headless graphics context creation is not supported in this build.\n");
+			return 1;
+		}
+#else
 #if PPSSPP_PLATFORM(MAC) && defined(SDL)
 		} else if (gpuCore == GPUCORE_GLES) {
 			// So does OpenGL, into a framebuffer object of its own.
@@ -1006,6 +1012,7 @@ int main(int argc, const char* argv[]) {
 				return 1;
 			}
 		}
+#endif
 #endif
 	}
 

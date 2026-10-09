@@ -76,7 +76,7 @@ typedef std::function<void(VulkanContext *)> DeleteCallback;
 // This is a bit repetitive...
 //
 // Thread safety: the queueing functions can be called from any thread - the render thread queues
-// deletes too (VulkanDescSetPool::Recreate from FlushDescSets, ResizeReadbackBuffer). They push onto
+// deletes too (VulkanDescSetPool::Recreate from FlushDescSets). They push onto
 // a lock-free MPSC queue. Take() and PerformDeletes() belong to one thread, the main thread, which
 // moves the queued items into the per-kind vectors.
 class VulkanDeleteList {

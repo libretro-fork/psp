@@ -6,20 +6,11 @@
 #include "Common/TimeUtil.h"
 #include "Common/Log.h"
 
-#ifdef HAVE_LIBNX
-#include <switch.h>
-#endif // HAVE_LIBNX
-
-#ifdef __EMSCRIPTEN__
-#include <emscripten/emscripten.h>
-#endif // __EMSCRIPTEN__
-
 #ifdef _WIN32
 #include "CommonWindows.h"
 #include <sys/timeb.h>
 #else
 #include <sys/time.h>
-#include <unistd.h>
 #endif
 
 #include <ctime>
@@ -255,45 +246,6 @@ double Instant::ElapsedSeconds() const {
 	return (double)ElapsedNanos() * (1.0 / 1000000000.0);
 }
 
-#endif
-
-#ifndef __LIBRETRO__
-// The headless tools and tests only; see TimeUtil.h.
-void sleep_ms(int ms, const char *reason) {
-	if (ms <= 0) {
-		return;
-	}
-#if SLEEP_LOG_ENABLED
-	INFO_LOG(Log::System, "Sleep %d ms: %s", ms, reason);
-#endif
-#ifdef _WIN32
-	Sleep(ms);
-#elif defined(HAVE_LIBNX)
-	svcSleepThread(ms * 1000000);
-#elif defined(__EMSCRIPTEN__)
-	emscripten_sleep(ms);
-#else
-	usleep(ms * 1000);
-#endif
-}
-
-void sleep_us(int us, const char *reason) {
-	if (us <= 0) {
-		return;
-	}
-#if SLEEP_LOG_ENABLED
-	INFO_LOG(Log::System, "Sleep %d us: %s", us, reason);
-#endif
-#ifdef _WIN32
-	Sleep(us / 1000);
-#elif defined(HAVE_LIBNX)
-	svcSleepThread(us * 1000);
-#elif defined(__EMSCRIPTEN__)
-	emscripten_sleep(us / 1000);
-#else
-	usleep(us);
-#endif
-}
 #endif
 
 // Return the current time formatted as Minutes:Seconds:Milliseconds

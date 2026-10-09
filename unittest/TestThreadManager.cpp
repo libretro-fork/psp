@@ -4,6 +4,7 @@
 #include "Common/Log.h"
 #include "Common/TimeUtil.h"
 #include "Common/Thread/Barrier.h"
+#include "Common/Thread/Event.h"
 #include "Common/Thread/ThreadManager.h"
 #include "Common/Thread/Channel.h"
 #include "Common/Thread/Promise.h"
@@ -18,8 +19,11 @@ struct ResultObject {
 	bool ok;
 };
 
+// Holds the result back until the parallel loop test is done, so BlockUntilReady really waits.
+static Event *g_resultGate;
+
 ResultObject *ResultProducer() {
-	sleep_ms(250, "test-result");
+	g_resultGate->Wait();
 	printf("result produced: thread %d\n", GetCurrentThreadIdForDebug());
 	return new ResultObject{ true };
 }
@@ -36,7 +40,6 @@ bool TestMailbox() {
 }
 
 void rangeFunc(int lower, int upper) {
-	sleep_ms(30, "test-range");
 	printf(" - range %d-%d (thread %d)\n", lower, upper, GetCurrentThreadIdForDebug());
 }
 
@@ -130,12 +133,12 @@ bool TestThreadManager() {
 
 	g_threadMan = &manager;
 
+	Event resultGate;
+	g_resultGate = &resultGate;
 	Promise<ResultObject *> *object(Promise<ResultObject *>::Spawn(&manager, &ResultProducer, TaskType::IO_BLOCKING));
 
-	if (!TestParallelLoop(&manager)) {
-		return false;
-	}
-	sleep_ms(100, "test-threadman");
+	const bool loopOk = TestParallelLoop(&manager);
+	resultGate.Notify();
 
 	ResultObject *result = object->BlockUntilReady();
 	if (result) {
@@ -143,6 +146,9 @@ bool TestThreadManager() {
 	}
 
 	delete object;
+	if (!loopOk) {
+		return false;
+	}
 
 	if (!TestMailbox()) {
 		return false;

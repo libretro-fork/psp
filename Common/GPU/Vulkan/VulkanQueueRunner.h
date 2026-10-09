@@ -187,6 +187,7 @@ struct VKRStep {
 			VkRect2D srcRect;
 			VkImageAspectFlags aspectMask;
 			bool delayed;
+			CachedReadback *dst;
 		} readback;
 		struct {
 			VkImage image;
@@ -244,6 +245,10 @@ public:
 	inline int RPIndex(VKRRenderPassLoadAction color, VKRRenderPassLoadAction depth) {
 		return (int)depth * 3 + (int)color;
 	}
+
+	// Readback buffers are allocated here on the recording thread, so the render thread never
+	// touches the allocator. src == nullptr or !delayed means the sync readback buffer.
+	CachedReadback *PrepareReadback(FrameData &frameData, VKRFramebuffer *src, int width, int height, bool delayed);
 
 	// src == 0 means to copy from the sync readback buffer.
 	bool CopyReadbackBuffer(FrameData &frameData, VKRFramebuffer *src, int width, int height, Draw::DataFormat srcFormat, Draw::DataFormat destFormat, int pixelStride, uint8_t *pixels);

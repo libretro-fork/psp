@@ -84,7 +84,7 @@ The `--graphics` option selects the rendering backend:
 | `software`     | Software rasterizer (most deterministic, recommended for tests) |
 | `gles`         | OpenGL ES (desktop OpenGL on non-Windows)                       |
 | `directx11`    | Direct3D 11 (Windows only)                                      |
-| `vulkan`       | Vulkan                                                          |
+| `vulkan`       | Vulkan, offscreen (also in builds without SDL)                  |
 
 The software backend produces deterministic output across runs and is the default. Hardware backends may produce slightly different pixels due to precision differences in shaders and rasterization.
 

@@ -345,7 +345,7 @@ jobs:
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update -y -qq
-        sudo apt-get install libsdl3-dev libgl1-mesa-dev libglu1-mesa-dev libsdl3-ttf-dev libfontconfig1-dev libcurl4-openssl-dev
+        sudo apt-get install libsdl3-dev libgl1-mesa-dev libglu1-mesa-dev libsdl3-ttf-dev libfontconfig1-dev libcurl4-openssl-dev mesa-vulkan-drivers
 
     - name: Install macOS dependencies
       if: runner.os == 'macOS'
@@ -389,6 +389,12 @@ jobs:
           echo "::endgroup::"
         done
         exit $fail
+
+    # Runs the Vulkan backend's render and compile threads on lavapipe.
+    - name: Execute headless tests (Vulkan)
+      if: matrix.os == 'ubuntu-26.04'
+      working-directory: ${{ env.GITHUB_WORKSPACE }}
+      run: python3 test.py -g --graphics=vulkan --known-failures=vulkan
 
     # x86-64 only: the reference images don't match what the software renderer produces on arm64,
     # 23 of the 30 dumps differ there, one of them by an MSE of 100. That's a real difference and

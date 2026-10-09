@@ -19,13 +19,6 @@ double from_time_raw_relative(uint64_t raw_time);
 double time_now_unix_utc();
 double time_to_unix_utc(double timeNowSeconds);
 
-#ifndef __LIBRETRO__
-// Sleeps, for the standalone frontends, headless tools and tests. The core never sleeps and
-// doesn't have this, so a sleep can't creep back into it.
-void sleep_ms(int ms, const char *reason);
-void sleep_us(int us, const char *reason);
-#endif
-
 void GetCurrentTimeFormatted(char formattedTime[13]);
 
 // Most accurate timer possible - no extra double conversions. Only for spans.

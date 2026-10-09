@@ -1147,6 +1147,7 @@ bool VulkanRenderManager::CopyFramebufferToMemory(VKRFramebuffer *src, VkImageAs
 	step->readback.srcRect.offset = { x, y };
 	step->readback.srcRect.extent = { (uint32_t)w, (uint32_t)h };
 	step->readback.delayed = mode == Draw::ReadbackMode::OLD_DATA_OK;
+	step->readback.dst = queueRunner_.PrepareReadback(frameData_[vulkan_->GetCurFrame()], src, w, h, step->readback.delayed);
 	step->dependencies.insert(src);
 	step->tag = tag;
 	steps_.push_back(step);
@@ -1207,6 +1208,7 @@ void VulkanRenderManager::CopyImageToMemorySync(VkImage image, int mipLevel, int
 	step->readback_image.srcRect.extent = { (uint32_t)w, (uint32_t)h };
 	step->readback_image.mipLevel = mipLevel;
 	step->tag = tag;
+	queueRunner_.PrepareReadback(frameData_[vulkan_->GetCurFrame()], nullptr, w, h, false);
 	steps_.push_back(step);
 
 	FlushSync();

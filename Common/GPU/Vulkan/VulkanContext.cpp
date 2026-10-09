@@ -926,6 +926,9 @@ VkResult VulkanContext::CreateDevice(int physical_device, const std::vector<cons
 	allocatorInfo.physicalDevice = physical_devices_[physical_device_];
 	allocatorInfo.device = device_;
 	allocatorInfo.instance = instance_;
+	// Only the thread that records frames allocates and frees (the render thread hands readbacks to
+	// it, deletes are queued), so the allocator needs no internal locking.
+	allocatorInfo.flags = VMA_ALLOCATOR_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
 	VkResult result = vmaCreateAllocator(&allocatorInfo, &allocator_);
 	_assert_(result == VK_SUCCESS);
 	_assert_(allocator_ != VK_NULL_HANDLE);

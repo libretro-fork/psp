@@ -668,7 +668,7 @@ endif(USE_FFMPEG)
 
 if(LIBRETRO)
 elseif(HEADLESS_CROSS OR WIN32 OR ANDROID OR IOS)
-	# No SDL3 here: the headless tools run with --graphics=software only.
+	# No SDL3 here: the headless tools run with --graphics=software or vulkan only.
 	add_definitions(-DHEADLESS_NO_SDL)
 else()
 	# The headless tools create their GL contexts with SDL.

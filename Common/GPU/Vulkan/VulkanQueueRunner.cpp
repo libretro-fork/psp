@@ -1703,6 +1703,26 @@ void VulkanQueueRunner::ResizeReadbackBuffer(CachedReadback *readback, VkDeviceS
 	readback->isCoherent = (memoryType.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 }
 
+CachedReadback *VulkanQueueRunner::PrepareReadback(FrameData &frameData, VKRFramebuffer *src, int width, int height, bool delayed) {
+	// TODO: Handle different readback formats!
+	const VkDeviceSize size = sizeof(uint32_t) * (VkDeviceSize)width * (VkDeviceSize)height;
+	CachedReadback *cached = &syncReadback_;
+	if (delayed) {
+		ReadbackKey key;
+		key.framebuf = src;
+		key.width = width;
+		key.height = height;
+		if (!frameData.readbacks_.Get(key, &cached)) {
+			cached = new CachedReadback();
+			cached->bufferSize = 0;
+			cached->createdFrame = frameData.frameId;
+			frameData.readbacks_.Insert(key, cached);
+		}
+	}
+	ResizeReadbackBuffer(cached, size);
+	return cached;
+}
+
 void VulkanQueueRunner::PerformReadback(const VKRStep &step, VkCommandBuffer cmd, FrameData &frameData) {
 	VkImage image;
 	VkImageLayout copyLayout;
@@ -1736,28 +1756,7 @@ void VulkanQueueRunner::PerformReadback(const VKRStep &step, VkCommandBuffer cmd
 
 	recordBarrier_.Flush(cmd);
 
-	// TODO: Handle different readback formats!
-	u32 readbackSizeInBytes = sizeof(uint32_t) * step.readback.srcRect.extent.width * step.readback.srcRect.extent.height;
-
-	CachedReadback *cached = nullptr;
-
-	if (step.readback.delayed) {
-		ReadbackKey key;
-		key.framebuf = step.readback.src;
-		key.width = step.readback.srcRect.extent.width;
-		key.height = step.readback.srcRect.extent.height;
-
-		// See if there's already a buffer we can reuse
-		if (!frameData.readbacks_.Get(key, &cached)) {
-			cached = new CachedReadback();
-			cached->bufferSize = 0;
-			frameData.readbacks_.Insert(key, cached);
-		}
-	} else {
-		cached = &syncReadback_;
-	}
-
-	ResizeReadbackBuffer(cached, readbackSizeInBytes);
+	CachedReadback *cached = step.readback.dst;
 
 	VkBufferImageCopy region{};
 	region.imageOffset = { step.readback.srcRect.offset.x, step.readback.srcRect.offset.y, 0 };
@@ -1792,8 +1791,6 @@ void VulkanQueueRunner::PerformReadbackImage(const VKRStep &step, VkCommandBuffe
 	recordBarrier_.TransitionColorImageAuto(step.readback_image.image, &layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1, 1);
 	recordBarrier_.Flush(cmd);
 
-	ResizeReadbackBuffer(&syncReadback_, sizeof(uint32_t) * step.readback_image.srcRect.extent.width * step.readback_image.srcRect.extent.height);
-
 	VkBufferImageCopy region{};
 	region.imageOffset = { step.readback_image.srcRect.offset.x, step.readback_image.srcRect.offset.y, 0 };
 	region.imageExtent = { step.readback_image.srcRect.extent.width, step.readback_image.srcRect.extent.height, 1 };
@@ -1827,7 +1824,7 @@ bool VulkanQueueRunner::CopyReadbackBuffer(FrameData &frameData, VKRFramebuffer 
 		key.width = width;
 		key.height = height;
 		CachedReadback *cached;
-		if (frameData.readbacks_.Get(key, &cached)) {
+		if (frameData.readbacks_.Get(key, &cached) && cached->createdFrame != frameData.frameId) {
 			readback = cached;
 		} else {
 			// Didn't have a cached image ready yet

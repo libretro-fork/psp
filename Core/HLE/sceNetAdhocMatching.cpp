@@ -1131,18 +1131,9 @@ static void MatchingEventPass(SceNetAdhocMatchingContext *context, int matchingI
 			// Log Matching Events
 			INFO_LOG(Log::sceNet, "EventLoop[%d]: Matching Event [%d=%s][%s] OptSize=%d", matchingId, msg->opcode, getMatchingEventStr(msg->opcode), mac2str(&msg->mac).c_str(), msg->optlen);
 
-			// Unlock to prevent race-condition with other threads due to recursive lock
-			//			// Call Event Handler
-			//context->handler(context->id, msg->opcode, &msg->mac, msg->optlen, opt);
 			// Notify Event Handlers
-			notifyMatchingHandler(context, msg, opt, bufAddr, bufLen, args); // If we're using shared Buffer & Args for All Events We should wait for the Mipscall to be fully executed before processing the next event. GTA VCS need this delay/sleep.
+			notifyMatchingHandler(context, msg, opt, bufAddr, bufLen, args);
 
-			// Give some time before executing the next mipscall to prevent event ACCEPT(6)->ESTABLISH(7) getting reversed After Action ESTABLISH(7)->ACCEPT(6)
-			// Must Not be delayed too long to prevent desync/disconnect. Not longer than the delays on callback's HLE?
-			//sleep_ms(10); //sceKernelDelayThread(10000);
-
-			// Lock again
-			//
 			// Pop event stack from front (this should be queue instead of stack?)
 			context->event_stack = msg->next;
 			free(msg);
