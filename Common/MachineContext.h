@@ -63,7 +63,8 @@ typedef CONTEXT SContext;
 
 #endif
 
-#elif PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
+// Not tvOS or watchOS: sigaltstack(), which the handler runs on, is unavailable there.
+#elif (PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)) && !(defined(TARGET_OS_TV) && TARGET_OS_TV) && !(defined(TARGET_OS_WATCH) && TARGET_OS_WATCH)
 
 // The context handed to the fault handler is the thread state inside the signal's mcontext
 // (uc_mcontext->__ss). <sys/ucontext.h> gives us that without the _XOPEN_SOURCE that <ucontext.h> demands.
