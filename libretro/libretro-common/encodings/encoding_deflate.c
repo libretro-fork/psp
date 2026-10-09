@@ -816,10 +816,10 @@ void rinflate_reset(void *data, int window_bits)
     * a back-reference is only resolved out of the ring after a bounds
     * check against out_pos + wprior, so with wprior 0 no stale byte is
     * reachable, exactly as for a fresh instance whose window happens
-    * to be zeroed. The tables are safe because have_tables and
-    * fixed_loaded are cleared, so any stream must rebuild them before
-    * a symbol is decoded, and rinf_build clears each table's fast
-    * lookup as it goes.
+    * to be zeroed. have_tables is cleared, so each new block selects
+    * or builds its tables before decoding. Retain fixed_loaded: fixed
+    * tables are format constants, and the dynamic-table build clears
+    * that flag before overwriting either table (even on a build error).
     *
     * Everything else is set to the same value calloc would have
     * produced. Fields are listed rather than memset in bulk so that
@@ -855,7 +855,6 @@ void rinflate_reset(void *data, int window_bits)
    s->skip_bits        = 0;
    s->stored_len       = 0;
 
-   s->fixed_loaded     = 0;
    s->have_tables      = 0;
 
    s->hlit             = 0;

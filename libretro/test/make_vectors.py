@@ -23,6 +23,8 @@ for k, v in blobs.items():
     open(base + '.raw', 'wb').write(v)
     c = zlib.compressobj(9, zlib.DEFLATED, -15)
     open(base + '.deflate', 'wb').write(c.compress(v) + c.flush())
+    c = zlib.compressobj(6, zlib.DEFLATED, -15, 8, zlib.Z_FIXED)
+    open(base + '.fixed', 'wb').write(c.compress(v) + c.flush())
     open(base + '.zlib', 'wb').write(zlib.compress(v, 6))
     open(base + '.gz', 'wb').write(gzip.compress(v, 9))
     for lvl in (1, 3, 9, 19):

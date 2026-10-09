@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <encodings/crc32.h>
+#include <encodings/deflate.h>
 #include <encodings/rzstd.h>
 
 #include "Common/Data/Encoding/Compression.h"
@@ -23,9 +24,11 @@ static int fails = 0;
 int main(int argc, char **argv) {
 	std::string dir = argv[1];
 	const char *names[] = { "text", "rand", "zero", "small", "empty" };
+	void *reused = rinflate_new(-15);
+	CHECK(reused, "allocate reused inflate stream");
 	for (const char *n : names) {
 		std::string raw = Read(dir + "/in/" + n + ".raw");
-		struct { const char *ext; int wb; } fmts[] = { { "deflate", -15 }, { "zlib", 15 }, { "gz", 31 }, { "zlib", 47 }, { "gz", 47 } };
+		struct { const char *ext; int wb; } fmts[] = { { "deflate", -15 }, { "fixed", -15 }, { "zlib", 15 }, { "gz", 31 }, { "zlib", 47 }, { "gz", 47 } };
 		for (auto &f : fmts) {
 			std::string c = Read(dir + "/in/" + n + "." + f.ext);
 			std::vector<uint8_t> out(raw.size() + 16);
@@ -33,6 +36,19 @@ int main(int argc, char **argv) {
 			int64_t got = InflateBuffer(f.wb, (const uint8_t *)c.data(), c.size(), out.data(), out.size(), &used);
 			CHECK(got == (int64_t)raw.size() && !memcmp(out.data(), raw.data(), raw.size()), "inflate %s.%s wb=%d got=%lld", n, f.ext, f.wb, (long long)got);
 			CHECK(used == c.size(), "inflate %s.%s consumed %zu of %zu", n, f.ext, used, c.size());
+			// Reuse across fixed/dynamic/stored blocks and wrapper changes. Fixed
+			// tables may survive reset, but dynamic/error paths must invalidate them.
+			if (reused) {
+				for (int pass = 0; pass < 3; ++pass) {
+					rinflate_reset(reused, f.wb);
+					rinflate_set_in(reused, (const uint8_t *)c.data(), c.size());
+					rinflate_set_out(reused, out.data(), out.size());
+					size_t read = 0, wrote = 0;
+					int result = rinflate_process(reused, &read, &wrote);
+					CHECK(result == RDEFLATE_PROCESS_END && wrote == raw.size() &&
+						!memcmp(out.data(), raw.data(), raw.size()), "reused inflate %s.%s pass=%d", n, f.ext, pass);
+				}
+			}
 			if (!raw.empty()) {
 				// One byte short must fail, not truncate.
 				int64_t shortGot = InflateBuffer(f.wb, (const uint8_t *)c.data(), c.size(), out.data(), raw.size() - 1);
@@ -74,6 +90,7 @@ int main(int argc, char **argv) {
 			CHECK(r == RZSTD_PROCESS_END && wrote == raw.size() && !memcmp(back.data(), raw.data(), raw.size()), "rzstd roundtrip %s", n);
 		}
 	}
+	rinflate_free(reused);
 	const char *pngs[] = { "rgba", "rgb", "gray", "graya", "pal", "paltrns", "solid", "gray16" };
 	for (const char *n : pngs) {
 		std::string p = Read(dir + "/png/" + n + ".png");
