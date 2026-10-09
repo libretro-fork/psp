@@ -21,6 +21,7 @@
 #include "Common/Input/InputState.h"
 #include "Common/Thread/ThreadUtil.h"
 #include "Common/Thread/ThreadManager.h"
+#include "Common/Thread/MpscQueue.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/File/VFS/DirectoryReader.h"
 #include "Common/Data/Text/I18n.h"
@@ -76,6 +77,16 @@
 static retro_spsc_t output_audio_ring;
 static bool output_audio_ring_ok = false;
 static const size_t OUTPUT_AUDIO_RING_FRAMES = 32768;
+
+struct CheatChange {
+   bool reset;
+   unsigned index;
+   bool enabled;
+   std::string code;
+};
+static MpscQueue<CheatChange> pendingCheats;
+static void ApplyCheatReset();
+static void ApplyCheatSet(unsigned index, bool enabled, const char *code);
 
 // Calculated swap interval is 'stable' if the same
 // value is recorded for a number of retro_run()
@@ -1306,6 +1317,14 @@ namespace Libretro {
 
    static Thread emuThread;
    static void EmuFrame() {
+      // Frontend callbacks only publish changes. Files and guest memory are
+      // touched here, on the same owner that executes PSP code.
+      pendingCheats.Drain([](CheatChange &&change) {
+         if (change.reset)
+            ApplyCheatReset();
+         else
+            ApplyCheatSet(change.index, change.enabled, change.code.c_str());
+      });
       ctx->SetRenderTarget();
       Draw::DrawContext *draw = ctx->GetDrawContext();
       if (draw) {
@@ -1532,6 +1551,7 @@ void retro_unload_game(void) {
    }
 
 	PSP_Shutdown(true);
+	pendingCheats.Drain([](CheatChange &&) {});
 	g_pendingBoot = false;
 	g_bootErrorString.clear();
 	free(unserialize_data);
@@ -1835,6 +1855,15 @@ size_t retro_get_memory_size(unsigned id)
 }
 
 void retro_cheat_reset(void) {
+   pendingCheats.Push(CheatChange{ true, 0, false, {} });
+}
+
+void retro_cheat_set(unsigned index, bool enabled, const char *code) {
+   if (code)
+      pendingCheats.Push(CheatChange{ false, index, enabled, code });
+}
+
+static void ApplyCheatReset() {
    // Init Cheat Engine
    CWCheatEngine cheatEngineObj(g_paramSFO.GetDiscID());
    CWCheatEngine *cheatEngine = &cheatEngineObj;
@@ -1857,7 +1886,7 @@ void retro_cheat_reset(void) {
 
 }
 
-void retro_cheat_set(unsigned index, bool enabled, const char *code) {
+static void ApplyCheatSet(unsigned index, bool enabled, const char *code) {
    // Initialize Cheat Engine
    CWCheatEngine cheatEngineObj(g_paramSFO.GetDiscID());
    CWCheatEngine *cheatEngine = &cheatEngineObj;
