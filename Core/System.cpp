@@ -855,17 +855,25 @@ BootState PollBootState() {
 }
 
 void PSP_Shutdown(bool success) {
+	// Only the lifecycle owner calls this; the loader uses CPU_Shutdown on
+	// failure. Finish its accesses before destroying memory or filesystem state.
+	if (g_loadingThread.joinable()) {
+		g_loadingThread.join();
+		Core_NotifyLifecycle(CoreLifecycle::START_COMPLETE);
+	}
+
 	// Do nothing if we never inited.
 	if (GetBootState() == BootState::Off) {
 		ERROR_LOG(Log::Loader, "Unexpected PSP_Shutdown");
 		return;
 	}
 
-	_assert_(GetBootState() != BootState::Failed);
+	// A failed loader already shut its CPU state down. Do not do that twice.
+	const bool cpuInitialized = GetBootState() != BootState::Failed;
 
 	Core_Stop();
 
-	if (g_Config.bFuncHashMap) {
+	if (cpuInitialized && g_Config.bFuncHashMap) {
 		MIPSAnalyst::StoreHashMap();
 	}
 
@@ -876,7 +884,8 @@ void PSP_Shutdown(bool success) {
 
 	Core_NotifyLifecycle(CoreLifecycle::STOPPING);
 
-	CPU_Shutdown(success);
+	if (cpuInitialized)
+		CPU_Shutdown(success);
 	GPU_Shutdown();
 	g_paramSFO.Clear();
 	g_paramSFORaw.Clear();
@@ -890,7 +899,7 @@ void PSP_Shutdown(bool success) {
 
 	Core_NotifyLifecycle(CoreLifecycle::STOPPED);
 
-	if (success) {
+	if (success || !cpuInitialized) {
 		SetBootState(BootState::Off);
 	}
 

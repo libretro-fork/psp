@@ -1532,6 +1532,11 @@ void retro_unload_game(void) {
    }
 
 	PSP_Shutdown(true);
+	g_pendingBoot = false;
+	g_bootErrorString.clear();
+	free(unserialize_data);
+	unserialize_data = nullptr;
+	unserialize_size = 0;
 	g_VFS.Clear();
 
 	delete ctx;
@@ -1546,6 +1551,10 @@ void retro_reset(void) {
       Libretro::EmuThreadStop();
 
    PSP_Shutdown(true);
+   g_pendingBoot = false;
+   free(unserialize_data);
+   unserialize_data = nullptr;
+   unserialize_size = 0;
 
    if (BootState::Complete != PSP_Init(PSP_CoreParameter(), &g_bootErrorString)) {
       ERROR_LOG(Log::Boot, "%s", g_bootErrorString.c_str());
