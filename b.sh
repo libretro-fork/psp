@@ -35,6 +35,11 @@ do
 			TARGET_OS=loongarch64
 			CROSS_STUB_CC=loongarch64-linux-gnu-gcc-14
 			;;
+		--aarch64)
+			CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=cmake/Toolchains/aarch64-linux-gnu.cmake -DHEADLESS=ON -DHEADLESS_CROSS=ON -DUSE_SYSTEM_LIBPNG=OFF -DUSE_SYSTEM_LIBSDL2=OFF ${CMAKE_ARGS}"
+			TARGET_OS=aarch64
+			CROSS_STUB_CC=aarch64-linux-gnu-gcc-14
+			;;
 		--riscv64)
 			CMAKE_ARGS="-DCMAKE_TOOLCHAIN_FILE=cmake/Toolchains/riscv64-linux-gnu.cmake -DHEADLESS=ON -DHEADLESS_CROSS=ON -DUSE_SYSTEM_LIBPNG=OFF -DUSE_SYSTEM_LIBSDL2=OFF ${CMAKE_ARGS}"
 			TARGET_OS=riscv64

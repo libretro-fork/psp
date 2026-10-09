@@ -396,19 +396,17 @@ jobs:
       working-directory: ${{ env.GITHUB_WORKSPACE }}
       run: python3 test.py -g --graphics=vulkan --known-failures=vulkan
 
-    # x86-64 only: the reference images don't match what the software renderer produces on arm64,
-    # 23 of the 30 dumps differ there, one of them by an MSE of 100. That's a real difference and
-    # worth chasing, but it predates the arm64 runner - it just never had a CI job to show up in.
+    # Both Linux runners: the software renderer's x86-64 and arm64 JITs have to draw the same pixels.
     - name: Execute frametests
-      if: matrix.os == 'ubuntu-26.04'
+      if: runner.os == 'Linux'
       working-directory: ${{ env.GITHUB_WORKSPACE }}
       run: python3 frametests.py frametests/frametests.json --out-mode=failures
 
     - name: Upload frametest report
       uses: actions/upload-artifact@v7
-      if: matrix.os == 'ubuntu-26.04' && always()
+      if: runner.os == 'Linux' && always()
       with:
-        name: frametest-report
+        name: frametest-report-${{ matrix.os }}
         path: frametests/out/
 
   test-headless-alpine:

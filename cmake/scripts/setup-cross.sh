@@ -2,13 +2,19 @@
 # Sets up a cross-compilation environment for one of the headless-only targets.
 # Run once with sudo.  After this, ./b.sh --<target> works on a fresh checkout.
 #
-# Usage: sudo cmake/scripts/setup-cross.sh <loongarch64|riscv64>
+# Usage: sudo cmake/scripts/setup-cross.sh <aarch64|loongarch64|riscv64>
 
 set -e
 
 TARGET="$1"
 
+LD_DIR=/lib64
 case "$TARGET" in
+    aarch64)
+        TRIPLE=aarch64-linux-gnu
+        LD_SO=ld-linux-aarch64.so.1
+        LD_DIR=/lib
+        ;;
     loongarch64)
         TRIPLE=loongarch64-linux-gnu
         LD_SO=ld-linux-loongarch-lp64d.so.1
@@ -18,7 +24,7 @@ case "$TARGET" in
         LD_SO=ld-linux-riscv64-lp64d.so.1
         ;;
     *)
-        echo "Usage: sudo $0 <loongarch64|riscv64>"
+        echo "Usage: sudo $0 <aarch64|loongarch64|riscv64>"
         exit 1
         ;;
 esac
@@ -84,13 +90,13 @@ echo "  Installed to $SYSROOT/lib/libGL.so"
 # Without this, binfmt_misc can't find the target's dynamic linker.
 LD_LINUX=$SYSROOT/lib/$LD_SO
 if [ -f "$LD_LINUX" ]; then
-    mkdir -p /lib64
-    ln -sf "$LD_LINUX" /lib64/$LD_SO
-    echo "Created /lib64/$LD_SO -> $LD_LINUX"
+    mkdir -p $LD_DIR
+    ln -sf "$LD_LINUX" $LD_DIR/$LD_SO
+    echo "Created $LD_DIR/$LD_SO -> $LD_LINUX"
 fi
 
 echo ""
 echo "Setup complete."
 echo "Build:  ./b.sh --$TARGET"
 echo "Run:    qemu-$TARGET -L $SYSROOT <binary>"
-echo "  (after setup the /lib64 symlink lets you run $TARGET binaries directly)"
+echo "  (after setup the $LD_DIR symlink lets you run $TARGET binaries directly)"
