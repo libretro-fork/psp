@@ -8,7 +8,7 @@ namespace net {
 
 // A socket that another thread can make readable, to wake a select() that
 // includes it. It is a loopback UDP socket connected to itself. If one can't
-// be made, Fd() is -1 and waits only see a wake when they return anyway.
+// be made, Fd() is -1 and waits requesting that wake channel return FAILED.
 class WakeSocket {
 public:
 	WakeSocket();

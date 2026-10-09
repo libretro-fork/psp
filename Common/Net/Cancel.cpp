@@ -64,6 +64,29 @@ void CancelToken::Cancel() {
 }
 
 static WaitResult WaitInternal(const uintptr_t *socks, bool *ready, int count, bool forWrite, double timeout, intptr_t wake, const CancelToken *cancel) {
+	if (count < 0 || (count && !socks))
+		return WaitResult::FAILED;
+	if (cancel && cancel->IsCancelled())
+		return WaitResult::CANCELLED;
+	if (cancel && wake == -1)
+		return WaitResult::FAILED;
+#if PPSSPP_PLATFORM(WINDOWS)
+	// Winsock bounds the number of entries, not their numeric descriptors.
+	if (count > FD_SETSIZE - (wake != -1 ? 1 : 0))
+		return WaitResult::FAILED;
+#else
+	if (wake < -1 || wake >= FD_SETSIZE)
+		return WaitResult::FAILED;
+	for (int i = 0; i < count; ++i) {
+		const intptr_t fd = (intptr_t)socks[i];
+		if (fd < -1 || fd >= FD_SETSIZE)
+			return WaitResult::FAILED;
+	}
+#endif
+	if (ready) {
+		for (int i = 0; i < count; ++i)
+			ready[i] = false;
+	}
 	const double deadline = timeout >= 0.0 ? time_now_d() + timeout : 0.0;
 	for (;;) {
 		if (cancel && cancel->IsCancelled())
@@ -135,6 +158,8 @@ WaitResult WaitSocket(uintptr_t sock, bool forWrite, double timeout, const Cance
 }
 
 WaitResult WaitSocketsOrWake(const uintptr_t *socks, bool *ready, int count, bool forWrite, double timeout, WakeSocket *wake) {
+	if (wake && wake->Fd() == -1)
+		return WaitResult::FAILED;
 	return WaitInternal(socks, ready, count, forWrite, timeout, wake ? wake->Fd() : -1, nullptr);
 }
 
