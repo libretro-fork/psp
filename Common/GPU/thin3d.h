@@ -372,7 +372,8 @@ public:
 
 private:
 	retro_atomic_int_t refcount_;
-	const char * const name_;
+	// Only read by debug asserts.
+	[[maybe_unused]] const char * const name_;
 };
 
 template <typename T>

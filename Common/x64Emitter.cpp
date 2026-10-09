@@ -23,8 +23,6 @@
 #include "CPUDetect.h"
 #include "MemoryUtil.h"
 
-#define PRIx64 "llx"
-
 namespace Gen
 {
 
@@ -271,8 +269,8 @@ void OpArg::WriteRest(XEmitter *emit, int extraBytes, X64Reg _operandReg,
 		             (distance < 0x80000000LL &&
 		              distance >=  -0x80000000LL) ||
 		             !warn_64bit_offset,
-		             "WriteRest: op out of range (0x%" PRIx64 " uses 0x%" PRIx64 ")",
-		             ripAddr, offset);
+		             "WriteRest: op out of range (0x%llx uses 0x%llx)",
+		             (unsigned long long)ripAddr, (unsigned long long)offset);
 		s32 offs = (s32)distance;
 		emit->Write32((u32)offs);
 #else

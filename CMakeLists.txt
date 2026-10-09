@@ -389,7 +389,19 @@ if(ARM64)
 endif()
 
 if(NOT MSVC)
-	add_compile_options(-Wall -Werror=return-type -Wno-unused-function -Wno-sign-compare -Wno-unused-but-set-variable "$<$<COMPILE_LANGUAGE:CXX>:-Wno-reorder>" -Wno-unknown-pragmas -Wno-unused-value -Wno-unused-variable -Wno-error=incompatible-pointer-types)
+	include(CheckCXXCompilerFlag)
+	# Adds -Wno-<name> only if the compiler knows the warning: older clang (Xcode) rejects new
+	# names with a warning on every file. GCC accepts any -Wno-, so test the positive form.
+	function(add_no_warning name)
+		string(MAKE_C_IDENTIFIER "HAVE_W_${name}" var)
+		check_cxx_compiler_flag("-W${name}" ${var})
+		if(${var})
+			add_compile_options(-Wno-${name})
+		endif()
+	endfunction()
+
+	add_compile_options(-Wall -Werror=return-type -Wno-unused-function -Wno-sign-compare "$<$<COMPILE_LANGUAGE:CXX>:-Wno-reorder>" -Wno-unknown-pragmas -Wno-unused-value -Wno-unused-variable -Wno-error=incompatible-pointer-types)
+	add_no_warning(unused-but-set-variable)
 	if(NOT CLANG)
 		# This one is very useful but has many false positives.
 		add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-Wno-class-memaccess>")
@@ -410,7 +422,7 @@ if(NOT MSVC)
 		)
 		if(MACOSX OR IOS)
 			# Hack around a bad check for __GNUC__ in basis_universal that makes it use old stuff on iOS
-			add_compile_options(-Wno-deprecated-builtins)
+			add_no_warning(deprecated-builtins)
 		endif()
 	endif()
 

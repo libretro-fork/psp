@@ -224,7 +224,9 @@ public:
 		m_good = true;
 #ifndef HAVE_LIBRETRO_VFS
 #undef clearerr
-		std::clearerr(m_file);
+		if (m_file) {
+			std::clearerr(m_file);
+		}
 #endif
 	}
 
