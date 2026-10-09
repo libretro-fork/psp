@@ -1336,6 +1336,7 @@ namespace Libretro {
    retro_atomic_int_t emuThreadState{ (int)EmuThreadState::DISABLED };
 
    static Thread emuThread;
+   static retro_atomic_int_t emuFrameRequested{ 0 };
    static void EmuFrame() {
       // Frontend callbacks only publish changes. Files and guest memory are
       // touched here, on the same owner that executes PSP code.
@@ -1399,7 +1400,17 @@ namespace Libretro {
          switch (state)
          {
             case EmuThreadState::RUNNING:
-               EmuFrame();
+               // A libretro run grants exactly one frame after polling input.
+               // GPU buffer availability must not let guest execution run ahead
+               // with the previous run's input or audio timeline.
+               ParkingLotWait(&emuThreadState, [] {
+                  return retro_atomic_load_acquire_int(&emuFrameRequested) != 0 ||
+                     EmuThreadStateGet() != EmuThreadState::RUNNING;
+               });
+               if (EmuThreadStateGet() != EmuThreadState::RUNNING)
+                  break;
+               if (retro_atomic_exchange_int(&emuFrameRequested, 0))
+                  EmuFrame();
                break;
             case EmuThreadState::PAUSE_REQUESTED:
                // CAS so a concurrent QUIT_REQUESTED is not clobbered; the loop re-reads the state.
@@ -1456,6 +1467,7 @@ namespace Libretro {
       while (ctx->ThreadFrame()) {}
 
       emuThread.join();
+      retro_atomic_store_relaxed_int(&emuFrameRequested, 0);
       ctx->ThreadEnd();
    }
 
@@ -1464,6 +1476,7 @@ namespace Libretro {
          return;
 
       EmuThreadStateSet(EmuThreadState::PAUSE_REQUESTED);
+      ParkingLotNotify(&emuThreadState);
 
       // Run queued work, readback syncs included, up to the marker the emu
       // thread queues once it has parked at a frame boundary.
@@ -1608,7 +1621,7 @@ static void retro_input(void) {
    unsigned i;
    int16_t ret = 0;
    // clang-format off
-   static struct
+   static const struct
    {
       u32 retro;
       u32 sceCtrl;
@@ -1639,14 +1652,15 @@ static void retro_input(void) {
             ret |= (1 << i);
    }
 
-   for (i = 0; i < sizeof(map) / sizeof(*map); i++) {
-      bool pressed = ret & (1 << map[i].retro);
-      if (pressed) {
-         __CtrlUpdateButtons(map[i].sceCtrl, 0);
-      } else {
-         __CtrlUpdateButtons(0, map[i].sceCtrl);
-      }
+   u32 buttons = 0;
+   u32 controlledButtons = 0;
+   for (const auto &entry : map) {
+      controlledButtons |= entry.sceCtrl;
+      if (ret & (1 << entry.retro))
+         buttons |= entry.sceCtrl;
    }
+   // Publish one digital snapshot rather than twelve transient combinations.
+   __CtrlUpdateButtons(buttons, controlledButtons & ~buttons);
 
    float x_left = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X) / 32767.0f;
    float y_left = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y) / -32767.0f;
@@ -1760,6 +1774,8 @@ void retro_run(void) {
       if (EmuThreadStateGet() != EmuThreadState::RUNNING) {
          EmuThreadStart();
       }
+      retro_atomic_store_release_int(&emuFrameRequested, 1);
+      ParkingLotNotify(&emuThreadState);
 
       if (!ctx->ThreadFrame()) {
          // We're done processing the last frame from the emu thread.
