@@ -543,10 +543,13 @@ RETRO_END_DECLS_CXX
  * practice on every libstdc++/libc++/MSVC STL implementation we
  * care about; we do not rely on it. */
 
+/* Older libc++ deduces T from both arguments of the std::atomic_*
+ * free functions, so an enum or other non-int value would not match
+ * std::atomic<int>; the int and size_t forms cast their value. */
 typedef std::atomic<int>         retro_atomic_int_t;
 typedef std::atomic<std::size_t> retro_atomic_size_t;
 
-#define retro_atomic_int_init(p, v)    std::atomic_init((p), (v))
+#define retro_atomic_int_init(p, v)    std::atomic_init((p), (int)(v))
 
 /* Static/aggregate initializer for a retro_atomic_int_t member.
  * std::atomic<int> is a class type, so it must be brace-initialized
@@ -561,21 +564,21 @@ typedef std::atomic<std::size_t> retro_atomic_size_t;
 #define retro_atomic_load_relaxed_int(p) \
    std::atomic_load_explicit((p), std::memory_order_relaxed)
 #define retro_atomic_store_release_int(p, v) \
-   std::atomic_store_explicit((p), (v), std::memory_order_release)
+   std::atomic_store_explicit((p), (int)(v), std::memory_order_release)
 #define retro_atomic_store_relaxed_int(p, v) \
-   std::atomic_store_explicit((p), (v), std::memory_order_relaxed)
+   std::atomic_store_explicit((p), (int)(v), std::memory_order_relaxed)
 #define retro_atomic_fetch_add_int(p, v) \
-   std::atomic_fetch_add_explicit((p), (v), std::memory_order_acq_rel)
+   std::atomic_fetch_add_explicit((p), (int)(v), std::memory_order_acq_rel)
 #define retro_atomic_fetch_add_seq_cst_int(p, v) \
-   std::atomic_fetch_add_explicit((p), (v), std::memory_order_seq_cst)
+   std::atomic_fetch_add_explicit((p), (int)(v), std::memory_order_seq_cst)
 #define retro_atomic_load_seq_cst_int(p) \
    std::atomic_load_explicit((p), std::memory_order_seq_cst)
 #define retro_atomic_fetch_sub_int(p, v) \
-   std::atomic_fetch_sub_explicit((p), (v), std::memory_order_acq_rel)
+   std::atomic_fetch_sub_explicit((p), (int)(v), std::memory_order_acq_rel)
 #define retro_atomic_fetch_or_int(p, v) \
-   std::atomic_fetch_or_explicit((p), (v), std::memory_order_acq_rel)
+   std::atomic_fetch_or_explicit((p), (int)(v), std::memory_order_acq_rel)
 #define retro_atomic_fetch_and_int(p, v) \
-   std::atomic_fetch_and_explicit((p), (v), std::memory_order_acq_rel)
+   std::atomic_fetch_and_explicit((p), (int)(v), std::memory_order_acq_rel)
 
 #define retro_atomic_load_acquire_size(p) \
    std::atomic_load_explicit((p), std::memory_order_acquire)
