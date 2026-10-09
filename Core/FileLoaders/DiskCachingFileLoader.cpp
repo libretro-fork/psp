@@ -569,9 +569,20 @@ bool DiskCachingFileLoaderCache::LoadCacheFile(const Path &path) {
 		valid = false;
 	} else if (header.filesize != filesize_) {
 		valid = false;
+	} else if (header.blockSize != DEFAULT_BLOCK_SIZE || header.filesize <= 0 ||
+		(header.flags & ~FLAG_LOCKED) != 0) {
+		valid = false;
 	} else if (header.maxBlocks < MAX_BLOCKS_LOWER_BOUND || header.maxBlocks > MAX_BLOCKS_UPPER_BOUND) {
 		// This means it's not in our safety bounds, reject.
 		valid = false;
+	}
+	if (valid) {
+		const u64 count = (u64)filesize_ / DEFAULT_BLOCK_SIZE + (filesize_ % DEFAULT_BLOCK_SIZE != 0);
+		const u64 fileBytes = File::GetFileSize(fp);
+		// Check available index bytes before resize, without overflowing either
+		// the ceiling division or the header-plus-index byte calculation.
+		valid = count <= SIZE_MAX / sizeof(BlockInfo) && count < INVALID_INDEX &&
+			fileBytes >= sizeof(FileHeader) && count <= (fileBytes - sizeof(FileHeader)) / sizeof(BlockInfo);
 	}
 
 	// If it's valid, retain the file pointer.
@@ -583,6 +594,7 @@ bool DiskCachingFileLoaderCache::LoadCacheFile(const Path &path) {
 		maxBlocks_ = header.maxBlocks;
 		flags_ = header.flags;
 		LoadCacheIndex();
+		valid = f_ != nullptr;
 	} else {
 		ERROR_LOG(Log::Loader, "Disk cache file header did not match, recreating cache file");
 		fclose(fp);
@@ -597,7 +609,7 @@ void DiskCachingFileLoaderCache::LoadCacheIndex() {
 		return;
 	}
 
-	indexCount_ = (size_t)((filesize_ + blockSize_ - 1) / blockSize_);
+	indexCount_ = (size_t)(filesize_ / blockSize_ + (filesize_ % blockSize_ != 0));
 	index_.resize(indexCount_);
 	blockIndexLookup_.resize(maxBlocks_);
 	memset(&blockIndexLookup_[0], INVALID_INDEX, maxBlocks_ * sizeof(blockIndexLookup_[0]));
@@ -623,6 +635,11 @@ void DiskCachingFileLoaderCache::LoadCacheIndex() {
 		}
 		if (index_[i].block == INVALID_BLOCK) {
 			continue;
+		}
+		if (blockIndexLookup_[index_[i].block] != INVALID_INDEX) {
+			ERROR_LOG(Log::Loader, "Disk cache contains duplicate block mappings");
+			CloseFileHandle();
+			return;
 		}
 
 		if (index_[i].generation < oldestGeneration_) {
