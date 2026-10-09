@@ -1,4 +1,5 @@
 #include "ppsspp_config.h"
+#include <array>
 #include <cstring>
 #include <algorithm>
 #include <cassert>
