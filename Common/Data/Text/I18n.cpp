@@ -1,3 +1,5 @@
+#include <map>
+#include <string_view>
 #include <cstring>
 
 #include "Common/Data/Text/I18n.h"

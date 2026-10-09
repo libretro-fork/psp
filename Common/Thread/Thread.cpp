@@ -1,3 +1,4 @@
+#include <functional>
 #include <rthreads/rthreads.h>
 
 #include "Common/Log.h"

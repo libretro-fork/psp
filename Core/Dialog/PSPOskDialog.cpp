@@ -17,6 +17,7 @@
 
 #include "ppsspp_config.h"
 
+#include <string_view>
 #include <cctype>
 #include <cmath>
 #include <algorithm>

@@ -1,5 +1,6 @@
 #include "ppsspp_config.h"
 
+#include <functional>
 #include <retro_atomic.h>
 
 #include "Common/System/System.h"

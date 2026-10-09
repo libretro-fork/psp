@@ -17,6 +17,7 @@
 
 #include "ppsspp_config.h"
 
+#include <functional>
 #include <cstdint>
 #include <deque>
 #include <set>

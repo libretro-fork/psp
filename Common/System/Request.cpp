@@ -1,5 +1,6 @@
 #include "ppsspp_config.h"
 
+#include <string_view>
 #include <cstring>
 
 #include "Common/System/Request.h"

@@ -1,6 +1,8 @@
 #include "Common/TimeUtil.h"
 #include "ppsspp_config.h"
 
+#include <memory>
+
 #ifdef _WIN32
 
 #ifndef NOMINMAX
