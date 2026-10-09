@@ -400,7 +400,8 @@ RingbufferLog::RingbufferLog() {
 	for (int i = 0; i < MAX_LOGS; i++) {
 		retro_atomic_int_init(&slots_[i].seq, 0);
 		retro_atomic_int_init(&slots_[i].level, 0);
-		slots_[i].text[0] = '\0';
+		for (int j = 0; j < TEXT_WORDS; ++j)
+			retro_atomic_int_init(&slots_[i].text[j], 0);
 	}
 }
 
@@ -409,14 +410,19 @@ void RingbufferLog::Log(const LogMessage &message) {
 	Slot &slot = slots_[idx];
 	const int seq = retro_atomic_load_relaxed_int(&slot.seq);
 	// Odd: another writer lapped the ring onto this slot. Drop ours.
-	if ((seq & 1) || !retro_atomic_cas_int(&slot.seq, seq, seq + 1))
+	if ((seq & 1) || !retro_atomic_cas_int(&slot.seq, seq, (int)((unsigned)seq + 1)))
 		return;
 	retro_atomic_thread_fence_seq_cst();
 	const size_t len = std::min(message.msg.size(), (size_t)MAX_TEXT - 1);
-	memcpy(slot.text, message.msg.data(), len);
-	slot.text[len] = '\0';
+	char text[MAX_TEXT]{};
+	memcpy(text, message.msg.data(), len);
+	for (int j = 0; j < TEXT_WORDS; ++j) {
+		int word;
+		memcpy(&word, text + j * sizeof(int), sizeof(word));
+		retro_atomic_store_relaxed_int(&slot.text[j], word);
+	}
 	retro_atomic_store_relaxed_int(&slot.level, (int)message.level);
-	retro_atomic_store_release_int(&slot.seq, seq + 2);
+	retro_atomic_store_release_int(&slot.seq, (int)((unsigned)seq + 2));
 	if (retro_atomic_load_relaxed_int(&count_) < MAX_LOGS)
 		retro_atomic_fetch_add_int(&count_, 1);
 }
@@ -434,7 +440,10 @@ bool RingbufferLog::Read(int i, std::string *text, LogLevel *level) const {
 	if (seq & 1)
 		return false;
 	char buf[MAX_TEXT];
-	memcpy(buf, slot.text, sizeof(buf));
+	for (int j = 0; j < TEXT_WORDS; ++j) {
+		int word = retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&slot.text[j]));
+		memcpy(buf + j * sizeof(int), &word, sizeof(word));
+	}
 	buf[MAX_TEXT - 1] = '\0';
 	const int lvl = retro_atomic_load_relaxed_int(const_cast<retro_atomic_int_t *>(&slot.level));
 	retro_atomic_thread_fence_seq_cst();

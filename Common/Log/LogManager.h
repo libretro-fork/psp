@@ -66,11 +66,13 @@ public:
 	void Clear();
 
 private:
-	enum { MAX_LOGS = 256, MAX_TEXT = 512 };
+	enum { MAX_LOGS = 256, MAX_TEXT = 512, TEXT_WORDS = MAX_TEXT / sizeof(int) };
+	static_assert(MAX_TEXT % sizeof(int) == 0, "Log text must fit whole atomic words");
 	struct Slot {
 		retro_atomic_int_t seq;
 		retro_atomic_int_t level;
-		char text[MAX_TEXT];
+		// Sequence validation alone cannot legalize concurrent plain-byte access.
+		retro_atomic_int_t text[TEXT_WORDS];
 	};
 	bool Read(int i, std::string *text, LogLevel *level) const;
 	Slot slots_[MAX_LOGS];
