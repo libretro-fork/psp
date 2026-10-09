@@ -120,5 +120,3 @@ private:
 	std::string ioDeleteDir_;
 };
 
-void ResetSecondsSinceLastGameSave();
-double SecondsSinceLastGameSave();

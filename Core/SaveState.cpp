@@ -33,7 +33,6 @@
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/StringUtils.h"
-#include "Common/TimeUtil.h"
 
 #include "Core/SaveState.h"
 #include "Core/Config.h"
@@ -80,7 +79,6 @@ static const char * const LOAD_UNDO_NAME = "load_undo.ppst";
 namespace SaveState {
 
 // Used for "confirm exit if you haven't saved in a while"
-double g_lastSaveTime = -1.0;
 
 // Set by Enqueue on any thread, taken by Process on the emulation thread.
 static retro_atomic_int_t needsProcess{ 0 };
@@ -97,7 +95,6 @@ static StateRingbuffer rewindStates;
 
 // Updated by Rescan. This is to avoid calling Exists a lot of times, which could be slow
 // on some Android devices when we allow many save states.
-static double g_lastRescan = 0.0;
 static std::map<std::string, uint64_t, std::less<>> g_files;  // the value is the mod-time.
 
 struct SaveStart {
@@ -588,7 +585,6 @@ static retro_atomic_int_t g_screenshotFailures{ 0 };
 			g_files[f.name] = f.mtime;
 		}
 
-		g_lastRescan = time_now_d();
 	}
 
 	static bool SaveStateFileExists(std::string_view gamePrefix, int slot, const char *extension) {
@@ -920,7 +916,6 @@ static retro_atomic_int_t g_screenshotFailures{ 0 };
 						}
 					}
 #endif
-					g_lastSaveTime = time_now_d();
 				} else if (result == CChunkFileReader::ERROR_BROKEN_STATE) {
 					HandleLoadFailure(false, &callbackMetadata);
 					callbackMessage = std::string(i18nLoadFailure) + ": " + errorString;
@@ -956,7 +951,6 @@ static retro_atomic_int_t g_screenshotFailures{ 0 };
 						}
 					}
 #endif
-					g_lastSaveTime = time_now_d();
 				} else if (result == CChunkFileReader::ERROR_BROKEN_STATE) {
 					// TODO: What else might we want to do here? This should be very unusual.
 					callbackMessage = i18nSaveFailure;
@@ -1049,20 +1043,10 @@ static retro_atomic_int_t g_screenshotFailures{ 0 };
 		saveDataGeneration = 0;
 		lastSaveDataGeneration = 0;
 		saveStateInitialGitVersion.clear();
-
-		g_lastSaveTime = time_now_d();
 	}
 
 	void Shutdown() {
 		rewindStates.Clear();
-	}
-
-	double SecondsSinceLastSavestate() {
-		if (g_lastSaveTime < 0) {
-			return -1.0;
-		} else {
-			return time_now_d() - g_lastSaveTime;
-		}
 	}
 
 }  // namespace SaveState

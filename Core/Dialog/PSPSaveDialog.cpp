@@ -29,7 +29,6 @@
 #include "Core/FileSystems/MetaFileSystem.h"
 #include "Core/Util/PathUtil.h"
 #include "Core/Util/PPGeDraw.h"
-#include "Common/TimeUtil.h"
 #include "Core/HLE/sceCtrl.h"
 #include "Core/HLE/sceUtility.h"
 #include "Core/HLE/ErrorCodes.h"
@@ -39,25 +38,10 @@
 #include "Core/Reporting.h"
 #include "Core/SaveState.h"
 
-static double g_lastSaveTime = -1.0;
-
-// Actually this should be called on both saves and loads, since just after a load it's safe to exit.
-void ResetSecondsSinceLastGameSave() {
-	g_lastSaveTime = time_now_d();
-}
-
 void ShowSaveLoadIndicator(bool save) {
 	if (g_Config.bShowSaveLoadIndicator) {
 		g_OSD.Show(OSDType::STATUS_ICON, "", "", save ? "I_ROTATE_RIGHT" : "I_ROTATE_LEFT", 1.0f, "save_indicator");
 		g_OSD.SetFlags("save_indicator", (save ? OSDMessageFlags::SpinRight : OSDMessageFlags::SpinLeft) | OSDMessageFlags::Transparent);
-	}
-}
-
-double SecondsSinceLastGameSave() {
-	if (g_lastSaveTime < 0) {
-		return -1.0;
-	} else {
-		return time_now_d() - g_lastSaveTime;
 	}
 }
 
@@ -1188,7 +1172,6 @@ void PSPSaveDialog::StartIO() {
 	// Show save indicator. It's strange how "display" is just as much an action as what to display.
 	if (display == DS_SAVE_SAVING || display == DS_LOAD_LOADING) {
 		const bool save = display != DS_LOAD_LOADING;
-		ResetSecondsSinceLastGameSave();
 		ShowSaveLoadIndicator(save);
 	}
 
@@ -1234,15 +1217,9 @@ bool PSPSaveDialog::FinishIO() {
 
 	switch (ioAction_) {
 	case DS_LOAD_LOADING:
-		if (ioDisplay_ == DS_LOAD_DONE) {
-			g_lastSaveTime = time_now_d();
-		}
 		break;
 	case DS_SAVE_SAVING:
 		SaveState::NotifySaveData();
-		if (ioDisplay_ == DS_SAVE_DONE) {
-			g_lastSaveTime = time_now_d();
-		}
 		break;
 	case DS_NONE:
 		switch ((SceUtilitySavedataType)(u32)request.mode) {
@@ -1250,7 +1227,6 @@ bool PSPSaveDialog::FinishIO() {
 		case SCE_UTILITY_SAVEDATA_TYPE_AUTOLOAD:
 		case SCE_UTILITY_SAVEDATA_TYPE_READDATA:
 		case SCE_UTILITY_SAVEDATA_TYPE_READDATASECURE:
-			ResetSecondsSinceLastGameSave();
 			ShowSaveLoadIndicator(false);
 			break;
 		case SCE_UTILITY_SAVEDATA_TYPE_MAKEDATA:
@@ -1264,7 +1240,6 @@ bool PSPSaveDialog::FinishIO() {
 		case SCE_UTILITY_SAVEDATA_TYPE_WRITEDATA:
 		case SCE_UTILITY_SAVEDATA_TYPE_WRITEDATASECURE:
 			SaveState::NotifySaveData();
-			ResetSecondsSinceLastGameSave();
 			ShowSaveLoadIndicator(true);
 			break;
 		default:

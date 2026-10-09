@@ -535,8 +535,6 @@ void __UtilityInit() {
 	currentlyLoadedModules.clear();
 	swappedFirmwareModules.clear();
 	volatileUnlockEvent = CoreTiming::RegisterEvent("UtilityVolatileUnlock", UtilityVolatileUnlock);
-
-	ResetSecondsSinceLastGameSave();
 }
 
 void __UtilityDoState(PointerWrap &p) {

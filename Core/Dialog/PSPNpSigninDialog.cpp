@@ -16,10 +16,10 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include "Common/TimeUtil.h"
 #include "Common/Data/Text/I18n.h"
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
+#include "Core/CoreTiming.h"
 #include "Core/MemMapHelpers.h"
 #include "Core/Util/PPGeDraw.h"
 #include "Core/HLE/sceKernelMemory.h"
@@ -63,7 +63,7 @@ int PSPNpSigninDialog::Init(u32 paramAddr) {
 	InitCommon();
 
 	//npSigninResult = -1;
-	startTime = (u64)(time_now_d() * 1000000.0);
+	startTime = CoreTiming::GetGlobalTimeUs();
 	step = 0;
 
 	StartFade(true);
@@ -100,7 +100,7 @@ int PSPNpSigninDialog::Update(int animSpeed) {
 	UpdateButtons();
 	UpdateCommon();
 	auto err = GetI18NCategory(I18NCat::ERRORS);
-	u64 now = (u64)(time_now_d() * 1000000.0);
+	u64 now = CoreTiming::GetGlobalTimeUs();
 	
 	if (request.npSigninStatus == NP_SIGNIN_STATUS_NONE) {
 		auto di = GetI18NCategory(I18NCat::DIALOG);
@@ -187,7 +187,7 @@ int PSPNpSigninDialog::Shutdown(bool force) {
 void PSPNpSigninDialog::DoState(PointerWrap &p) {
 	PSPDialog::DoState(p);
 
-	auto s = p.Section("PSPNpSigninDialog", 1, 2);
+	auto s = p.Section("PSPNpSigninDialog", 1, 3);
 	if (!s)
 		return;
 
@@ -198,9 +198,11 @@ void PSPNpSigninDialog::DoState(PointerWrap &p) {
 	if (s >= 2) {
 		Do(p, requestAddr);
 	}
-
-	if (p.mode == p.MODE_READ) {
-		startTime = (u64)(time_now_d() * 1000000.0);
+	// The delays run on emulated time. Older states restart them.
+	if (s >= 3) {
+		Do(p, startTime);
+	} else if (p.mode == p.MODE_READ) {
+		startTime = CoreTiming::GetGlobalTimeUs();
 	}
 }
 

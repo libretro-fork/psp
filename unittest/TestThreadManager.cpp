@@ -5,6 +5,8 @@
 #include "Common/TimeUtil.h"
 #include "Common/Thread/Barrier.h"
 #include "Common/Thread/Event.h"
+#include "Common/Thread/MpscQueue.h"
+#include "Common/Thread/ParkingLot.h"
 #include "Common/Thread/ThreadManager.h"
 #include "Common/Thread/Channel.h"
 #include "Common/Thread/Promise.h"
@@ -127,6 +129,57 @@ bool TestMultithreadedScheduling() {
 	return true;
 }
 
+struct QueueItem {
+	int producer;
+	int seq;
+};
+
+static const int QUEUE_PRODUCERS = 4;
+static const int QUEUE_ITEMS = 20000;
+
+static void QueueProducer(MpscQueue<QueueItem> *queue, EventCounter *pushed, int producer) {
+	for (int i = 0; i < QUEUE_ITEMS; i++) {
+		queue->Push(QueueItem{ producer, i });
+		pushed->Notify();
+	}
+}
+
+// Several producers against one consumer, twice, so the second round runs on recycled nodes.
+// Each producer's items must come out complete and in order.
+bool TestMpscQueue() {
+	MpscQueue<QueueItem> queue;
+	EventCounter pushed;
+	for (int round = 0; round < 2; round++) {
+		int next[QUEUE_PRODUCERS]{};
+		bool ordered = true;
+		int received = 0;
+		std::vector<Thread> producers;
+		for (int i = 0; i < QUEUE_PRODUCERS; i++) {
+			producers.push_back(Thread(QueueProducer, &queue, &pushed, i));
+		}
+		while (received < QUEUE_PRODUCERS * QUEUE_ITEMS) {
+			const int seen = pushed.Seen();
+			const bool any = queue.Drain([&](QueueItem &&item) {
+				if (item.seq != next[item.producer]) {
+					ordered = false;
+				}
+				next[item.producer] = item.seq + 1;
+				received++;
+			});
+			if (!any) {
+				pushed.Wait(seen);
+			}
+		}
+		for (auto &t : producers) {
+			t.join();
+		}
+		EXPECT_TRUE(ordered);
+		EXPECT_EQ_INT(received, QUEUE_PRODUCERS * QUEUE_ITEMS);
+		EXPECT_TRUE(queue.Empty());
+	}
+	return true;
+}
+
 bool TestThreadManager() {
 	ThreadManager manager;
 	manager.Init(8, 1);
@@ -155,6 +208,10 @@ bool TestThreadManager() {
 	}
 
 	if (!TestMultithreadedScheduling()) {
+		return false;
+	}
+
+	if (!TestMpscQueue()) {
 		return false;
 	}
 

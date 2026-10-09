@@ -128,5 +128,4 @@ namespace SaveState {
 	bool PollRestartNeeded();
 
 	// Returns the time since last save. -1 if N/A.
-	double SecondsSinceLastSavestate();
 }  // namespace SaveState
