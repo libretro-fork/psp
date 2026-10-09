@@ -49,8 +49,6 @@ GPU_Vulkan::GPU_Vulkan(GraphicsContext *gfxCtx, Draw::DrawContext *draw)
 
 	VulkanContext *vulkan = (VulkanContext *)gfxCtx->GetAPIContext();
 
-	vulkan->SetProfilerEnabledPtr(&g_Config.bGpuLogProfiler);
-
 	shaderManagerVulkan_ = new ShaderManagerVulkan(draw);
 	pipelineManager_ = new PipelineManagerVulkan(vulkan);
 	framebufferManagerVulkan_ = new FramebufferManagerVulkan(draw);
@@ -136,11 +134,8 @@ void GPU_Vulkan::LoadCache(const Path &filename, bool waitForPipelines) {
 	if (waitForPipelines) {
 		// Now, since we're on the loader thread, we can just block here until all pipelines are actually created.
 		// This makes it so that the on-screen spinner keeps spinning until we are done.
-		double start = time_now_d();
 		VulkanRenderManager *rm = (VulkanRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 		int maxTasksSeen = rm->WaitForPipelines();
-		double seconds = time_now_d() - start;
-		INFO_LOG(Log::G3D, "Waited %0.1fms for at least %d pipeline tasks to finish compiling.", seconds * 1000.0, maxTasksSeen);
 	}
 
 	if (!result) {

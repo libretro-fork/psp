@@ -45,15 +45,6 @@ static void ShowPC(u32 downcount, void *membase, void *jitbase) {
 void LoongArch64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
 	// This will be used as a writable scratch area, always 32-bit accessible.
 	const u8 *start = AlignCodePage();
-	if (DebugProfilerEnabled()) {
-		ProtectMemoryPages(start, GetMemoryProtectPageSize(), MEM_PROT_READ | MEM_PROT_WRITE);
-		hooks_.profilerPC = (uint32_t *)GetWritableCodePtr();
-		*hooks_.profilerPC = 0;
-		hooks_.profilerStatus = (IRProfilerStatus *)GetWritableCodePtr() + 1;
-		*hooks_.profilerStatus = IRProfilerStatus::NOT_RUNNING;
-		SetCodePointer(GetCodePtr() + sizeof(uint32_t) * 2, GetWritableCodePtr() + sizeof(uint32_t) * 2);
-	}
-
 	const u8 *disasmStart = AlignCodePage();
 	BeginWrite(GetMemoryProtectPageSize());
 	if (jo.useStaticAlloc) {

@@ -2487,14 +2487,11 @@ static u32 sceIoDopen(const char *path) {
 		return hleLogError(Log::sceIo, SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND, "nullptr file not found");
 	}
 
-	double startTime = time_now_d();
-
 	bool listingExists = false;
 	auto listing = pspFileSystem.GetDirListing(path, &listingExists);
 
-	if (!listingExists) {
+	if (!listingExists)
 		return hleLogWarning(Log::sceIo, SCE_KERNEL_ERROR_ERRNO_FILE_NOT_FOUND);
-	}
 
 	DirListing *dir = new DirListing();
 	SceUID id = kernelObjects.Create(dir);
@@ -2502,12 +2499,6 @@ static u32 sceIoDopen(const char *path) {
 	dir->listing = listing;
 	dir->index = 0;
 	dir->name = std::string(path);
-
-	double listTime = time_now_d() - startTime;
-
-	if (listTime > 0.01) {
-		INFO_LOG(Log::IO, "Dir listing '%s' took %0.3f", path, listTime);
-	}
 
 	// Blacklist some directories that games should not be able to find out about.
 	// Speeds up directory iteration on slow Android Scoped Storage implementations :(

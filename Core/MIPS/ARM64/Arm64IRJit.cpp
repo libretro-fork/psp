@@ -126,12 +126,6 @@ bool Arm64JitBackend::CompileBlock(IRBlockCache *irBlockCache, int block_num) {
 	}
 
 	// We should've written an exit above.  If we didn't, bad things will happen.
-	// Only check if debug stats are enabled - needlessly wastes jit space.
-	if (DebugStatsEnabled()) {
-		QuickCallFunction(SCRATCH2_64, &NoBlockExits);
-		B(hooks_.crashHandler);
-	}
-
 	int len = (int)GetOffset(GetCodePointer()) - block->GetNativeOffset();
 	if (len < MIN_BLOCK_NORMAL_LEN) {
 		// We need at least 10 bytes to invalidate blocks with.
@@ -281,10 +275,6 @@ void Arm64JitBackend::CompIR_Interpret(IRInst inst) {
 	FlushAll();
 	SaveStaticRegisters();
 	WriteDebugProfilerStatus(IRProfilerStatus::INTERPRET);
-	if (DebugStatsEnabled()) {
-		MOVP2R(X0, MIPSGetName(op));
-		QuickCallFunction(SCRATCH2_64, &NotifyMIPSInterpret);
-	}
 	MOVI2R(X0, inst.constant);
 	QuickCallFunction(SCRATCH2_64, &MIPSInterpretTrampoline);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);

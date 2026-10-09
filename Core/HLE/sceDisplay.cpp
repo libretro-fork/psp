@@ -403,17 +403,6 @@ static bool FrameTimingThrottled() {
 	return FrameTimingLimit() != 0;
 }
 
-static void DoFrameDropLogging(float scaledTimestep) {
-	if (lastFrameTime != 0.0 && !wasPaused && lastFrameTime + scaledTimestep < curFrameTime) {
-		const double actualTimestep = curFrameTime - lastFrameTime;
-
-		char stats[4096];
-		StringWriter w(stats);
-		__DisplayGetDebugStats(w);
-		NOTICE_LOG(Log::sceDisplay, "Dropping frames - budget = %.2fms / %.1ffps, actual = %.2fms (+%.2fms) / %.1ffps\n%s", scaledTimestep * 1000.0, 1.0 / scaledTimestep, actualTimestep * 1000.0, (actualTimestep - scaledTimestep) * 1000.0, 1.0 / actualTimestep, stats);
-	}
-}
-
 // All the throttling and frameskipping logic is here.
 // This is called just before we drop out of the main loop, in order to allow the submit and present to happen.
 static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep) {
@@ -438,10 +427,6 @@ static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep) 
 		nextFrameTime = std::max(lastFrameTime + scaledTimestep, time_now_d() - maxFallBehindFrames * scaledTimestep);
 	}
 	curFrameTime = time_now_d();
-
-	if (g_Config.bLogFrameDrops) {
-		DoFrameDropLogging(scaledTimestep);
-	}
 
 	// Auto-frameskip automatically if speed limit is set differently than the default.
 	if (autoFrameSkip) {

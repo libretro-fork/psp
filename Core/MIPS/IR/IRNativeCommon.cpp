@@ -29,18 +29,6 @@ using namespace MIPSComp;
 
 namespace MIPSComp {
 
-// Compile time flag to enable debug stats for not compiled ops.
-static constexpr bool enableDebugStats = false;
-// Compile time flag for the jit's profiler hooks (the current PC and status, kept in memory for a
-// sampling profiler to read).
-static constexpr bool enableDebugProfiler = false;
-
-// Used only for debugging when enableDebug is true above.
-static std::map<uint8_t, int> debugSeenNotCompiledIR;
-static std::map<const char *, int> debugSeenNotCompiled;
-static double lastDebugStatsLog = 0.0;
-static constexpr double debugStatsFrequency = 5.0;
-
 const char *IRProfilerStatusToString(IRProfilerStatus s) {
 	switch (s) {
 	case IRProfilerStatus::NOT_RUNNING: return "NOT_RUNNING";
@@ -56,60 +44,9 @@ const char *IRProfilerStatusToString(IRProfilerStatus s) {
 	return "INVALID";
 }
 
-static void LogDebugStats() {
-	if (!enableDebugStats)
-		return;
-
-	double now = time_now_d();
-	if (now < lastDebugStatsLog + debugStatsFrequency)
-		return;
-	lastDebugStatsLog = now;
-
-	int worstIROp = -1;
-	int worstIRVal = 0;
-	for (auto it : debugSeenNotCompiledIR) {
-		if (it.second > worstIRVal) {
-			worstIRVal = it.second;
-			worstIROp = it.first;
-		}
-	}
-	debugSeenNotCompiledIR.clear();
-
-	const char *worstName = nullptr;
-	int worstVal = 0;
-	for (auto it : debugSeenNotCompiled) {
-		if (it.second > worstVal) {
-			worstVal = it.second;
-			worstName = it.first;
-		}
-	}
-	debugSeenNotCompiled.clear();
-
-	if (worstIROp != -1)
-		WARN_LOG(Log::JIT, "Most not compiled IR op: %s (%d)", GetIRMeta((IROp)worstIROp)->name, worstIRVal);
-	if (worstName != nullptr)
-		WARN_LOG(Log::JIT, "Most not compiled op: %s (%d)", worstName, worstVal);
-}
-
-bool IRNativeBackend::DebugStatsEnabled() const {
-	return enableDebugStats;
-}
-
-bool IRNativeBackend::DebugProfilerEnabled() const {
-	return enableDebugProfiler;
-}
-
-void IRNativeBackend::NotifyMIPSInterpret(const char *name) {
-	_assert_(enableDebugStats);
-	debugSeenNotCompiled[name]++;
-}
-
 void IRNativeBackend::DoMIPSInst(uint32_t value) {
 	MIPSOpcode op;
 	memcpy(&op, &value, sizeof(op));
-
-	if constexpr (enableDebugStats)
-		debugSeenNotCompiled[MIPSGetName(op)]++;
 
 	MIPSInterpret(currentMIPS, op);
 }
@@ -119,8 +56,6 @@ void IRNativeBackend::DoMIPSInst(uint32_t value) {
 uint32_t IRNativeBackend::DoIRInst(uint64_t value) {
 	IRInst inst[2]{};
 	memcpy(&inst[0], &value, sizeof(value));
-	if constexpr (enableDebugStats)
-		debugSeenNotCompiledIR[(uint8_t)inst[0].op]++;
 	// Doesn't really matter what value it returns as PC.
 	inst[1].op = IROp::ExitToPC;
 	return IRInterpret(currentMIPS, &inst[0]);
@@ -461,10 +396,6 @@ void IRNativeJit::FinalizeNativeBlock(IRBlockCache *irblockCache, int block_num)
 }
 
 void IRNativeJit::RunLoopUntil(u64 globalticks) {
-	if constexpr (enableDebugStats) {
-		LogDebugStats();
-	}
-
 	PROFILE_THIS_SCOPE("jit");
 	hooks_.enterDispatcher();
 }

@@ -133,14 +133,6 @@ protected:
 
 	virtual void OverwriteExit(int srcOffset, int len, int block_num) = 0;
 
-	// Returns true when debugging statistics should be compiled in.
-	bool DebugStatsEnabled() const;
-	bool DebugProfilerEnabled() const;
-
-	// Callback (compile when DebugStatsEnabled()) to log a base interpreter hit.
-	// Call the func returned by MIPSGetInterpretFunc(op) directly for interpret.
-	static void NotifyMIPSInterpret(const char *name);
-
 	// Callback to log AND perform a base interpreter op.  Alternative to NotifyMIPSInterpret().
 	static void DoMIPSInst(uint32_t op);
 

@@ -104,12 +104,6 @@ bool RiscVJitBackend::CompileBlock(IRBlockCache *irBlockCache, int block_num) {
 	}
 
 	// We should've written an exit above.  If we didn't, bad things will happen.
-	// Only check if debug stats are enabled - needlessly wastes jit space.
-	if (DebugStatsEnabled()) {
-		QuickCallFunction(&NoBlockExits, SCRATCH2);
-		QuickJ(R_RA, hooks_.crashHandler);
-	}
-
 	int len = (int)GetOffset(GetCodePointer()) - block->GetNativeOffset();
 	if (len < MIN_BLOCK_NORMAL_LEN) {
 		// We need at least 16 bytes to invalidate blocks with, but larger doesn't need to align.
@@ -257,10 +251,6 @@ void RiscVJitBackend::CompIR_Interpret(IRInst inst) {
 	FlushAll();
 	SaveStaticRegisters();
 	WriteDebugProfilerStatus(IRProfilerStatus::INTERPRET);
-	if (DebugStatsEnabled()) {
-		LI(X10, MIPSGetName(op));
-		QuickCallFunction(&NotifyMIPSInterpret, SCRATCH2);
-	}
 	LI(X10, (int32_t)inst.constant);
 	QuickCallFunction((const u8 *)&MIPSInterpretTrampoline, SCRATCH2);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);

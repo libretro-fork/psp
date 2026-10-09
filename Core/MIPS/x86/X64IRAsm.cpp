@@ -51,13 +51,6 @@ static void ShowPC(void *membase, void *jitbase) {
 void X64JitBackend::GenerateFixedCode(MIPSState *mipsState) {
 	// This will be used as a writable scratch area, always 32-bit accessible.
 	const u8 *start = AlignCodePage();
-	if (DebugProfilerEnabled()) {
-		ProtectMemoryPages(start, GetMemoryProtectPageSize(), MEM_PROT_READ | MEM_PROT_WRITE);
-		hooks_.profilerPC = (uint32_t *)GetWritableCodePtr();
-		Write32(0);
-		hooks_.profilerStatus = (IRProfilerStatus *)GetWritableCodePtr();
-		Write32(0);
-	}
 
 	EmitFPUConstants();
 	EmitVecConstants();

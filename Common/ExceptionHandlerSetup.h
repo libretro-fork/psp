@@ -17,7 +17,7 @@ typedef bool (*BadAccessHandler)(uintptr_t address, void *context);
 // when a genuinely unhandled access violation is about to crash the process. Off by
 // default since it links dbghelp and walks the stack from inside the exception handler -
 // opt in only when you're chasing a native crash.
-void InstallExceptionHandler(BadAccessHandler accessHandler, bool logStackTraceOnCrash = false);
+void InstallExceptionHandler(BadAccessHandler accessHandler);
 
 // Implementation note: This must be a no-op if InstallExceptionHandler hasn't been called.
 void UninstallExceptionHandler();

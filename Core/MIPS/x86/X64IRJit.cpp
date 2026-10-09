@@ -109,11 +109,6 @@ bool X64JitBackend::CompileBlock(IRBlockCache *irBlockCache, int block_num) {
 	}
 
 	// We should've written an exit above.  If we didn't, bad things will happen.
-	// Only check if debug stats are enabled - needlessly wastes jit space.
-	if (DebugStatsEnabled()) {
-		ABI_CallFunction((const void *)&NoBlockExits);
-		JMP(hooks_.crashHandler, true);
-	}
 
 	int len = (int)GetOffset(GetCodePointer()) - block->GetNativeOffset();
 	if (len < MIN_BLOCK_NORMAL_LEN) {
@@ -253,9 +248,6 @@ void X64JitBackend::CompIR_Interpret(IRInst inst) {
 	FlushAll();
 	SaveStaticRegisters();
 	WriteDebugProfilerStatus(IRProfilerStatus::INTERPRET);
-	if (DebugStatsEnabled()) {
-		ABI_CallFunctionP((const void *)&NotifyMIPSInterpret, (void *)MIPSGetName(op));
-	}
 	ABI_CallFunctionC((const void *)&MIPSInterpretTrampoline, inst.constant);
 	WriteDebugProfilerStatus(IRProfilerStatus::IN_JIT);
 	LoadStaticRegisters();

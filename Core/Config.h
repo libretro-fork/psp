@@ -41,28 +41,6 @@ struct UrlEncoder;
 class Section;
 class IniFile;
 
-class PlayTimeTracker {
-public:
-	struct PlayTime {
-		int totalTimePlayed;
-		double startTime;  // time_now_d() time
-		uint64_t lastTimePlayed;  // UTC Unix time for portability.
-	};
-
-	// It's OK to call these redundantly.
-	void Start(std::string_view gameId);
-	void Stop(std::string_view gameId);
-	void Reset(std::string_view gameId);
-
-	void Load(const Section *section);
-	void Save(Section *section);
-
-	bool GetPlayedTimeString(std::string_view, std::string *str) const;
-
-private:
-	std::map<std::string, PlayTime, std::less<>> tracker_;
-};
-
 struct ConfigSetting;
 
 struct ConfigSectionMeta {
@@ -178,10 +156,6 @@ public:
 
 	int iRunCount; // To be used to for example check for updates every 10 runs and things like that.
 
-	// Debugger
-	bool bAutoRun;  // start immediately
-	bool bBreakOnFrameTimeout;  // not saved
-
 	// General
 	bool bScreenshotsAsPNG;
 	bool bUseFFV1;
@@ -222,11 +196,6 @@ public:
 	int iExceptionActionMemRead;  // this also includes alignment and other odd memory exceptions.
 	int iExceptionActionMemWrite;
 	int iExceptionActionBreak;
-
-	// If true, log a best-effort native stack trace (Windows only) when a genuinely
-	// unhandled access violation is about to crash the process. Diagnostic only, off by
-	// default - see --log-native-crashes in Core/CmdLine.cpp.
-	bool bLogNativeCrashStackTraces;
 
 	bool bFastMemory;
 	int iCpuCore;
@@ -273,8 +242,6 @@ public:
 	std::string sLanguageIni;
 
 	std::string sIgnoreCompatSettings;
-
-	bool bDiscordRichPresence;  // Enables setting the Discord presence to the current game (or menu)
 
 	// GFX
 	int iGPUBackend;
@@ -406,7 +373,6 @@ public:
 
 	// Sound
 	bool bEnableSound;
-	int iSDLAudioBufferSize;
 	int iAudioBufferSize;
 	bool bFillAudioGaps;
 	int iAudioPlaybackMode;
@@ -424,14 +390,9 @@ public:
 	int iAchievementVolume;
 	int iAltSpeedVolume;
 
-	bool bExtraAudioBuffering;  // For bluetooth
 	std::string sAudioDevice;
 	bool bAutoSwitchAudioDevice;
 	bool bUseOldAtrac;
-
-	// iOS only for now
-	bool bAudioMixWithOthers;
-	bool bAudioRespectSilentMode;
 
 	// UI
 	bool bShowDebuggerOnLoad;
@@ -445,9 +406,6 @@ public:
 	int iDeveloperSettingsCurrentTab;
 
 	std::string sThemeName;
-
-	// These aren't saved, just for instant debugging.
-	bool bLogFrameDrops;
 
 	// Analog stick tilting
 	// This is the held base angle (from the horizon), that we compute the tilt relative from.
@@ -555,11 +513,6 @@ public:
 	float fMouseSensitivity;
 	float fMouseSmoothing;
 	int iMouseWheelUpDelayMs;
-
-	// Crude Windows controller filter.
-	bool bAllowHIDInput;
-	bool bAllowXInput;
-	bool bAllowDInput;
 
 	bool bSystemControls;
 	int iRapidFireInterval;
@@ -676,8 +629,6 @@ public:
 	// Overlays
 	int iDebugOverlay;
 
-	bool bGpuLogProfiler; // Controls the Vulkan logging profiler (profiles textures uploads etc).
-
 	// Retro Achievement settings
 	// Copied from Duckstation, we might want to remove some.
 	bool bAchievementsEnable;
@@ -762,8 +713,6 @@ public:
 	void UpdateAfterSettingAutoFrameSkip();
 	void NotifyUpdatedCpuCore();
 
-	PlayTimeTracker &TimeTracker() { return playTimeTracker_; }
-
 	const DisplayLayoutConfig &GetDisplayLayoutConfig(DeviceOrientation orientation) const {
 		return orientation == DeviceOrientation::Portrait ? displayLayoutPortrait : displayLayoutLandscape;
 	}
@@ -801,8 +750,6 @@ private:
 
 	// If not empty, we're using a game-specific config.
 	std::string gameId_;
-
-	PlayTimeTracker playTimeTracker_;
 
 	// Always the paths to the main configs, doesn't change with game-specific overlay.
 	Path iniFilename_;

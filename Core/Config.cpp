@@ -229,7 +229,6 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("RunCount", SETTING(g_Config, iRunCount), 0, CfgFlag::DEFAULT),
 	ConfigSetting("Enable Logging", SETTING(g_Config, bEnableLogging), true, CfgFlag::PER_GAME),
 	ConfigSetting("FileLogging", SETTING(g_Config, bEnableFileLogging), false, CfgFlag::PER_GAME),
-	ConfigSetting("AutoRun", SETTING(g_Config, bAutoRun), true, CfgFlag::DEFAULT),
 	ConfigSetting("IgnoreBadMemAccess", SETTING(g_Config, bIgnoreBadMemAccess), true, CfgFlag::DEFAULT),
 	ConfigSetting("EnableFPUExceptionTraps", SETTING(g_Config, bEnableFPUExceptionTraps), false, CfgFlag::DEFAULT),
 	ConfigSetting("CurrentDirectory", SETTING(g_Config, currentDirectory), "", CfgFlag::DEFAULT),
@@ -240,7 +239,6 @@ static const ConfigSetting generalSettings[] = {
 	ConfigSetting("Wow64WarningDismissed", SETTING(g_Config, bWow64WarningDismissed), false, CfgFlag::DEFAULT),
 #endif
 	ConfigSetting("Language", SETTING(g_Config, sLanguageIni), &DefaultLangRegion, CfgFlag::DEFAULT),
-	ConfigSetting("DiscordRichPresence", SETTING(g_Config, bDiscordRichPresence), false, CfgFlag::DEFAULT),
 	ConfigSetting("UISound", SETTING(g_Config, bUISound), false, CfgFlag::DEFAULT),
 
 	ConfigSetting("DisableHTTPS", SETTING(g_Config, bDisableHTTPS), false, CfgFlag::DONT_SAVE),
@@ -753,7 +751,6 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("SkipGPUReadbackMode", SETTING(g_Config, iSkipGPUReadbackMode), false, CfgFlag::PER_GAME | CfgFlag::REPORT),
 
 	ConfigSetting("GfxDebugOutput", SETTING(g_Config, bGfxDebugOutput), false, CfgFlag::DONT_SAVE),
-	ConfigSetting("LogFrameDrops", SETTING(g_Config, bLogFrameDrops), false, CfgFlag::DEFAULT),
 
 	ConfigSetting("InflightFrames", SETTING(g_Config, iInflightFrames), 2, CfgFlag::DEFAULT),
 	ConfigSetting("RenderDuplicateFrames", SETTING(g_Config, bRenderDuplicateFrames), false, CfgFlag::PER_GAME),
@@ -761,7 +758,6 @@ static const ConfigSetting graphicsSettings[] = {
 	ConfigSetting("MultiThreading", SETTING(g_Config, bRenderMultiThreading), true, CfgFlag::DEFAULT),
 
 	ConfigSetting("ShaderCache", SETTING(g_Config, bShaderCache), true, CfgFlag::DEFAULT),
-	ConfigSetting("GpuLogProfiler", SETTING(g_Config, bGpuLogProfiler), false, CfgFlag::DEFAULT),
 
 	ConfigSetting("UberShaderVertex", SETTING(g_Config, bUberShaderVertex), true, CfgFlag::DEFAULT),
 
@@ -808,8 +804,6 @@ bool DefaultAudioMixWithOthers() {
 
 static const ConfigSetting soundSettings[] = {
 	ConfigSetting("Enable", SETTING(g_Config, bEnableSound), true, CfgFlag::PER_GAME),
-	ConfigSetting("ExtraAudioBuffering", SETTING(g_Config, bExtraAudioBuffering), false, CfgFlag::DEFAULT),
-	ConfigSetting("AudioBufferSize", SETTING(g_Config, iSDLAudioBufferSize), 256, CfgFlag::DEFAULT),
 
 	ConfigSetting("FillAudioGaps", SETTING(g_Config, bFillAudioGaps), true, CfgFlag::DEFAULT),
 	ConfigSetting("AudioSyncMode", SETTING(g_Config, iAudioPlaybackMode), (int)AudioSyncMode::CLASSIC_PITCH, CfgFlag::DEFAULT),
@@ -831,8 +825,6 @@ static const ConfigSetting soundSettings[] = {
 
 	ConfigSetting("AudioDevice", SETTING(g_Config, sAudioDevice), "", CfgFlag::DEFAULT),
 	ConfigSetting("AutoAudioDevice", SETTING(g_Config, bAutoSwitchAudioDevice), true, CfgFlag::DEFAULT),
-	ConfigSetting("AudioMixWithOthers", SETTING(g_Config, bAudioMixWithOthers), &DefaultAudioMixWithOthers, CfgFlag::DEFAULT),
-	ConfigSetting("AudioRespectSilentMode", SETTING(g_Config, bAudioRespectSilentMode), false, CfgFlag::DEFAULT),
 	ConfigSetting("UseOldAtrac", SETTING(g_Config, bUseOldAtrac), false, CfgFlag::DEFAULT),
 };
 
@@ -1024,12 +1016,6 @@ static const ConfigSetting controlSettings[] = {
 
 	ConfigSetting("SystemControls", SETTING(g_Config, bSystemControls), true, CfgFlag::DEFAULT),
 	ConfigSetting("RapidFileInterval", SETTING(g_Config, iRapidFireInterval), 5, CfgFlag::DEFAULT),
-
-#if PPSSPP_PLATFORM(WINDOWS)
-	ConfigSetting("AllowHIDInput", SETTING(g_Config, bAllowHIDInput), true, CfgFlag::DEFAULT),
-	ConfigSetting("AllowXInput", SETTING(g_Config, bAllowXInput), true, CfgFlag::DEFAULT),
-	ConfigSetting("AllowDInput", SETTING(g_Config, bAllowDInput), true, CfgFlag::DEFAULT),
-#endif
 };
 
 static const std::vector<std::string_view> emptyList;
@@ -1349,10 +1335,6 @@ void Config::Load(const char *iniFileName, const char *controllerIniFilename) {
 		}
 	}
 
-	// Time tracking
-	Section *playTime = iniFile.GetOrCreateSection("PlayTime");
-	playTimeTracker_.Load(playTime);
-
 	auto pinnedPaths = iniFile.GetOrCreateSection("PinnedPaths")->ToMap();
 	vPinnedPaths.clear();
 	for (const auto &[_, value] : pinnedPaths) {
@@ -1511,10 +1493,6 @@ bool Config::Save(const char *saveReason) {
 
 		Section *log = iniFile.GetOrCreateSection(logSectionName);
 		g_logManager.SaveConfig(log);
-
-		// Time tracking
-		Section *playTime = iniFile.GetOrCreateSection("PlayTime");
-		playTimeTracker_.Save(playTime);
 
 		if (!iniFile.Save(iniFilename_)) {
 			ERROR_LOG(Log::Config, "Error saving config (%s) - can't write ini '%s'", saveReason, iniFilename_.c_str());
@@ -1993,99 +1971,6 @@ void Config::GetReportingInfo(UrlEncoder &data) const {
 			meta.settings[j].ReportSetting(configBlock, data, prefix);
 		}
 	}
-}
-
-void PlayTimeTracker::Start(std::string_view gameId) {
-	if (gameId.empty()) {
-		return;
-	}
-	VERBOSE_LOG(Log::Config, "GameTimeTracker::Start(%.*s)", STR_VIEW(gameId));
-
-	auto iter = tracker_.find(gameId);
-	if (iter != tracker_.end()) {
-		if (iter->second.startTime == 0.0) {
-			iter->second.lastTimePlayed = time_now_unix_utc();
-			iter->second.startTime = time_now_d();
-		}
-		return;
-	}
-
-	PlayTime playTime;
-	playTime.lastTimePlayed = time_now_unix_utc();
-	playTime.totalTimePlayed = 0.0;
-	playTime.startTime = time_now_d();
-	tracker_[std::string(gameId)] = playTime;
-}
-
-void PlayTimeTracker::Stop(std::string_view gameId) {
-	if (gameId.empty()) {
-		return;
-	}
-
-	VERBOSE_LOG(Log::Config, "GameTimeTracker::Stop(%.*s)", STR_VIEW(gameId));
-
-	auto iter = tracker_.find(gameId);
-	if (iter != tracker_.end()) {
-		if (iter->second.startTime != 0.0) {
-			iter->second.totalTimePlayed += time_now_d() - iter->second.startTime;
-			iter->second.startTime = 0.0;
-		}
-		iter->second.lastTimePlayed = time_now_unix_utc();
-		return;
-	}
-
-	// Can happen if boot gets cancelled. Not worth warn-logging.
-	DEBUG_LOG(Log::Config, "GameTimeTracker::Stop called without corresponding GameTimeTracker::Start");
-}
-
-void PlayTimeTracker::Reset(std::string_view gameId) {
-	auto iter = tracker_.find(gameId);
-	if (iter != tracker_.end()) {
-		iter->second.lastTimePlayed = 0;
-		iter->second.totalTimePlayed = 0;
-		iter->second.startTime = 0.0;
-	}
-}
-
-void PlayTimeTracker::Load(const Section *section) {
-	tracker_.clear();
-
-	const auto map = section->ToMap();
-
-	for (const auto &iter : map) {
-		const std::string &value = iter.second;
-		// Parse the string.
-		PlayTime gameTime{};
-		if (2 == sscanf(value.c_str(), "%d,%llu", &gameTime.totalTimePlayed, (long long *)&gameTime.lastTimePlayed)) {
-			tracker_[iter.first] = gameTime;
-		}
-	}
-}
-
-void PlayTimeTracker::Save(Section *section) {
-	for (auto &iter : tracker_) {
-		std::string formatted = StringFromFormat("%d,%llu", iter.second.totalTimePlayed, iter.second.lastTimePlayed);
-		section->Set(iter.first, formatted);
-	}
-}
-
-bool PlayTimeTracker::GetPlayedTimeString(std::string_view gameId, std::string *str) const {
-	auto ga = GetI18NCategory(I18NCat::GAME);
-
-	auto iter = tracker_.find(gameId);
-	if (iter == tracker_.end()) {
-		return false;
-	}
-
-	int totalSeconds = iter->second.totalTimePlayed;
-	const int seconds = totalSeconds % 60;
-	totalSeconds /= 60;
-	const int minutes = totalSeconds % 60;
-	totalSeconds /= 60;
-	const int hours = totalSeconds;
-
-	*str = ApplySafeSubstitutions(ga->T("Time Played: %1h %2m %3s"), hours, minutes, seconds);
-	return true;
 }
 
 // This matches exactly the old shift-based curve.

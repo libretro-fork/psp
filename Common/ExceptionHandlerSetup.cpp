@@ -64,7 +64,6 @@ void SetupCRT(bool suppressDialogs) {
 
 static PVOID g_vectoredExceptionHandle;
 static bool g_symInitialized = false;
-static bool g_logCrashStackTrace = false;
 
 // Logs a best-effort stack trace when we're about to let a genuinely unhandled access
 // violation crash the process - e.g. a bad host pointer (not a guest PSP memory access)
@@ -115,17 +114,10 @@ static LONG NTAPI GlobalExceptionHandler(PEXCEPTION_POINTERS pPtrs) {
 		uintptr_t badAddress = (uintptr_t)pPtrs->ExceptionRecord->ExceptionInformation[1];
 		CONTEXT* ctx = pPtrs->ContextRecord;
 
-		if (g_badAccessHandler(badAddress, ctx)) {
+		if (g_badAccessHandler(badAddress, ctx))
 			return (DWORD)EXCEPTION_CONTINUE_EXECUTION;
-		} else {
-			if (g_logCrashStackTrace) {
-				ERROR_LOG(Log::System, "Unhandled access violation (%s) at address %016llx, pc=%016llx",
-					accessType == 1 ? "write" : "read", (unsigned long long)badAddress, (unsigned long long)(uintptr_t)pPtrs->ExceptionRecord->ExceptionAddress);
-				LogCrashStackTrace();
-			}
-			// Let's not prevent debugging.
-			return (DWORD)EXCEPTION_CONTINUE_SEARCH;
-		}
+		// Let's not prevent debugging.
+		return (DWORD)EXCEPTION_CONTINUE_SEARCH;
 	}
 
 	case EXCEPTION_STACK_OVERFLOW:
@@ -153,8 +145,7 @@ static LONG NTAPI GlobalExceptionHandler(PEXCEPTION_POINTERS pPtrs) {
 	}
 }
 
-void InstallExceptionHandler(BadAccessHandler badAccessHandler, bool logStackTraceOnCrash) {
-	g_logCrashStackTrace = logStackTraceOnCrash;
+void InstallExceptionHandler(BadAccessHandler badAccessHandler) {
 	if (g_vectoredExceptionHandle) {
 		g_badAccessHandler = badAccessHandler;
 		return;
@@ -162,11 +153,6 @@ void InstallExceptionHandler(BadAccessHandler badAccessHandler, bool logStackTra
 
 	INFO_LOG(Log::System, "Installing exception handler");
 	g_badAccessHandler = badAccessHandler;
-
-	if (logStackTraceOnCrash && !g_symInitialized) {
-		SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
-		g_symInitialized = SymInitialize(GetCurrentProcess(), nullptr, TRUE) != FALSE;
-	}
 
 #ifdef USE_ASAN
 	g_vectoredExceptionHandle = AddVectoredExceptionHandler(FALSE, GlobalExceptionHandler);
@@ -255,7 +241,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context) {
 	}
 }
 
-void InstallExceptionHandler(BadAccessHandler badAccessHandler, bool logStackTraceOnCrash) {
+void InstallExceptionHandler(BadAccessHandler badAccessHandler) {
 	if (!badAccessHandler) {
 		return;
 	}
@@ -328,7 +314,7 @@ void UninstallExceptionHandler() {
 
 #else  // !MACHINE_CONTEXT_SUPPORTED
 
-void InstallExceptionHandler(BadAccessHandler badAccessHandler, bool logStackTraceOnCrash) {
+void InstallExceptionHandler(BadAccessHandler badAccessHandler) {
 	ERROR_LOG(Log::System, "Exception handler not implemented on this platform, can't install");
 }
 void UninstallExceptionHandler() { }

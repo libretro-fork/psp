@@ -608,7 +608,7 @@ static bool CPU_Init(FileLoader *fileLoader, IdentifiedFileType type, std::strin
 		g_CoreParameter.gpuCore = GPUCORE_SOFTWARE;
 	}
 
-	InstallExceptionHandler(&Memory::HandleFault, g_Config.bLogNativeCrashStackTraces);
+	InstallExceptionHandler(&Memory::HandleFault);
 
 	return true;
 }

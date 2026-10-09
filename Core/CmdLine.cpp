@@ -241,7 +241,6 @@ static const CommandLineParam g_autoParams[] = {
 	{POFF(memReadAction), CmdParamType::Enum, "memread", '\0', "Set the action for memory read exceptions", CmdLineMode::Both, g_ExceptionActionValues, ARRAY_SIZE(g_ExceptionActionValues)},
 	{POFF(memWriteAction), CmdParamType::Enum, "memwrite", '\0', "Set the action for memory write exceptions", CmdLineMode::Both, g_ExceptionActionValues, ARRAY_SIZE(g_ExceptionActionValues)},
 	{POFF(breakAction), CmdParamType::Enum, "break", '\0', "Set the action for break exceptions", CmdLineMode::Both, g_ExceptionActionValues, ARRAY_SIZE(g_ExceptionActionValues)},
-	{POFF(logNativeCrashes), CmdParamType::Bool, "log-native-crashes", '\0', "Log a native stack trace (Windows only) on an otherwise-unhandled crash", CmdLineMode::Both},
 	{POFF(verbose), CmdParamType::Bool, "verbose", '\0', "Enable verbose output", CmdLineMode::Both},
 	{POFF(printEqualLines), CmdParamType::Bool, "print-equal-lines", '\0', "Print lines that are equal during comparison", CmdLineMode::Headless},
 	{POFF(xres), CmdParamType::Int, "xres", '\0', "Set X resolution", CmdLineMode::Application},
@@ -546,7 +545,6 @@ void CommandLineOptions::ApplyToConfig() const {
 		g_Config.DoNotSaveSetting(&g_Config.bEnableLogging);
 	}
 	if (optionS) {
-		g_Config.bAutoRun = false;
 		g_Config.bSaveSettings = false;
 	}
 	if (escapeExit.has_value()) {
@@ -628,11 +626,6 @@ void CommandLineOptions::ApplyToConfig() const {
 	if (breakAction.has_value()) {
 		g_Config.iExceptionActionBreak = breakAction.value();
 		g_Config.DoNotSaveSetting(&g_Config.iExceptionActionBreak);
-	}
-
-	if (logNativeCrashes.has_value()) {
-		g_Config.bLogNativeCrashStackTraces = logNativeCrashes.value();
-		g_Config.DoNotSaveSetting(&g_Config.bLogNativeCrashStackTraces);
 	}
 
 	// --vsh is applied by the caller (by setting their boot file name variable).

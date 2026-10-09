@@ -437,12 +437,6 @@ public:
 	int GetBackbufferWidth() { return (int)(presentation_ ? presentation_->GetExtent().width : swapChainExtent_.width); }
 	int GetBackbufferHeight() { return (int)(presentation_ ? presentation_->GetExtent().height : swapChainExtent_.height); }
 
-	void SetProfilerEnabledPtr(bool *enabled) {
-		for (auto &frame : frame_) {
-			frame.profiler.SetEnabledPtr(enabled);
-		}
-	}
-
 	// 1 for no frame overlap and thus minimal latency but worst performance.
 	// 2 is an OK compromise, while 3 performs best but risks slightly higher latency.
 	enum {
