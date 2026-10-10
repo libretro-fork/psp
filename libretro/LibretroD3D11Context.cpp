@@ -122,6 +122,7 @@ void LibretroD3D11Context::LockGPU() {
    }
    // Outside a frame nothing binds the cached state again.
    if (hwInterface_.lock_context(hwInterface_.handle) && draw_ && frameSlot_ < 0) {
+      hwInterface_.context->ClearState();
       draw_->Invalidate(InvalidationFlags::CACHED_RENDER_STATE);
    }
 }
@@ -141,8 +142,9 @@ void LibretroD3D11Context::ContextReset() {
       return;
    }
 
-   if (iface.interface_version >= RETRO_HW_RENDER_INTERFACE_D3D11_VERSION_2) {
-      iface.lock_context(iface.handle);
+   if (iface.interface_version >= RETRO_HW_RENDER_INTERFACE_D3D11_VERSION_2
+         && iface.lock_context(iface.handle)) {
+      iface.context->ClearState();
    }
 
    if (gpu && lostGpu_ != gpu) {
@@ -267,7 +269,15 @@ void LibretroD3D11Context::FrameBegin() {
    unsigned idx;
    Slot *s;
 
-   if (!live_ || !v2_ || !draw_ || frameSlot_ >= 0) {
+   if (!live_ || !draw_ || frameSlot_ >= 0) {
+      return;
+   }
+   /* The frontend draws on this context between frames, and leaves bound
+    * stages nothing here ever sets (a geometry shader, say). BeginFrame
+    * binds the cached state again and BeginHostFrame dirties all of the
+    * PSP's. */
+   if (!v2_) {
+      hwInterface_.context->ClearState();
       return;
    }
 
@@ -276,10 +286,9 @@ void LibretroD3D11Context::FrameBegin() {
       return;
    }
    hwInterface_.wait_sync_index(hwInterface_.handle);
-   /* What the frontend did to the context is undone by the frame
-    * itself: BeginFrame binds the cached state again and BeginHostFrame
-    * dirties all of the PSP's. */
-   hwInterface_.lock_context(hwInterface_.handle);
+   if (hwInterface_.lock_context(hwInterface_.handle)) {
+      hwInterface_.context->ClearState();
+   }
    frameSlot_ = (int)idx;
 
    w = (UINT)PSP_CoreParameter().pixelWidth;

@@ -15,10 +15,12 @@
  * The frontend checks the version 2 contract as it goes:
  * video_refresh and wait_sync_index without the lock, set_texture with
  * it, the handle of the latest context_reset only, its own render target
- * never drawn into, and (v2-threaded) a texture it holds never drawn into
- * before wait_sync_index has returned for it - it fills each one with a
- * marker after reading it and checks the marker is still there before it
- * gives the texture back.
+ * never drawn into, state it leaves bound that the core never sets (a
+ * predicate here, as a geometry shader would be) reset by the core, and
+ * (v2-threaded) a texture it holds never drawn into before
+ * wait_sync_index has returned for it - it fills each one with a marker
+ * after reading it and checks the marker is still there before it gives
+ * the texture back.
  *
  * On the way it runs a save state, a resolution change, a context destroy
  * and reset with a new handle, a reset alone with a new handle (a driver
@@ -73,12 +75,14 @@ static CRITICAL_SECTION lock;
 static DWORD core_thread;
 static int core_depth;
 static int used;
+static int core_turned;
 
 /* The frontend's own frame: a render target the core must never reach. */
 static ID3D11Texture2D *fe_tex;
 static ID3D11RenderTargetView *fe_rtv;
 static ID3D11Texture2D *staging;
 static ID3D11Texture2D *probe;
+static ID3D11Predicate *fe_pred;
 static int fe_drawn;
 
 /* v2-threaded */
@@ -147,7 +151,10 @@ static bool fe_lock_context(void *h)
    check_handle(h, "lock_context");
    EnterCriticalSection(&lock);
    if (on_core_thread())
+   {
       core_depth++;
+      core_turned = 1;
+   }
    d    = used;
    used = 0;
    return d ? true : false;
@@ -203,6 +210,27 @@ static void fe_wait_sync_index(void *h)
 
 /* Its own drawing: everything a frontend's frame binds, so a core that
  * relies on what it bound before draws with the wrong state. */
+/* The frontend's own work runs without the predicate it leaves set. */
+static void fe_unpredicate(void)
+{
+   ID3D11DeviceContext_SetPredication(imm, NULL, FALSE);
+}
+
+/* At the start of the frontend's turn: a core that took the context since
+ * must have reset the state it does not set itself. */
+static void fe_check_reset(void)
+{
+   ID3D11Predicate *p = NULL;
+   BOOL v = FALSE;
+   if (!core_turned || mode == MODE_V1)
+      return;
+   ID3D11DeviceContext_GetPredication(imm, &p, &v);
+   if (p == fe_pred)
+      fail("the core drew with state the frontend left set");
+   if (p)
+      ID3D11Predicate_Release(p);
+}
+
 static void fe_disturb(void)
 {
    static const float grey[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
@@ -210,6 +238,8 @@ static void fe_disturb(void)
    ID3D11ShaderResourceView *null_srv = NULL;
    vp.TopLeftX = 0; vp.TopLeftY = 0; vp.Width = 1; vp.Height = 1;
    vp.MinDepth = 0; vp.MaxDepth = 1;
+   core_turned = 0;
+   fe_unpredicate();
    ID3D11DeviceContext_OMSetRenderTargets(imm, 1, &fe_rtv, NULL);
    ID3D11DeviceContext_ClearRenderTargetView(imm, fe_rtv, grey);
    ID3D11DeviceContext_RSSetViewports(imm, 1, &vp);
@@ -220,6 +250,10 @@ static void fe_disturb(void)
    ID3D11DeviceContext_VSSetShader(imm, NULL, NULL, 0);
    ID3D11DeviceContext_PSSetShader(imm, NULL, NULL, 0);
    ID3D11DeviceContext_PSSetShaderResources(imm, 0, 1, &null_srv);
+   /* Left set: state the core never sets for itself, as a geometry
+    * shader a frontend's sprites go through would be. Every draw and
+    * clear of a core that does not clear it is skipped. */
+   ID3D11DeviceContext_SetPredication(imm, fe_pred, FALSE);
    used     = 1;
    fe_drawn = 1;
 }
@@ -228,6 +262,7 @@ static int read_pixel(ID3D11Texture2D *tex, unsigned x, unsigned y, unsigned *ou
 {
    D3D11_BOX box;
    D3D11_MAPPED_SUBRESOURCE m;
+   fe_unpredicate();
    box.left = x; box.top = y; box.front = 0;
    box.right = x + 1; box.bottom = y + 1; box.back = 1;
    ID3D11DeviceContext_CopySubresourceRegion(imm, (ID3D11Resource *)probe, 0, 0, 0, 0,
@@ -255,6 +290,7 @@ static void fe_read_frame(ID3D11Texture2D *tex, unsigned w, unsigned h)
    unsigned y, x;
    int lit = 0;
 
+   fe_unpredicate();
    ID3D11Texture2D_GetDesc(tex, &d);
    if (d.Width < w || d.Height < h || w > MAXDIM || h > MAXDIM)
    {
@@ -297,6 +333,7 @@ static void fe_mark(ID3D11Texture2D *tex)
 {
    static const float magenta[4] = { 1.0f, 0.0f, 1.0f, 1.0f };
    ID3D11RenderTargetView *rtv = NULL;
+   fe_unpredicate();
    if (FAILED(ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource *)tex, NULL, &rtv)))
    {
       fail("no render target view on the core's texture");
@@ -342,16 +379,18 @@ static DWORD WINAPI fe_thread_main(LPVOID arg)
       /* Late, so the core runs ahead and has to wait. */
       Sleep(LAG_MS);
       EnterCriticalSection(&lock);
+      fe_check_reset();
       fe_check_own_target();
-      fe_disturb();
       fe_read_frame(wk.tex, wk.w, wk.h);
       fe_mark(wk.tex);
+      fe_disturb();
       LeaveCriticalSection(&lock);
 
       Sleep(LAG_MS);
       EnterCriticalSection(&lock);
+      fe_check_reset();
       fe_check_mark(wk.tex, wk.w, wk.h);
-      used = 1;
+      fe_disturb();
       LeaveCriticalSection(&lock);
       ID3D11Texture2D_Release(wk.tex);
 
@@ -531,9 +570,10 @@ static void video_cb(const void *data, unsigned width, unsigned height, size_t p
    if (mode == MODE_V2)
    {
       EnterCriticalSection(&lock);
+      fe_check_reset();
       fe_check_own_target();
-      fe_disturb();
       fe_read_frame(handed, width, height);
+      fe_disturb();
       LeaveCriticalSection(&lock);
       handed = NULL;
       return;
@@ -595,6 +635,16 @@ static int make_device(void)
    td.Width = 1; td.Height = 1;
    if (FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &probe)))
       return 0;
+   {
+      D3D11_QUERY_DESC qd;
+      qd.Query     = D3D11_QUERY_OCCLUSION_PREDICATE;
+      qd.MiscFlags = 0;
+      if (FAILED(ID3D11Device_CreatePredicate(dev, &qd, &fe_pred)))
+         return 0;
+      /* Nothing drawn between Begin and End: the predicate is false. */
+      ID3D11DeviceContext_Begin(imm, (ID3D11Asynchronous *)fe_pred);
+      ID3D11DeviceContext_End(imm, (ID3D11Asynchronous *)fe_pred);
+   }
    return 1;
 }
 
