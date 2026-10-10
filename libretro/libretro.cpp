@@ -1381,7 +1381,9 @@ void retro_unload_game(void) {
       Libretro::EmuThreadStop();
    }
 
+	ctx->LockGPU();
 	PSP_Shutdown(true);
+	ctx->UnlockGPU();
 	System_AudioClear();
 	pendingCheats.Drain([](CheatChange &&) {});
 	g_pendingBoot = false;
@@ -1402,6 +1404,7 @@ void retro_reset(void) {
    if (Libretro::useEmuThread)
       Libretro::EmuThreadStop();
 
+   ctx->LockGPU();
    PSP_Shutdown(true);
    System_AudioClear();
    g_pendingBoot = false;
@@ -1409,7 +1412,9 @@ void retro_reset(void) {
    unserialize_data = nullptr;
    unserialize_size = 0;
 
-   if (BootState::Complete != PSP_Init(PSP_CoreParameter(), &g_bootErrorString)) {
+   BootState state = PSP_Init(PSP_CoreParameter(), &g_bootErrorString);
+   ctx->UnlockGPU();
+   if (BootState::Complete != state) {
       ERROR_LOG(Log::Boot, "%s", g_bootErrorString.c_str());
       environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr);
    }
@@ -1510,7 +1515,9 @@ static void retro_input(void) {
 // Called every frame by retroarch.
 void retro_run(void) {
    if (g_pendingBoot) {
+      ctx->LockGPU();
       BootState state = PSP_InitUpdate(&g_bootErrorString);
+      ctx->UnlockGPU();
       switch (state) {
       case BootState::Failed:
          g_pendingBoot = false;
@@ -1580,8 +1587,10 @@ void retro_run(void) {
          return;
       }
    }
-   else
+   else {
+      ctx->FrameBegin();
       EmuFrame();
+   }
 
    ctx->SwapBuffers();
    upload_output_audio_buffer();
@@ -1609,7 +1618,10 @@ size_t retro_serialize_size(void)
    if (useEmuThread)
       EmuThreadPause();
 
-   return (CChunkFileReader::MeasurePtr(state) + 0x800000) & ~0x7FFFFF;
+   ctx->LockGPU();
+   size_t measured = CChunkFileReader::MeasurePtr(state);
+   ctx->UnlockGPU();
+   return (measured + 0x800000) & ~0x7FFFFF;
    // We don't unpause intentionally
 }
 
@@ -1625,6 +1637,7 @@ bool retro_serialize(void *data, size_t size) {
    SaveState::SaveStart state;
    bool retVal = false;
 
+   ctx->LockGPU();
    // The buffer was sized by an earlier retro_serialize_size(); the state
    // may have grown since, so never write past 'size'.
    size_t measuredSize = CChunkFileReader::MeasurePtr(state);
@@ -1636,6 +1649,7 @@ bool retro_serialize(void *data, size_t size) {
       ERROR_LOG(Log::SaveState, "Savestate (%d bytes) does not fit in frontend buffer (%d bytes)",
                 (int)measuredSize, (int)size);
    }
+   ctx->UnlockGPU();
 
    if (useEmuThread)
       EmuThreadStart();
@@ -1663,8 +1677,10 @@ bool retro_unserialize(const void *data, size_t size) {
 
    std::string errorString;
    SaveState::SaveStart state;
+   ctx->LockGPU();
    bool retVal = CChunkFileReader::LoadPtr((u8 *)data, size, state, &errorString)
       == CChunkFileReader::ERROR_NONE;
+   ctx->UnlockGPU();
 
    if (useEmuThread)
       EmuThreadStart();

@@ -3,3 +3,4 @@ blocktest
 lrtest
 *.o
 lrgltest
+lrd3d11test.exe

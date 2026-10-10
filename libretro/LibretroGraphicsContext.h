@@ -38,6 +38,14 @@ public:
 	virtual void GotBackbuffer();
 	virtual void LostBackbuffer();
 
+	// Backends whose context the frontend shares by taking turns (D3D11
+	// interface version 2). FrameBegin takes it for the frame and
+	// SwapBuffers gives it back; LockGPU/UnlockGPU bracket GPU work
+	// outside a frame. Recursive. No-ops elsewhere.
+	virtual void FrameBegin() {}
+	virtual void LockGPU() {}
+	virtual void UnlockGPU() {}
+
 	virtual void CreateDrawContext() {}
 	virtual void DestroyDrawContext() {
 		if (!draw_) {

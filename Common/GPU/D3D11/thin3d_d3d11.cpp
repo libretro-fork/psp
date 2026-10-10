@@ -204,6 +204,7 @@ public:
 	uint64_t GetNativeObject(NativeObject obj, void *srcObject) override;
 
 	void HandleEvent(Event ev, int width, int height, void *param1, void *param2) override;
+	void CreateBackbufferDepth(int width, int height);
 
 	void SetInvalidationCallback(InvalidationCallback callback) override {
 		invalidationCallback_ = callback;
@@ -450,46 +451,33 @@ void D3D11DrawContext::HandleEvent(Event ev, int width, int height, void *param1
 		}
 		bbDepthStencilView_.Reset();
 		bbDepthStencilTex_.Reset();
+		bbRenderTargetView_ = nullptr;
+		bbRenderTargetTex_ = nullptr;
 		curRTWidth_ = 0;
 		curRTHeight_ = 0;
 		break;
 	}
 	case Event::GOT_BACKBUFFER: {
+		// Bound only if the one it replaces was: the frame binds the backbuffer when it draws
+		// to it, and Present() leaves nothing bound. A backbuffer of the same size keeps the
+		// depth buffer, as libretro hands over a new one every frame when it rotates several.
+		bool wasBound = bbRenderTargetView_ && curRenderTargetView_.Get() == bbRenderTargetView_;
+		bool keepDepth = bbDepthStencilView_ && bbWidth_ == width && bbHeight_ == height;
 		bbRenderTargetView_ = (ID3D11RenderTargetView *)param1;
 		bbRenderTargetTex_ = (ID3D11Texture2D *)param2;
 		bbWidth_ = width;
 		bbHeight_ = height;
 
-		// Create matching depth stencil texture. This is not really needed for PPSSPP though,
-		// and probably not for most other renderers either as you're usually rendering to other render targets and
-		// then blitting them with a shader to the screen.
-		D3D11_TEXTURE2D_DESC descDepth{};
-		descDepth.Width = width;
-		descDepth.Height = height;
-		descDepth.MipLevels = 1;
-		descDepth.ArraySize = 1;
-		descDepth.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-		descDepth.SampleDesc.Count = 1;
-		descDepth.SampleDesc.Quality = 0;
-		descDepth.Usage = D3D11_USAGE_DEFAULT;
-		descDepth.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-		descDepth.CPUAccessFlags = 0;
-		descDepth.MiscFlags = 0;
-		HRESULT hr = device_->CreateTexture2D(&descDepth, nullptr, &bbDepthStencilTex_);
-
-		// Create the depth stencil view
-		D3D11_DEPTH_STENCIL_VIEW_DESC descDSV{};
-		descDSV.Format = descDepth.Format;
-		descDSV.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-		descDSV.Texture2D.MipSlice = 0;
-		hr = device_->CreateDepthStencilView(bbDepthStencilTex_.Get(), &descDSV, &bbDepthStencilView_);
-
-		context_->OMSetRenderTargets(1, &bbRenderTargetView_, bbDepthStencilView_.Get());
-
-		curRenderTargetView_ = bbRenderTargetView_;
-		curDepthStencilView_ = bbDepthStencilView_;
-		curRTWidth_ = width;
-		curRTHeight_ = height;
+		if (!keepDepth) {
+			CreateBackbufferDepth(width, height);
+		}
+		if (wasBound) {
+			context_->OMSetRenderTargets(1, &bbRenderTargetView_, bbDepthStencilView_.Get());
+			curRenderTargetView_ = bbRenderTargetView_;
+			curDepthStencilView_ = bbDepthStencilView_;
+			curRTWidth_ = width;
+			curRTHeight_ = height;
+		}
 		break;
 	}
 	case Event::LOST_DEVICE:
@@ -498,6 +486,32 @@ void D3D11DrawContext::HandleEvent(Event ev, int width, int height, void *param1
 	case Event::PRESENTED:
 		break;
 	}
+}
+
+void D3D11DrawContext::CreateBackbufferDepth(int width, int height) {
+	// Create matching depth stencil texture. This is not really needed for PPSSPP though,
+	// and probably not for most other renderers either as you're usually rendering to other render targets and
+	// then blitting them with a shader to the screen.
+	D3D11_TEXTURE2D_DESC descDepth{};
+	descDepth.Width = width;
+	descDepth.Height = height;
+	descDepth.MipLevels = 1;
+	descDepth.ArraySize = 1;
+	descDepth.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+	descDepth.SampleDesc.Count = 1;
+	descDepth.SampleDesc.Quality = 0;
+	descDepth.Usage = D3D11_USAGE_DEFAULT;
+	descDepth.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+	descDepth.CPUAccessFlags = 0;
+	descDepth.MiscFlags = 0;
+	HRESULT hr = device_->CreateTexture2D(&descDepth, nullptr, &bbDepthStencilTex_);
+
+	// Create the depth stencil view
+	D3D11_DEPTH_STENCIL_VIEW_DESC descDSV{};
+	descDSV.Format = descDepth.Format;
+	descDSV.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+	descDSV.Texture2D.MipSlice = 0;
+	hr = device_->CreateDepthStencilView(bbDepthStencilTex_.Get(), &descDSV, &bbDepthStencilView_);
 }
 
 void D3D11DrawContext::EndFrame() {
@@ -1785,6 +1799,10 @@ bool D3D11DrawContext::CopyFramebufferToMemory(Framebuffer *src, Aspect channelB
 
 	if (!packTex)
 		return false;
+
+	if (!fb && !bbRenderTargetTex_) {
+		return false;
+	}
 
 	D3D11_BOX srcBox{ (UINT)bx, (UINT)by, 0, (UINT)(bx + bw), (UINT)(by + bh), 1 };
 	DataFormat srcFormat = DataFormat::UNDEFINED;
